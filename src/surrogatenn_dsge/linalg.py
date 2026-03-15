@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Union
+from typing import Literal, NamedTuple, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -9,6 +9,7 @@ import numpy as np
 from jax import lax
 
 LyapunovAlgorithm = Literal["doubling", "direct"]
+SylvesterAlgorithm = Literal["doubling", "direct"]
 
 
 class LyapunovResult(NamedTuple):
@@ -31,6 +32,32 @@ class LyapunovOutcome:
 class _DoublingState(NamedTuple):
     current: jax.Array
     a_power: jax.Array
+    iterations: jax.Array
+    rel_change: jax.Array
+    done: jax.Array
+
+
+class SylvesterResult(NamedTuple):
+    solution: jax.Array
+    converged: jax.Array
+    iterations: jax.Array
+    relative_residual: jax.Array
+
+
+@dataclass(frozen=True)
+class SylvesterOutcome:
+    solution: jax.Array
+    converged: bool
+    iterations: int
+    relative_residual: float
+    algorithm: SylvesterAlgorithm
+    fallback_used: bool
+
+
+class _SylvesterDoublingState(NamedTuple):
+    current: jax.Array
+    a_power: jax.Array
+    b_power: jax.Array
     iterations: jax.Array
     rel_change: jax.Array
     done: jax.Array
@@ -64,9 +91,59 @@ def _validate_finite_inputs(
         raise ValueError("A and C must contain only finite values.")
 
 
+def _cast_sylvester_inputs(
+    a: Union[jax.Array, np.ndarray],
+    b: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    a_arr = jnp.asarray(a)
+    b_arr = jnp.asarray(b)
+    c_arr = jnp.asarray(c)
+    if a_arr.ndim != 2 or b_arr.ndim != 2 or c_arr.ndim != 2:
+        raise ValueError("A, B, and C must all be rank-2 matrices.")
+    if a_arr.shape[0] != a_arr.shape[1]:
+        raise ValueError(f"A must be square, got shape {a_arr.shape}.")
+    if b_arr.shape[0] != b_arr.shape[1]:
+        raise ValueError(f"B must be square, got shape {b_arr.shape}.")
+    if c_arr.shape != (a_arr.shape[0], b_arr.shape[0]):
+        raise ValueError(
+            "C must have shape (A.shape[0], B.shape[0]), "
+            f"got A={a_arr.shape}, B={b_arr.shape}, C={c_arr.shape}."
+        )
+    dtype = jnp.result_type(a_arr, b_arr, c_arr, jnp.float64)
+    return (
+        jnp.asarray(a_arr, dtype=dtype),
+        jnp.asarray(b_arr, dtype=dtype),
+        jnp.asarray(c_arr, dtype=dtype),
+    )
+
+
+def _validate_finite_sylvester_inputs(
+    a: Union[jax.Array, np.ndarray],
+    b: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+) -> None:
+    a_np = np.asarray(a)
+    b_np = np.asarray(b)
+    c_np = np.asarray(c)
+    if not np.isfinite(a_np).all() or not np.isfinite(b_np).all() or not np.isfinite(c_np).all():
+        raise ValueError("A, B, and C must contain only finite values.")
+
+
 def discrete_lyapunov_residual(a: jax.Array, x: jax.Array, c: jax.Array) -> jax.Array:
     residual = a @ x @ a.T + c - x
     denom = jnp.maximum(jnp.linalg.norm(x), jnp.finfo(x.dtype).eps)
+    return jnp.linalg.norm(residual) / denom
+
+
+def discrete_sylvester_residual(
+    a: jax.Array,
+    x: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+) -> jax.Array:
+    residual = a @ x @ b + c - x
+    denom = jnp.maximum(jnp.maximum(jnp.linalg.norm(x), jnp.linalg.norm(c)), jnp.finfo(x.dtype).eps)
     return jnp.linalg.norm(residual) / denom
 
 
@@ -211,3 +288,212 @@ def solve_lyapunov_equation(
     **kwargs: object,
 ) -> LyapunovOutcome:
     return solve_discrete_lyapunov(a, c, **kwargs)
+
+
+def solve_discrete_sylvester_direct(
+    a: Union[jax.Array, np.ndarray],
+    b: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+    *,
+    initial_guess: Optional[Union[jax.Array, np.ndarray]] = None,
+    acceptance_tol: float = 1e-10,
+) -> SylvesterResult:
+    a_arr, b_arr, c_arr = _cast_sylvester_inputs(a, b, c)
+    if initial_guess is None:
+        guess = jnp.zeros_like(c_arr)
+    else:
+        guess = jnp.asarray(initial_guess, dtype=c_arr.dtype)
+        if guess.shape != c_arr.shape:
+            raise ValueError(
+                f"initial_guess must match C's shape, got {guess.shape} and {c_arr.shape}."
+            )
+
+    residual_rhs = a_arr @ guess @ b_arr + c_arr - guess
+    n, m = c_arr.shape
+    system = jnp.eye(n * m, dtype=a_arr.dtype) - jnp.kron(b_arr.T, a_arr)
+    rhs = jnp.ravel(residual_rhs.T)
+    solution_vec = jnp.linalg.solve(system, rhs)
+    delta = jnp.reshape(solution_vec, (m, n)).T
+    solution = delta + guess
+    rel_residual = discrete_sylvester_residual(a_arr, solution, b_arr, c_arr)
+    converged = rel_residual < acceptance_tol
+    return SylvesterResult(solution, converged, jnp.asarray(0), rel_residual)
+
+
+def solve_discrete_sylvester_doubling(
+    a: Union[jax.Array, np.ndarray],
+    b: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+    *,
+    initial_guess: Optional[Union[jax.Array, np.ndarray]] = None,
+    tol: float = 1e-14,
+    acceptance_tol: float = 1e-10,
+    max_iter: int = 500,
+) -> SylvesterResult:
+    a_arr, b_arr, c_arr = _cast_sylvester_inputs(a, b, c)
+    if initial_guess is None:
+        guess = jnp.zeros_like(c_arr)
+    else:
+        guess = jnp.asarray(initial_guess, dtype=c_arr.dtype)
+        if guess.shape != c_arr.shape:
+            raise ValueError(
+                f"initial_guess must match C's shape, got {guess.shape} and {c_arr.shape}."
+            )
+
+    initial_residual = a_arr @ guess @ b_arr + c_arr - guess
+    tol_arr = jnp.asarray(tol, dtype=a_arr.dtype)
+
+    def body(i: int, state: _SylvesterDoublingState) -> _SylvesterDoublingState:
+        next_current = state.a_power @ state.current @ state.b_power + state.current
+        next_a_power = state.a_power @ state.a_power
+        next_b_power = state.b_power @ state.b_power
+
+        check_now = (i + 1) % 2 == 0
+        norm_current = jnp.linalg.norm(state.current)
+        norm_next = jnp.linalg.norm(next_current)
+        denom = jnp.maximum(norm_current, norm_next)
+        normdiff = jnp.linalg.norm(next_current - state.current)
+        rel_change = jnp.where(denom > 0, normdiff / denom, normdiff)
+        stop_now = jnp.logical_and(
+            jnp.asarray(check_now),
+            jnp.logical_or(~jnp.isfinite(normdiff), rel_change < tol_arr),
+        )
+
+        freeze = jnp.logical_or(state.done, stop_now)
+        current = jnp.where(freeze, state.current, next_current)
+        a_power = jnp.where(freeze, state.a_power, next_a_power)
+        b_power = jnp.where(freeze, state.b_power, next_b_power)
+        iterations = jnp.where(
+            state.done,
+            state.iterations,
+            jnp.where(stop_now, jnp.asarray(i + 1), state.iterations),
+        )
+        rel_change_out = jnp.where(
+            state.done,
+            state.rel_change,
+            jnp.where(jnp.asarray(check_now), rel_change, state.rel_change),
+        )
+        return _SylvesterDoublingState(
+            current=current,
+            a_power=a_power,
+            b_power=b_power,
+            iterations=iterations,
+            rel_change=rel_change_out,
+            done=freeze,
+        )
+
+    init = _SylvesterDoublingState(
+        current=initial_residual,
+        a_power=a_arr,
+        b_power=b_arr,
+        iterations=jnp.asarray(max_iter),
+        rel_change=jnp.asarray(jnp.inf, dtype=a_arr.dtype),
+        done=jnp.asarray(False),
+    )
+    final = lax.fori_loop(0, max_iter, body, init)
+    solution = final.current + guess
+    rel_residual = discrete_sylvester_residual(a_arr, solution, b_arr, c_arr)
+    converged = rel_residual < acceptance_tol
+    return SylvesterResult(solution, converged, final.iterations, rel_residual)
+
+
+def solve_discrete_sylvester(
+    a: Union[jax.Array, np.ndarray],
+    b: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+    *,
+    initial_guess: Optional[Union[jax.Array, np.ndarray]] = None,
+    algorithm: SylvesterAlgorithm = "doubling",
+    tol: float = 1e-14,
+    acceptance_tol: float = 1e-10,
+    max_iter: int = 500,
+    fallback_to_direct: bool = True,
+) -> SylvesterOutcome:
+    if algorithm not in ("doubling", "direct"):
+        raise ValueError(
+            f"Unsupported Sylvester algorithm {algorithm!r}. "
+            "Only 'doubling' and 'direct' are implemented in this port."
+        )
+    a_arr, b_arr, c_arr = _cast_sylvester_inputs(a, b, c)
+    _validate_finite_sylvester_inputs(a_arr, b_arr, c_arr)
+
+    if initial_guess is not None:
+        guess_arr = jnp.asarray(initial_guess, dtype=c_arr.dtype)
+        if guess_arr.shape != c_arr.shape:
+            raise ValueError(
+                f"initial_guess must match C's shape, got {guess_arr.shape} and {c_arr.shape}."
+            )
+        guess_residual = float(
+            np.asarray(
+                discrete_sylvester_residual(
+                    a_arr,
+                    guess_arr,
+                    b_arr,
+                    c_arr,
+                )
+            )
+        )
+        if guess_residual < acceptance_tol:
+            return SylvesterOutcome(
+                solution=guess_arr,
+                converged=True,
+                iterations=0,
+                relative_residual=guess_residual,
+                algorithm=algorithm,
+                fallback_used=False,
+            )
+
+    if algorithm == "doubling":
+        result = solve_discrete_sylvester_doubling(
+            a_arr,
+            b_arr,
+            c_arr,
+            initial_guess=initial_guess,
+            tol=tol,
+            acceptance_tol=acceptance_tol,
+            max_iter=max_iter,
+        )
+    else:
+        result = solve_discrete_sylvester_direct(
+            a_arr,
+            b_arr,
+            c_arr,
+            initial_guess=initial_guess,
+            acceptance_tol=acceptance_tol,
+        )
+
+    algorithm_used: SylvesterAlgorithm = algorithm
+    fallback_used = False
+
+    if fallback_to_direct and algorithm == "doubling" and not bool(np.asarray(result.converged)):
+        direct_result = solve_discrete_sylvester_direct(
+            a_arr,
+            b_arr,
+            c_arr,
+            initial_guess=initial_guess,
+            acceptance_tol=acceptance_tol,
+        )
+        if float(np.asarray(direct_result.relative_residual)) < float(
+            np.asarray(result.relative_residual)
+        ):
+            result = direct_result
+            algorithm_used = "direct"
+            fallback_used = True
+
+    return SylvesterOutcome(
+        solution=result.solution,
+        converged=bool(np.asarray(result.converged)),
+        iterations=int(np.asarray(result.iterations)),
+        relative_residual=float(np.asarray(result.relative_residual)),
+        algorithm=algorithm_used,
+        fallback_used=fallback_used,
+    )
+
+
+def solve_sylvester_equation(
+    a: Union[jax.Array, np.ndarray],
+    b: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+    **kwargs: object,
+) -> SylvesterOutcome:
+    return solve_discrete_sylvester(a, b, c, **kwargs)

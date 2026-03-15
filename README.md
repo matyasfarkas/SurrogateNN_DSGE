@@ -16,6 +16,7 @@ Implemented:
 - discrete Lyapunov solver for `A X A^T + C = X`
 - JAX-native doubling kernel
 - JAX-native dense direct solver fallback
+- discrete Sylvester solver for `A X B + C = X`
 - focused tests for residuals, symmetry, fallback behavior, JIT, and autodiff
 
 Not implemented yet:
@@ -27,4 +28,3 @@ Not implemented yet:
 - regime switching
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).
-
