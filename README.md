@@ -17,6 +17,7 @@ Implemented:
 - JAX-native doubling kernel
 - JAX-native dense direct solver fallback
 - discrete Sylvester solver for `A X B + C = X`
+- linear Gaussian state-space simulation, Kalman likelihood, filtering, and RTS smoothing
 - focused tests for residuals, symmetry, fallback behavior, JIT, and autodiff
 
 Not implemented yet:

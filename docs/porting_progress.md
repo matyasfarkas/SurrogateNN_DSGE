@@ -45,13 +45,29 @@ Python/JAX status:
 - `solve_discrete_sylvester` wrapper implemented with initial-guess fast path and direct fallback
 - tests cover closed form, residuals, initial-guess reuse, fallback behavior, JIT, and autodiff
 
+### 3. Linear Gaussian state-space layer
+
+Julia reference:
+
+- `src/filter/kalman.jl`
+- `test/test_kalman_filter.jl`
+
+Python/JAX status:
+
+- `build_linear_gaussian_state_space` implemented
+- `simulate_linear_gaussian_state_space` implemented
+- `kalman_filter`, `kalman_loglikelihood`, and `kalman_loglikelihood_per_period` implemented
+- `kalman_smoother` implemented with Rauch-Tung-Striebel backward pass
+- tests cover finiteness, deterministic replay, short samples, likelihood ordering, JIT, and autodiff
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
 - The Julia `:bartels_stewart`, `:bicgstab`, `:dqgmres`, and `:gmres` Sylvester variants are not ported yet.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
-- No claim is made yet about feature parity beyond the Lyapunov and Sylvester kernels.
+- The current state-space layer is generic and does not yet ingest a solved DSGE model automatically.
+- No claim is made yet about feature parity beyond the numerical kernels and generic Kalman/state-space layer.
 
 ## Environment note
 
