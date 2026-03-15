@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "surrogatenn-dsge"
+version = "0.1.0"
+description = "A gradual Python/JAX port of MacroModelling-style DSGE tooling."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+  {name = "Matyas Farkas"},
+]
+dependencies = [
+  "jax>=0.4.30,<0.5",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0,<9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/surrogatenn_dsge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
