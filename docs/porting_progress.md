@@ -108,6 +108,23 @@ Python/JAX status:
 - high-level parsed-source first-order solve implemented and tested against the Julia `RBC_CME` fixture
 - tests verify timing metadata, steady state, Jacobian, Hessian, third-order derivatives, first-order solution, and auxiliary-variable expansion
 
+### 7. Second-order perturbation and stochastic steady state
+
+Julia reference:
+
+- `src/perturbation.jl`
+- `src/MacroModelling.jl`
+- `test/test_standalone_function.jl`
+
+Python/JAX status:
+
+- `create_second_order_auxiliary_matrices` implemented with Julia-compatible compression, uncompression, and volatility-routing matrices
+- `solve_second_order_dsge_solution` implemented using the same compressed Sylvester formulation as the Julia code path
+- `solve_second_order_stochastic_steady_state` implemented for standard and pruned second-order solutions
+- `second_order_state_update` and `pruned_second_order_state_update` implemented for direct simulation/IRF use
+- high-level parsed-source second-order solve implemented via `solve_second_order_model`
+- tests verify auxiliary-matrix roundtrips, second-order solution parity on the Julia `RBC_CME` fixture, deterministic second-order and pruned-second-order responses, stochastic steady-state fixed-point behavior, and parsed-model parity versus the low-level fixture path
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -120,7 +137,8 @@ Python/JAX status:
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The current SEP solver is callback-based and generic; it is not yet wired to the parsed model objects or the full Julia tree-layout machinery.
-- Higher-order perturbation solution operators are not ported yet, even though symbolic Hessian and third-order derivative evaluation now exist.
+- Third-order perturbation solution operators are not ported yet, even though symbolic third-order derivative evaluation now exists.
+- The current higher-order port covers second-order perturbation only; third-order perturbation, pruned third-order simulation, and higher-order moment operators remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model first-order path, and generic SEP core.
 
 ## Environment note

@@ -15,7 +15,15 @@ from sympy.parsing.sympy_parser import (
     standard_transformations,
 )
 
-from .dsge import DSGETimings, FirstOrderDSGEResult, solve_first_order_dsge_solution
+from .dsge import (
+    DSGETimings,
+    FirstOrderDSGEResult,
+    SecondOrderDSGEResult,
+    SecondOrderStochasticSteadyStateResult,
+    solve_first_order_dsge_solution,
+    solve_second_order_dsge_solution,
+    solve_second_order_stochastic_steady_state,
+)
 
 _TRANSFORMATIONS = standard_transformations + (
     convert_xor,
@@ -52,6 +60,15 @@ class ParsedModelFirstOrderResult(NamedTuple):
     steady_state: jax.Array
     jacobian: jax.Array
     solution: FirstOrderDSGEResult
+
+
+class ParsedModelSecondOrderResult(NamedTuple):
+    steady_state: jax.Array
+    jacobian: jax.Array
+    hessian: jax.Array
+    first_order_solution: FirstOrderDSGEResult
+    second_order_solution: SecondOrderDSGEResult
+    stochastic_steady_state: SecondOrderStochasticSteadyStateResult
 
 
 @dataclass(frozen=True)
@@ -359,6 +376,76 @@ class MacroModel:
             solution=solution,
         )
 
+    def solve_second_order(
+        self,
+        *,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        pruning: bool = False,
+        sylvester_algorithm: str = "doubling",
+        sylvester_tol: float = 1e-14,
+        sylvester_acceptance_tol: float = 1e-10,
+        sylvester_max_iter: int = 500,
+        stochastic_steady_state_tol: float = 1e-14,
+        stochastic_steady_state_max_iter: int = 100,
+    ) -> ParsedModelSecondOrderResult:
+        if len(self._dynamic_expressions) != self.timings.nVars:
+            raise ValueError(
+                "Second-order solution requires as many dynamic equations as present variables. "
+                f"Got {len(self._dynamic_expressions)} equations and {self.timings.nVars} variables."
+            )
+        if steady_state is None:
+            steady_state_result = self.solve_steady_state(
+                parameter_values=parameter_values,
+                initial_guess=steady_state_initial_guess,
+                tol=steady_state_tol,
+                max_iter=steady_state_max_iter,
+            )
+            full_steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+        else:
+            full_steady_state = self._coerce_full_steady_state(
+                steady_state,
+                parameter_values=parameter_values,
+            )
+        jacobian = self.calculate_jacobian(
+            parameter_values=parameter_values,
+            steady_state=full_steady_state,
+        )
+        hessian = self.calculate_hessian(
+            parameter_values=parameter_values,
+            steady_state=full_steady_state,
+        )
+        first_order_solution = solve_first_order_dsge_solution(jacobian, self.timings)
+        second_order_solution = solve_second_order_dsge_solution(
+            jacobian,
+            hessian,
+            first_order_solution,
+            self.timings,
+            sylvester_algorithm=sylvester_algorithm,
+            sylvester_tol=sylvester_tol,
+            sylvester_acceptance_tol=sylvester_acceptance_tol,
+            sylvester_max_iter=sylvester_max_iter,
+        )
+        stochastic_steady_state = solve_second_order_stochastic_steady_state(
+            first_order_solution,
+            second_order_solution,
+            self.timings,
+            pruning=pruning,
+            tol=stochastic_steady_state_tol,
+            max_iter=stochastic_steady_state_max_iter,
+        )
+        return ParsedModelSecondOrderResult(
+            steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+            jacobian=jacobian,
+            hessian=hessian,
+            first_order_solution=first_order_solution,
+            second_order_solution=second_order_solution,
+            stochastic_steady_state=stochastic_steady_state,
+        )
+
 
 def parse_macro_model(source: str) -> MacroModel:
     model_block = _extract_block(_MODEL_BLOCK_RE, source, "model")
@@ -572,6 +659,38 @@ def solve_first_order_model(
         steady_state_initial_guess=steady_state_initial_guess,
         steady_state_tol=steady_state_tol,
         steady_state_max_iter=steady_state_max_iter,
+    )
+
+
+def solve_second_order_model(
+    model: MacroModel,
+    *,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    pruning: bool = False,
+    sylvester_algorithm: str = "doubling",
+    sylvester_tol: float = 1e-14,
+    sylvester_acceptance_tol: float = 1e-10,
+    sylvester_max_iter: int = 500,
+    stochastic_steady_state_tol: float = 1e-14,
+    stochastic_steady_state_max_iter: int = 100,
+) -> ParsedModelSecondOrderResult:
+    return model.solve_second_order(
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        pruning=pruning,
+        sylvester_algorithm=sylvester_algorithm,
+        sylvester_tol=sylvester_tol,
+        sylvester_acceptance_tol=sylvester_acceptance_tol,
+        sylvester_max_iter=sylvester_max_iter,
+        stochastic_steady_state_tol=stochastic_steady_state_tol,
+        stochastic_steady_state_max_iter=stochastic_steady_state_max_iter,
     )
 
 

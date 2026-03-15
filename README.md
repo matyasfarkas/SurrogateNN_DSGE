@@ -23,12 +23,15 @@ Implemented:
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
 - damped Newton non-stochastic steady-state solver
 - first-order DSGE perturbation solver with Julia `RBC_CME` fixture coverage
+- second-order DSGE perturbation solver with Julia-compatible compression matrices and Sylvester solve
+- second-order stochastic steady-state solver for both standard and pruned second-order updates
+- parsed-model second-order solve path from MacroModelling-style source through symbolic Hessians to the perturbation solution
 - generic callback-based stochastic extended path solver with Gauss-Hermite branching
 - focused tests for residuals, symmetry, fallback behavior, JIT, and autodiff
 
 Not implemented yet:
 
-- higher-order perturbation solvers
+- third-order and higher perturbation solvers
 - calibration equations in `@parameters` blocks
 - MacroModelling programmatic `for`-loop parsing
 - occasionally binding constraint parsing from the Julia macro layer
