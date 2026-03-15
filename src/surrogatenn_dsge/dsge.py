@@ -51,6 +51,37 @@ class SecondOrderStochasticSteadyStateResult(NamedTuple):
     iterations: int
 
 
+class ThirdOrderAuxiliaryMatrices(NamedTuple):
+    compression_matrix: jax.Array
+    uncompression_matrix: jax.Array
+    permutation_matrix: jax.Array
+    swap12_left: jax.Array
+    swap12_right: jax.Array
+    swap23_left_dynamic: jax.Array
+    swap13_left_dynamic: jax.Array
+    swap23_left_state: jax.Array
+    swap13_left_state: jax.Array
+    swap23_right_state: jax.Array
+    swap13_right_state: jax.Array
+
+
+class ThirdOrderDSGEResult(NamedTuple):
+    compressed_solution: jax.Array
+    solution_matrix: jax.Array
+    converged: bool
+    iterations: int
+    relative_residual: float
+    algorithm: str
+    fallback_used: bool
+
+
+class ThirdOrderStochasticSteadyStateResult(NamedTuple):
+    state_vector: jax.Array
+    reduced_state: jax.Array
+    converged: bool
+    iterations: int
+
+
 @dataclass(frozen=True)
 class DSGETimings:
     present_only: tuple[str, ...]
@@ -201,6 +232,81 @@ def _compression_matrices(size: int, dtype: jnp.dtype = jnp.float64) -> tuple[ja
     )
 
 
+def _compression_matrices_order3(
+    size: int,
+    dtype: jnp.dtype = jnp.float64,
+) -> tuple[jax.Array, jax.Array]:
+    compressed_positions: list[int] = []
+    compressed_lookup: dict[int, int] = {}
+    for outer in range(size):
+        for middle in range(outer + 1):
+            for inner in range(middle + 1):
+                flat_index = size * size * outer + size * middle + inner
+                compressed_lookup[flat_index] = len(compressed_positions)
+                compressed_positions.append(flat_index)
+
+    compressed_dim = len(compressed_positions)
+    compression = np.zeros((size**3, compressed_dim), dtype=np.float64)
+    for col, flat_index in enumerate(compressed_positions):
+        compression[flat_index, col] = 1.0
+
+    uncompression = np.zeros((compressed_dim, size**3), dtype=np.float64)
+    full_col = 0
+    for outer in range(size):
+        for middle in range(size):
+            for inner in range(size):
+                sorted_ids = sorted((outer, middle, inner))
+                sorted_flat_index = (
+                    size * size * sorted_ids[2]
+                    + size * sorted_ids[1]
+                    + sorted_ids[0]
+                )
+                compressed_col = compressed_lookup[sorted_flat_index]
+                uncompression[compressed_col, full_col] = 1.0
+                full_col += 1
+
+    return (
+        jnp.asarray(compression, dtype=dtype),
+        jnp.asarray(uncompression, dtype=dtype),
+    )
+
+
+def _order3_permutation_vector(size: int, axes: tuple[int, int, int]) -> np.ndarray:
+    tensor = np.arange(size**3, dtype=np.int32).reshape((size, size, size), order="F")
+    return np.transpose(tensor, axes=tuple(axis - 1 for axis in axes)).reshape(-1, order="F")
+
+
+def _order3_right_permutation_matrix(
+    size: int,
+    axes: tuple[int, int, int],
+    dtype: jnp.dtype = jnp.float64,
+) -> jax.Array:
+    permutation = _order3_permutation_vector(size, axes)
+    return jnp.asarray(np.eye(size**3, dtype=np.float64)[:, permutation], dtype=dtype)
+
+
+def _order3_left_permutation_matrix(
+    size: int,
+    axes: tuple[int, int, int],
+    dtype: jnp.dtype = jnp.float64,
+) -> jax.Array:
+    permutation = _order3_permutation_vector(size, axes)
+    return jnp.asarray(np.eye(size**3, dtype=np.float64)[permutation, :], dtype=dtype)
+
+
+def _order3_summed_permutation_matrix(
+    size: int,
+    axes_list: Sequence[tuple[int, int, int]],
+    dtype: jnp.dtype = jnp.float64,
+) -> jax.Array:
+    matrix = np.zeros((size**3, size**3), dtype=np.float64)
+    identity = np.eye(size**3, dtype=np.float64)
+    for axes in axes_list:
+        permutation = _order3_permutation_vector(size, axes)
+        matrix += identity[:, permutation]
+    return jnp.asarray(matrix, dtype=dtype)
+
+
 def _coerce_first_order_solution_matrix(
     first_order_solution: Union[FirstOrderDSGEResult, jax.Array, np.ndarray],
 ) -> jax.Array:
@@ -226,6 +332,28 @@ def _coerce_second_order_solution_matrix(
     if solution.shape[1] != compressed_cols:
         raise ValueError(
             "second_order_solution must have either the compressed or full Julia-compatible "
+            f"shape, got {solution.shape}."
+        )
+    return solution @ auxiliary_matrices.uncompression_matrix
+
+
+def _coerce_third_order_solution_matrix(
+    third_order_solution: Union[ThirdOrderDSGEResult, jax.Array, np.ndarray],
+    timings: DSGETimings,
+    auxiliary_matrices: Optional[ThirdOrderAuxiliaryMatrices] = None,
+) -> jax.Array:
+    if isinstance(third_order_solution, ThirdOrderDSGEResult):
+        return jnp.asarray(third_order_solution.solution_matrix, dtype=jnp.float64)
+    solution = jnp.asarray(third_order_solution, dtype=jnp.float64)
+    full_cols = (timings.nPast_not_future_and_mixed + 1 + timings.nExo) ** 3
+    if solution.shape[1] == full_cols:
+        return solution
+    if auxiliary_matrices is None:
+        auxiliary_matrices = create_third_order_auxiliary_matrices(timings)
+    compressed_cols = auxiliary_matrices.compression_matrix.shape[1]
+    if solution.shape[1] != compressed_cols:
+        raise ValueError(
+            "third_order_solution must have either the compressed or full Julia-compatible "
             f"shape, got {solution.shape}."
         )
     return solution @ auxiliary_matrices.uncompression_matrix
@@ -286,6 +414,41 @@ def create_second_order_auxiliary_matrices(
         uncompression_matrix=uncompression_matrix,
         hessian_compression_matrix=hessian_compression_matrix,
         hessian_uncompression_matrix=hessian_uncompression_matrix,
+    )
+
+
+def create_third_order_auxiliary_matrices(
+    timings: DSGETimings,
+    *,
+    dtype: jnp.dtype = jnp.float64,
+) -> ThirdOrderAuxiliaryMatrices:
+    state_dim = timings.nPast_not_future_and_mixed + 1 + timings.nExo
+    dynamic_dim = (
+        timings.nPast_not_future_and_mixed
+        + timings.nVars
+        + timings.nFuture_not_past_and_mixed
+        + timings.nExo
+    )
+    compression_matrix, uncompression_matrix = _compression_matrices_order3(
+        state_dim,
+        dtype=dtype,
+    )
+    return ThirdOrderAuxiliaryMatrices(
+        compression_matrix=compression_matrix,
+        uncompression_matrix=uncompression_matrix,
+        permutation_matrix=_order3_summed_permutation_matrix(
+            state_dim,
+            ((3, 1, 2), (1, 3, 2), (1, 2, 3)),
+            dtype=dtype,
+        ),
+        swap12_left=_order3_left_permutation_matrix(state_dim, (2, 1, 3), dtype=dtype),
+        swap12_right=_order3_right_permutation_matrix(state_dim, (2, 1, 3), dtype=dtype),
+        swap23_left_dynamic=_order3_left_permutation_matrix(dynamic_dim, (1, 3, 2), dtype=dtype),
+        swap13_left_dynamic=_order3_left_permutation_matrix(dynamic_dim, (3, 1, 2), dtype=dtype),
+        swap23_left_state=_order3_left_permutation_matrix(state_dim, (1, 3, 2), dtype=dtype),
+        swap13_left_state=_order3_left_permutation_matrix(state_dim, (3, 1, 2), dtype=dtype),
+        swap23_right_state=_order3_right_permutation_matrix(state_dim, (1, 3, 2), dtype=dtype),
+        swap13_right_state=_order3_right_permutation_matrix(state_dim, (3, 1, 2), dtype=dtype),
     )
 
 
@@ -670,6 +833,248 @@ def solve_second_order_dsge_solution(
     )
 
 
+def solve_third_order_dsge_solution(
+    jacobian: Union[jax.Array, np.ndarray],
+    hessian: Union[jax.Array, np.ndarray],
+    third_order_derivatives: Union[jax.Array, np.ndarray],
+    first_order_solution: Union[FirstOrderDSGEResult, jax.Array, np.ndarray],
+    second_order_solution: Union[SecondOrderDSGEResult, jax.Array, np.ndarray],
+    timings: DSGETimings,
+    *,
+    second_order_auxiliary_matrices: Optional[SecondOrderAuxiliaryMatrices] = None,
+    third_order_auxiliary_matrices: Optional[ThirdOrderAuxiliaryMatrices] = None,
+    initial_guess: Optional[Union[jax.Array, np.ndarray]] = None,
+    sylvester_algorithm: str = "doubling",
+    sylvester_tol: float = 1e-14,
+    sylvester_acceptance_tol: float = 1e-10,
+    sylvester_max_iter: int = 500,
+) -> ThirdOrderDSGEResult:
+    grad1 = jnp.asarray(jacobian, dtype=jnp.float64)
+    grad2 = jnp.asarray(hessian, dtype=jnp.float64)
+    grad3 = jnp.asarray(third_order_derivatives, dtype=jnp.float64)
+    first_order_raw = _coerce_first_order_solution_matrix(first_order_solution)
+    if second_order_auxiliary_matrices is None:
+        second_order_auxiliary_matrices = create_second_order_auxiliary_matrices(
+            timings,
+            dtype=grad1.dtype,
+        )
+    if third_order_auxiliary_matrices is None:
+        third_order_auxiliary_matrices = create_third_order_auxiliary_matrices(
+            timings,
+            dtype=grad1.dtype,
+        )
+    second_order_full = _coerce_second_order_solution_matrix(
+        second_order_solution,
+        timings,
+        auxiliary_matrices=second_order_auxiliary_matrices,
+    )
+
+    dynamic_dim = (
+        timings.nFuture_not_past_and_mixed
+        + timings.nVars
+        + timings.nPast_not_future_and_mixed
+        + timings.nExo
+    )
+    n = timings.nVars
+    n_minus = timings.nPast_not_future_and_mixed
+    n_plus = timings.nFuture_not_past_and_mixed
+    n_exo = timings.nExo
+    state_dim = n_minus + 1 + n_exo
+    expected_first_order_shape = (n, n_minus + n_exo)
+    if grad1.shape != (n, dynamic_dim):
+        raise ValueError(
+            f"jacobian must have shape ({n}, {dynamic_dim}), got {grad1.shape}."
+        )
+    if grad2.shape != (n, dynamic_dim * dynamic_dim):
+        raise ValueError(
+            f"hessian must have shape ({n}, {dynamic_dim * dynamic_dim}), got {grad2.shape}."
+        )
+    if grad3.shape != (n, dynamic_dim**3):
+        raise ValueError(
+            f"third_order_derivatives must have shape ({n}, {dynamic_dim ** 3}), got {grad3.shape}."
+        )
+    if first_order_raw.shape != expected_first_order_shape:
+        raise ValueError(
+            "first_order_solution must have shape "
+            f"{expected_first_order_shape}, got {first_order_raw.shape}."
+        )
+    if second_order_full.shape != (n, state_dim**2):
+        raise ValueError(
+            f"second_order_solution must have shape ({n}, {state_dim ** 2}), got {second_order_full.shape}."
+        )
+
+    i_plus = np.asarray(timings.future_not_past_and_mixed_idx, dtype=np.int32)
+    i_minus = np.asarray(timings.past_not_future_and_mixed_idx, dtype=np.int32)
+    identity_n = jnp.eye(n, dtype=grad1.dtype)
+    first_order_augmented = _augmented_first_order_solution(first_order_raw, timings)
+    state_transition = jnp.concatenate(
+        [
+            first_order_augmented[i_minus, :],
+            jnp.concatenate(
+                [
+                    jnp.zeros((n_exo + 1, n_minus), dtype=grad1.dtype),
+                    jnp.eye(n_exo + 1, dtype=grad1.dtype)[:, :1],
+                    jnp.zeros((n_exo + 1, n_exo), dtype=grad1.dtype),
+                ],
+                axis=1,
+            ),
+        ],
+        axis=0,
+    )
+    state_and_shock_rows = np.asarray(
+        tuple(range(n_minus)) + tuple(range(n_minus + 1, state_dim)),
+        dtype=np.int32,
+    )
+    stacked = jnp.concatenate(
+        [
+            (first_order_augmented @ state_transition)[i_plus, :],
+            first_order_augmented,
+            jnp.eye(state_dim, dtype=grad1.dtype)[state_and_shock_rows, :],
+        ],
+        axis=0,
+    )
+    first_order_plus_zero = jnp.concatenate(
+        [
+            first_order_augmented[i_plus, :],
+            jnp.zeros((n_minus + n + n_exo, state_dim), dtype=grad1.dtype),
+        ],
+        axis=0,
+    )
+    reduced_second_order = jnp.concatenate(
+        [
+            second_order_full[i_minus, :],
+            jnp.zeros((n_exo + 1, state_dim**2), dtype=grad1.dtype),
+        ],
+        axis=0,
+    )
+    second_order_mixed = jnp.concatenate(
+        [
+            (
+                second_order_full @ jnp.kron(state_transition, state_transition)
+                + first_order_augmented @ reduced_second_order
+            )[i_plus, :],
+            second_order_full,
+            jnp.zeros((n_minus + n_exo, state_dim**2), dtype=grad1.dtype),
+        ],
+        axis=0,
+    )
+    second_order_plus_zero = jnp.concatenate(
+        [
+            second_order_full[i_plus, :],
+            jnp.zeros((n_minus + n + n_exo, state_dim**2), dtype=grad1.dtype),
+        ],
+        axis=0,
+    )
+
+    m_matrix = (
+        -grad1[:, :n_plus]
+        @ first_order_augmented[i_plus, :n_minus]
+        @ identity_n[i_minus, :]
+        - grad1[:, n_plus : n_plus + n]
+    )
+    rhs_a = grad1[:, :n_plus] @ identity_n[i_plus, :]
+
+    try:
+        a_matrix = jnp.linalg.solve(m_matrix, rhs_a)
+    except Exception as exc:
+        raise ValueError("Third-order solve failed while inverting the linearized system.") from exc
+
+    tmpkron_b = jnp.kron(state_transition, second_order_auxiliary_matrices.sigma)
+    b_full = (
+        tmpkron_b
+        + third_order_auxiliary_matrices.swap23_left_state
+        @ tmpkron_b
+        @ third_order_auxiliary_matrices.swap23_right_state
+        + third_order_auxiliary_matrices.swap13_left_state
+        @ tmpkron_b
+        @ third_order_auxiliary_matrices.swap13_right_state
+    )
+    b_matrix = (
+        third_order_auxiliary_matrices.uncompression_matrix
+        @ b_full
+        @ third_order_auxiliary_matrices.compression_matrix
+        + third_order_auxiliary_matrices.uncompression_matrix
+        @ jnp.kron(state_transition, jnp.kron(state_transition, state_transition))
+        @ third_order_auxiliary_matrices.compression_matrix
+    )
+
+    sigma_kron = jnp.kron(first_order_plus_zero, first_order_plus_zero) @ second_order_auxiliary_matrices.sigma
+    grad3_sigma = jnp.kron(stacked, sigma_kron)
+    x3 = (
+        grad3 @ grad3_sigma
+        + grad3
+        @ third_order_auxiliary_matrices.swap23_left_dynamic
+        @ grad3_sigma
+        @ third_order_auxiliary_matrices.swap23_right_state
+        + grad3
+        @ third_order_auxiliary_matrices.swap13_left_dynamic
+        @ grad3_sigma
+        @ third_order_auxiliary_matrices.swap13_right_state
+    )
+
+    tmpkron1 = jnp.kron(first_order_plus_zero, second_order_plus_zero)
+    tmpkron2 = jnp.kron(second_order_auxiliary_matrices.sigma, state_transition)
+    out2 = grad2 @ tmpkron1 @ tmpkron2
+    out2 = (
+        out2
+        + grad2
+        @ tmpkron1
+        @ third_order_auxiliary_matrices.swap12_left
+        @ tmpkron2
+        @ third_order_auxiliary_matrices.swap12_right
+        + grad2 @ jnp.kron(stacked, second_order_mixed)
+        + grad2 @ jnp.kron(stacked, second_order_plus_zero @ second_order_auxiliary_matrices.sigma)
+        + (grad1[:, :n_plus] @ identity_n[i_plus, :])
+        @ second_order_full
+        @ jnp.kron(state_transition, reduced_second_order)
+    )
+    x3 = (x3 + out2 @ third_order_auxiliary_matrices.permutation_matrix) @ third_order_auxiliary_matrices.compression_matrix
+    x3 = x3 + grad3 @ jnp.kron(stacked, jnp.kron(stacked, stacked)) @ third_order_auxiliary_matrices.compression_matrix
+
+    try:
+        c_matrix = jnp.linalg.solve(m_matrix, x3)
+    except Exception as exc:
+        raise ValueError("Third-order solve failed while assembling the Sylvester right-hand side.") from exc
+
+    compressed_guess = None
+    if initial_guess is not None:
+        guess = jnp.asarray(initial_guess, dtype=grad1.dtype)
+        compressed_cols = third_order_auxiliary_matrices.compression_matrix.shape[1]
+        full_cols = state_dim**3
+        if guess.shape == (n, full_cols):
+            compressed_guess = guess @ third_order_auxiliary_matrices.compression_matrix
+        elif guess.shape == (n, compressed_cols):
+            compressed_guess = guess
+        else:
+            raise ValueError(
+                "initial_guess must match either the compressed or full third-order shape, "
+                f"got {guess.shape}."
+            )
+
+    sylvester_outcome = solve_discrete_sylvester(
+        a_matrix,
+        b_matrix,
+        c_matrix,
+        initial_guess=compressed_guess,
+        algorithm=sylvester_algorithm,
+        tol=sylvester_tol,
+        acceptance_tol=sylvester_acceptance_tol,
+        max_iter=sylvester_max_iter,
+    )
+    solution_matrix = (
+        sylvester_outcome.solution @ third_order_auxiliary_matrices.uncompression_matrix
+    )
+    return ThirdOrderDSGEResult(
+        compressed_solution=sylvester_outcome.solution,
+        solution_matrix=solution_matrix,
+        converged=sylvester_outcome.converged,
+        iterations=sylvester_outcome.iterations,
+        relative_residual=sylvester_outcome.relative_residual,
+        algorithm=sylvester_outcome.algorithm,
+        fallback_used=sylvester_outcome.fallback_used,
+    )
+
+
 def solve_second_order_stochastic_steady_state(
     first_order_solution: Union[FirstOrderDSGEResult, jax.Array, np.ndarray],
     second_order_solution: Union[SecondOrderDSGEResult, jax.Array, np.ndarray],
@@ -843,6 +1248,183 @@ def solve_second_order_stochastic_steady_state(
     )
 
 
+def solve_third_order_stochastic_steady_state(
+    first_order_solution: Union[FirstOrderDSGEResult, jax.Array, np.ndarray],
+    second_order_solution: Union[SecondOrderDSGEResult, jax.Array, np.ndarray],
+    third_order_solution: Union[ThirdOrderDSGEResult, jax.Array, np.ndarray],
+    timings: DSGETimings,
+    *,
+    pruning: bool = False,
+    second_order_auxiliary_matrices: Optional[SecondOrderAuxiliaryMatrices] = None,
+    third_order_auxiliary_matrices: Optional[ThirdOrderAuxiliaryMatrices] = None,
+    initial_guess: Optional[Union[jax.Array, np.ndarray]] = None,
+    tol: float = 1e-14,
+    max_iter: int = 100,
+) -> ThirdOrderStochasticSteadyStateResult:
+    first_order_raw = _coerce_first_order_solution_matrix(first_order_solution)
+    first_order_augmented = _augmented_first_order_solution(first_order_raw, timings)
+    if second_order_auxiliary_matrices is None:
+        second_order_auxiliary_matrices = create_second_order_auxiliary_matrices(
+            timings,
+            dtype=first_order_augmented.dtype,
+        )
+    if third_order_auxiliary_matrices is None:
+        third_order_auxiliary_matrices = create_third_order_auxiliary_matrices(
+            timings,
+            dtype=first_order_augmented.dtype,
+        )
+    second_order_full = _coerce_second_order_solution_matrix(
+        second_order_solution,
+        timings,
+        auxiliary_matrices=second_order_auxiliary_matrices,
+    )
+    third_order_full = _coerce_third_order_solution_matrix(
+        third_order_solution,
+        timings,
+        auxiliary_matrices=third_order_auxiliary_matrices,
+    )
+
+    n = timings.nVars
+    n_minus = timings.nPast_not_future_and_mixed
+    n_exo = timings.nExo
+    i_minus = np.asarray(timings.past_not_future_and_mixed_idx, dtype=np.int32)
+    dtype = first_order_augmented.dtype
+
+    if second_order_full.shape != (n, (n_minus + 1 + n_exo) ** 2):
+        raise ValueError(
+            "second_order_solution must have shape "
+            f"({n}, {(n_minus + 1 + n_exo) ** 2}), got {second_order_full.shape}."
+        )
+    if third_order_full.shape != (n, (n_minus + 1 + n_exo) ** 3):
+        raise ValueError(
+            "third_order_solution must have shape "
+            f"({n}, {(n_minus + 1 + n_exo) ** 3}), got {third_order_full.shape}."
+        )
+
+    aug_state = jnp.concatenate(
+        [
+            jnp.zeros(n_minus, dtype=dtype),
+            jnp.ones(1, dtype=dtype),
+            jnp.zeros(n_exo, dtype=dtype),
+        ]
+    )
+    initial_linear_system = jnp.eye(n_minus, dtype=dtype) - first_order_augmented[i_minus, :n_minus]
+    initial_rhs = (second_order_full @ jnp.kron(aug_state, aug_state) / 2.0)[i_minus]
+    try:
+        default_initial_state = jnp.linalg.solve(initial_linear_system, initial_rhs)
+    except Exception as exc:
+        raise ValueError(
+            "Third-order stochastic steady-state solve failed while forming the initial guess."
+        ) from exc
+
+    if initial_guess is None:
+        reduced_state = default_initial_state
+    else:
+        guess = jnp.asarray(initial_guess, dtype=dtype)
+        if guess.shape == (n_minus,):
+            reduced_state = guess
+        elif guess.shape == (n,):
+            reduced_state = guess[i_minus]
+        else:
+            raise ValueError(
+                "initial_guess must have shape "
+                f"({n_minus},) or ({n},), got {guess.shape}."
+            )
+
+    zero_shock = jnp.zeros(n_exo, dtype=dtype)
+    if pruning:
+        state_vector = (
+            first_order_augmented[:, :n_minus] @ reduced_state
+            + second_order_full @ jnp.kron(aug_state, aug_state) / 2.0
+        )
+        return ThirdOrderStochasticSteadyStateResult(
+            state_vector=state_vector,
+            reduced_state=reduced_state,
+            converged=True,
+            iterations=0,
+        )
+
+    state_plus_mask = np.concatenate(
+        [np.ones(n_minus + 1, dtype=bool), np.zeros(n_exo, dtype=bool)]
+    )
+    state_only_mask = np.concatenate(
+        [np.ones(n_minus, dtype=bool), np.zeros(n_exo + 1, dtype=bool)]
+    )
+    kron_splus_s = np.kron(state_plus_mask, state_only_mask)
+    kron_splus_splus = np.kron(state_plus_mask, state_plus_mask)
+    kron_splus_splus_splus = np.kron(state_plus_mask, kron_splus_splus)
+    kron_s_splus_splus = np.kron(kron_splus_splus, state_only_mask)
+
+    reduced_transition = first_order_augmented[i_minus, :n_minus]
+    reduced_second_order_jacobian = second_order_full[i_minus][:, np.flatnonzero(kron_splus_s)]
+    reduced_second_order_constant = second_order_full[i_minus][:, np.flatnonzero(kron_splus_splus)]
+    reduced_third_order_jacobian = third_order_full[i_minus][:, np.flatnonzero(kron_s_splus_splus)]
+    reduced_third_order_constant = third_order_full[i_minus][:, np.flatnonzero(kron_splus_splus_splus)]
+
+    converged = False
+    iterations = max_iter
+    identity_reduced = jnp.eye(n_minus, dtype=dtype)
+
+    for iteration in range(1, max_iter + 1):
+        augmented_state = jnp.concatenate([reduced_state, jnp.ones(1, dtype=dtype)])
+        kron_state_identity = jnp.kron(augmented_state[:, None], identity_reduced)
+        kron_pair = jnp.kron(augmented_state, augmented_state)
+        kron_pair_identity = jnp.kron(kron_pair[:, None], identity_reduced)
+        mapped_state = (
+            reduced_transition @ reduced_state
+            + reduced_second_order_constant @ kron_pair / 2.0
+            + reduced_third_order_constant
+            @ jnp.kron(augmented_state, kron_pair)
+            / 6.0
+        )
+        jacobian = (
+            reduced_transition
+            + reduced_second_order_jacobian @ kron_state_identity
+            + reduced_third_order_jacobian @ kron_pair_identity / 2.0
+            - identity_reduced
+        )
+        try:
+            delta = jnp.linalg.solve(jacobian, mapped_state - reduced_state)
+        except Exception as exc:
+            raise ValueError("Third-order stochastic steady-state Newton step failed.") from exc
+
+        if iteration > 5 and bool(
+            np.asarray(jnp.allclose(mapped_state, reduced_state, rtol=tol, atol=0.0))
+        ):
+            converged = True
+            iterations = iteration
+            break
+
+        reduced_state = reduced_state - delta
+
+    augmented_state = jnp.concatenate([reduced_state, jnp.ones(1, dtype=dtype)])
+    kron_pair = jnp.kron(augmented_state, augmented_state)
+    full_second_order_constant = second_order_full[:, np.flatnonzero(kron_splus_splus)]
+    full_third_order_constant = third_order_full[:, np.flatnonzero(kron_splus_splus_splus)]
+    state_vector = (
+        first_order_augmented[:, :n_minus] @ reduced_state
+        + full_second_order_constant @ kron_pair / 2.0
+        + full_third_order_constant @ jnp.kron(augmented_state, kron_pair) / 6.0
+    )
+    fixed_point = third_order_state_update(
+        state_vector,
+        zero_shock,
+        first_order_raw,
+        second_order_full,
+        third_order_full,
+        timings,
+    )
+    converged = converged or bool(
+        np.asarray(jnp.allclose(fixed_point, state_vector, rtol=tol, atol=0.0))
+    )
+    return ThirdOrderStochasticSteadyStateResult(
+        state_vector=state_vector,
+        reduced_state=reduced_state,
+        converged=converged,
+        iterations=iterations,
+    )
+
+
 def second_order_state_update(
     state: Union[jax.Array, np.ndarray],
     shock: Union[jax.Array, np.ndarray],
@@ -937,6 +1519,144 @@ def pruned_second_order_state_update(
         / 2.0
     )
     return linear_component, quadratic_component
+
+
+def third_order_state_update(
+    state: Union[jax.Array, np.ndarray],
+    shock: Union[jax.Array, np.ndarray],
+    first_order_solution: Union[FirstOrderDSGEResult, jax.Array, np.ndarray],
+    second_order_solution: Union[SecondOrderDSGEResult, jax.Array, np.ndarray],
+    third_order_solution: Union[ThirdOrderDSGEResult, jax.Array, np.ndarray],
+    timings: DSGETimings,
+    *,
+    second_order_auxiliary_matrices: Optional[SecondOrderAuxiliaryMatrices] = None,
+    third_order_auxiliary_matrices: Optional[ThirdOrderAuxiliaryMatrices] = None,
+) -> jax.Array:
+    state_arr = jnp.asarray(state, dtype=jnp.float64)
+    shock_arr = jnp.asarray(shock, dtype=jnp.float64)
+    if state_arr.shape != (timings.nVars,):
+        raise ValueError(
+            f"state must have shape ({timings.nVars},), got {state_arr.shape}."
+        )
+    if shock_arr.shape != (timings.nExo,):
+        raise ValueError(
+            f"shock must have shape ({timings.nExo},), got {shock_arr.shape}."
+        )
+
+    first_order_augmented = _augmented_first_order_solution(first_order_solution, timings)
+    second_order_full = _coerce_second_order_solution_matrix(
+        second_order_solution,
+        timings,
+        auxiliary_matrices=second_order_auxiliary_matrices,
+    )
+    third_order_full = _coerce_third_order_solution_matrix(
+        third_order_solution,
+        timings,
+        auxiliary_matrices=third_order_auxiliary_matrices,
+    )
+    reduced_state = jnp.take(
+        state_arr,
+        jnp.asarray(timings.past_not_future_and_mixed_idx, dtype=jnp.int32),
+    )
+    augmented_state = jnp.concatenate(
+        [reduced_state, jnp.ones(1, dtype=state_arr.dtype), shock_arr]
+    )
+    kron_pair = jnp.kron(augmented_state, augmented_state)
+    return (
+        first_order_augmented @ augmented_state
+        + second_order_full @ kron_pair / 2.0
+        + third_order_full @ jnp.kron(kron_pair, augmented_state) / 6.0
+    )
+
+
+def pruned_third_order_state_update(
+    pruned_states: Sequence[Union[jax.Array, np.ndarray]],
+    shock: Union[jax.Array, np.ndarray],
+    first_order_solution: Union[FirstOrderDSGEResult, jax.Array, np.ndarray],
+    second_order_solution: Union[SecondOrderDSGEResult, jax.Array, np.ndarray],
+    third_order_solution: Union[ThirdOrderDSGEResult, jax.Array, np.ndarray],
+    timings: DSGETimings,
+    *,
+    second_order_auxiliary_matrices: Optional[SecondOrderAuxiliaryMatrices] = None,
+    third_order_auxiliary_matrices: Optional[ThirdOrderAuxiliaryMatrices] = None,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    if len(pruned_states) != 3:
+        raise ValueError(
+            f"pruned_states must contain exactly 3 state vectors, got {len(pruned_states)}."
+        )
+    linear_state = jnp.asarray(pruned_states[0], dtype=jnp.float64)
+    quadratic_state = jnp.asarray(pruned_states[1], dtype=jnp.float64)
+    cubic_state = jnp.asarray(pruned_states[2], dtype=jnp.float64)
+    shock_arr = jnp.asarray(shock, dtype=jnp.float64)
+    if (
+        linear_state.shape != (timings.nVars,)
+        or quadratic_state.shape != (timings.nVars,)
+        or cubic_state.shape != (timings.nVars,)
+    ):
+        raise ValueError(
+            "Each entry in pruned_states must have shape "
+            f"({timings.nVars},)."
+        )
+    if shock_arr.shape != (timings.nExo,):
+        raise ValueError(
+            f"shock must have shape ({timings.nExo},), got {shock_arr.shape}."
+        )
+
+    first_order_augmented = _augmented_first_order_solution(first_order_solution, timings)
+    second_order_full = _coerce_second_order_solution_matrix(
+        second_order_solution,
+        timings,
+        auxiliary_matrices=second_order_auxiliary_matrices,
+    )
+    third_order_full = _coerce_third_order_solution_matrix(
+        third_order_solution,
+        timings,
+        auxiliary_matrices=third_order_auxiliary_matrices,
+    )
+    state_idx = jnp.asarray(timings.past_not_future_and_mixed_idx, dtype=jnp.int32)
+    augmented_linear_state = jnp.concatenate(
+        [
+            jnp.take(linear_state, state_idx),
+            jnp.ones(1, dtype=linear_state.dtype),
+            shock_arr,
+        ]
+    )
+    augmented_linear_no_constant = jnp.concatenate(
+        [
+            jnp.take(linear_state, state_idx),
+            jnp.zeros(1, dtype=linear_state.dtype),
+            shock_arr,
+        ]
+    )
+    augmented_quadratic_state = jnp.concatenate(
+        [
+            jnp.take(quadratic_state, state_idx),
+            jnp.zeros(1, dtype=quadratic_state.dtype),
+            jnp.zeros_like(shock_arr),
+        ]
+    )
+    augmented_cubic_state = jnp.concatenate(
+        [
+            jnp.take(cubic_state, state_idx),
+            jnp.zeros(1, dtype=cubic_state.dtype),
+            jnp.zeros_like(shock_arr),
+        ]
+    )
+    kron_linear = jnp.kron(augmented_linear_state, augmented_linear_state)
+    linear_component = first_order_augmented @ augmented_linear_state
+    quadratic_component = (
+        first_order_augmented @ augmented_quadratic_state
+        + second_order_full @ kron_linear / 2.0
+    )
+    cubic_component = (
+        first_order_augmented @ augmented_cubic_state
+        + second_order_full
+        @ jnp.kron(augmented_linear_no_constant, augmented_quadratic_state)
+        + third_order_full
+        @ jnp.kron(kron_linear, augmented_linear_state)
+        / 6.0
+    )
+    return linear_component, quadratic_component, cubic_component
 
 
 def linear_state_space_from_first_order_solution(

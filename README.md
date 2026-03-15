@@ -26,12 +26,15 @@ Implemented:
 - second-order DSGE perturbation solver with Julia-compatible compression matrices and Sylvester solve
 - second-order stochastic steady-state solver for both standard and pruned second-order updates
 - parsed-model second-order solve path from MacroModelling-style source through symbolic Hessians to the perturbation solution
+- third-order DSGE perturbation solver with Julia-compatible tensor compression/permutation machinery and Sylvester solve
+- third-order stochastic steady-state solver for standard third-order solutions plus pruned third-order state updates
+- parsed-model third-order solve path from MacroModelling-style source through symbolic third derivatives to the perturbation solution
 - generic callback-based stochastic extended path solver with Gauss-Hermite branching
 - focused tests for residuals, symmetry, fallback behavior, JIT, and autodiff
 
 Not implemented yet:
 
-- third-order and higher perturbation solvers
+- perturbation orders above third
 - calibration equations in `@parameters` blocks
 - MacroModelling programmatic `for`-loop parsing
 - occasionally binding constraint parsing from the Julia macro layer
