@@ -18,14 +18,17 @@ Implemented:
 - JAX-native dense direct solver fallback
 - discrete Sylvester solver for `A X B + C = X`
 - linear Gaussian state-space simulation, Kalman likelihood, filtering, and RTS smoothing
+- quadratic matrix equation doubling solver
+- first-order DSGE perturbation solver with Julia `RBC_CME` fixture coverage
+- generic callback-based stochastic extended path solver with Gauss-Hermite branching
 - focused tests for residuals, symmetry, fallback behavior, JIT, and autodiff
 
 Not implemented yet:
 
 - model parser/macros
-- perturbation solvers
-- filtering
-- estimation
+- higher-order perturbation solvers
+- MacroModelling-style model-to-Jacobian plumbing
+- full SEP integration with symbolic model objects
 - regime switching
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).

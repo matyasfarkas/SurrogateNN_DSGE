@@ -154,20 +154,30 @@ def simulate_linear_gaussian_state_space(
     model: LinearGaussianStateSpace,
     key: jax.Array,
     num_periods: int,
+    *,
+    sampling_jitter: float = 1e-10,
 ) -> StateSpaceSimulation:
     state_dim = model.transition_matrix.shape[0]
     obs_dim = model.observation_matrix.shape[0]
     process_key, observation_key = jax.random.split(key)
+    process_cov = model.process_noise_covariance + sampling_jitter * jnp.eye(
+        state_dim,
+        dtype=model.transition_matrix.dtype,
+    )
+    observation_cov = model.observation_noise_covariance + sampling_jitter * jnp.eye(
+        obs_dim,
+        dtype=model.transition_matrix.dtype,
+    )
     process_noise = jax.random.multivariate_normal(
         process_key,
         mean=jnp.zeros((state_dim,), dtype=model.transition_matrix.dtype),
-        cov=model.process_noise_covariance,
+        cov=process_cov,
         shape=(num_periods,),
     )
     observation_noise = jax.random.multivariate_normal(
         observation_key,
         mean=jnp.zeros((obs_dim,), dtype=model.transition_matrix.dtype),
-        cov=model.observation_noise_covariance,
+        cov=observation_cov,
         shape=(num_periods,),
     )
 

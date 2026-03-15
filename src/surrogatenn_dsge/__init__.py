@@ -18,6 +18,21 @@ from .linalg import (
     solve_lyapunov_equation,
     solve_sylvester_equation,
 )
+from .dsge import (
+    DSGETimings,
+    FirstOrderDSGEResult,
+    QuadraticMatrixEquationResult,
+    linear_state_space_from_first_order_solution,
+    quadratic_matrix_equation_residual,
+    solve_first_order_dsge_solution,
+    solve_quadratic_matrix_equation_doubling,
+)
+from .sep import (
+    SEPConfig,
+    SEPSolution,
+    gauss_hermite_rule,
+    solve_stochastic_extended_path,
+)
 from .statespace import (
     KalmanFilterResult,
     KalmanSmootherResult,
@@ -32,28 +47,39 @@ from .statespace import (
 )
 
 __all__ = [
+    "DSGETimings",
+    "FirstOrderDSGEResult",
     "KalmanFilterResult",
     "KalmanSmootherResult",
     "LinearGaussianStateSpace",
     "LyapunovOutcome",
     "LyapunovResult",
+    "QuadraticMatrixEquationResult",
+    "SEPConfig",
+    "SEPSolution",
     "StateSpaceSimulation",
     "build_linear_gaussian_state_space",
     "SylvesterOutcome",
     "SylvesterResult",
     "discrete_lyapunov_residual",
     "discrete_sylvester_residual",
+    "gauss_hermite_rule",
     "kalman_filter",
     "kalman_loglikelihood",
     "kalman_loglikelihood_per_period",
     "kalman_smoother",
+    "linear_state_space_from_first_order_solution",
+    "quadratic_matrix_equation_residual",
     "simulate_linear_gaussian_state_space",
+    "solve_first_order_dsge_solution",
     "solve_discrete_lyapunov",
     "solve_discrete_lyapunov_direct",
     "solve_discrete_lyapunov_doubling",
     "solve_discrete_sylvester",
     "solve_discrete_sylvester_direct",
     "solve_discrete_sylvester_doubling",
+    "solve_quadratic_matrix_equation_doubling",
+    "solve_stochastic_extended_path",
     "solve_lyapunov_equation",
     "solve_sylvester_equation",
 ]
