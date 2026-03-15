@@ -19,15 +19,19 @@ Implemented:
 - discrete Sylvester solver for `A X B + C = X`
 - linear Gaussian state-space simulation, Kalman likelihood, filtering, and RTS smoothing
 - quadratic matrix equation doubling solver
+- MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
+- symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
+- damped Newton non-stochastic steady-state solver
 - first-order DSGE perturbation solver with Julia `RBC_CME` fixture coverage
 - generic callback-based stochastic extended path solver with Gauss-Hermite branching
 - focused tests for residuals, symmetry, fallback behavior, JIT, and autodiff
 
 Not implemented yet:
 
-- model parser/macros
 - higher-order perturbation solvers
-- MacroModelling-style model-to-Jacobian plumbing
+- calibration equations in `@parameters` blocks
+- MacroModelling programmatic `for`-loop parsing
+- occasionally binding constraint parsing from the Julia macro layer
 - full SEP integration with symbolic model objects
 - regime switching
 

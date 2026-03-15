@@ -14,6 +14,7 @@ authors = [
 ]
 dependencies = [
   "jax>=0.4.30,<0.5",
+  "sympy>=1.13,<2",
 ]
 
 [project.optional-dependencies]
@@ -26,4 +27,3 @@ packages = ["src/surrogatenn_dsge"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

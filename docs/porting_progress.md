@@ -89,6 +89,25 @@ Python/JAX status:
 - `solve_stochastic_extended_path` implemented for callback-based residuals with Gauss-Hermite branching
 - tests cover quadrature normalization, zero-shock linear solutions, deterministic-vs-stochastic mean-path equivalence for zero-mean shocks, and a nonlinear expectational toy model
 
+### 6. MacroModelling-style parser, symbolic derivatives, and high-level first-order solve
+
+Julia reference:
+
+- `src/macros.jl`
+- `src/structures.jl`
+- `test/models/RBC_CME.jl`
+- `test/test_standalone_function.jl`
+
+Python/JAX status:
+
+- `parse_macro_model` implemented for `@model ... begin ... end` and `@parameters ... begin ... end` source blocks
+- core MacroModelling timing syntax implemented: endogenous `[-k, 0, +k]`, steady-state `[ss]`, and shock tags `[x]`, `[x+k]`, `[x-k]`
+- automatic auxiliary lead/lag expansion implemented for larger endogenous leads/lags and shifted shocks
+- symbolic Jacobian, Hessian, and third-order derivative evaluation implemented with Julia-compatible compressed column ordering
+- damped Newton non-stochastic steady-state solver implemented for parsed models
+- high-level parsed-source first-order solve implemented and tested against the Julia `RBC_CME` fixture
+- tests verify timing metadata, steady state, Jacobian, Hessian, third-order derivatives, first-order solution, and auxiliary-variable expansion
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -96,9 +115,13 @@ Python/JAX status:
 - The Julia QME `:schur` variant is not ported yet; the Python port currently uses the doubling solver.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
-- The current first-order DSGE solver is a low-level port that expects precomputed Jacobians and timing metadata; model parsing and automatic Jacobian generation are not ported yet.
-- The current SEP solver is callback-based and generic; it is not yet wired to MacroModelling-style symbolic model objects or the full Julia tree-layout machinery.
-- No claim is made yet about feature parity beyond the numerical kernels, generic Kalman/state-space layer, low-level first-order solver, and generic SEP core.
+- The current parsed front end does not yet port calibration equations in `@parameters` blocks.
+- The current parsed front end does not yet port programmatic `for`-loop model generation.
+- The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
+- Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
+- The current SEP solver is callback-based and generic; it is not yet wired to the parsed model objects or the full Julia tree-layout machinery.
+- Higher-order perturbation solution operators are not ported yet, even though symbolic Hessian and third-order derivative evaluation now exist.
+- No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model first-order path, and generic SEP core.
 
 ## Environment note
 
