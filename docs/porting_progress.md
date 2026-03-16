@@ -142,6 +142,24 @@ Python/JAX status:
 - high-level parsed-source third-order solve implemented via `solve_third_order_model`
 - tests verify auxiliary-matrix roundtrips, third-order solution parity on the Julia `RBC_CME` fixture, deterministic third-order and pruned-third-order responses, third-order stochastic steady-state fixed-point behavior, and parsed-model parity versus the low-level fixture path
 
+### 9. Parameter definitions, calibration equations, and calibrated parsed-model solves
+
+Julia reference:
+
+- `src/macros.jl`
+- `src/get_functions.jl`
+- `test/models/RBC_CME_calibration_equations.jl`
+- `test/models/RBC_CME_calibration_equations_and_parameter_definitions.jl`
+
+Python/JAX status:
+
+- `@parameters` parsing now supports order-independent parameter definitions as a solved system rather than only sequential numeric assignments
+- calibration equations now support both MacroModelling forms: `par | lhs = rhs` and `lhs = rhs | par`
+- parsed models now expose `resolve_parameter_values` to recover consistent parameter vectors from either default parameter guesses or a supplied steady state
+- `solve_steady_state` now solves the full non-stochastic steady state together with calibrated parameters when calibration equations are present
+- high-level parsed first-order solves now propagate resolved calibrated parameters through Jacobian evaluation and the perturbation solution
+- tests verify out-of-order parameter definitions, end-target calibration syntax, Julia-fixture parity for `RBC_CME` calibration equations plus parameter definitions, and JAX JIT/device accessibility on calibrated first-order state-space outputs
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -149,8 +167,8 @@ Python/JAX status:
 - The Julia QME `:schur` variant is not ported yet; the Python port currently uses the doubling solver.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
-- The current parsed front end does not yet port calibration equations in `@parameters` blocks.
 - The current parsed front end does not yet port programmatic `for`-loop model generation.
+- The current parsed front end does not yet port parameter bounds and other non-equation `@parameters` directives from the Julia macro layer.
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The current SEP solver is callback-based and generic; it is not yet wired to the parsed model objects or the full Julia tree-layout machinery.

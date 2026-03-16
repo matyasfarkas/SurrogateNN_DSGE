@@ -55,6 +55,7 @@ _IDENTIFIER_RE = re.compile(r"\b(?!\d)\w+\b", re.UNICODE)
 class SteadyStateResult(NamedTuple):
     steady_state: jax.Array
     base_steady_state: jax.Array
+    parameter_values: jax.Array
     converged: bool
     iterations: int
     residual_norm: float
@@ -62,12 +63,14 @@ class SteadyStateResult(NamedTuple):
 
 class ParsedModelFirstOrderResult(NamedTuple):
     steady_state: jax.Array
+    parameter_values: jax.Array
     jacobian: jax.Array
     solution: FirstOrderDSGEResult
 
 
 class ParsedModelSecondOrderResult(NamedTuple):
     steady_state: jax.Array
+    parameter_values: jax.Array
     jacobian: jax.Array
     hessian: jax.Array
     first_order_solution: FirstOrderDSGEResult
@@ -77,6 +80,7 @@ class ParsedModelSecondOrderResult(NamedTuple):
 
 class ParsedModelThirdOrderResult(NamedTuple):
     steady_state: jax.Array
+    parameter_values: jax.Array
     jacobian: jax.Array
     hessian: jax.Array
     third_order_derivatives: jax.Array
@@ -86,12 +90,20 @@ class ParsedModelThirdOrderResult(NamedTuple):
     stochastic_steady_state: ThirdOrderStochasticSteadyStateResult
 
 
+class ParsedParameterBlock(NamedTuple):
+    target_names: tuple[str, ...]
+    calibrated_target_names: tuple[str, ...]
+    equation_texts: tuple[str, ...]
+    initial_values: dict[str, float]
+
+
 @dataclass(frozen=True)
 class MacroModel:
     name: str
     equations: tuple[str, ...]
     parameter_names: tuple[str, ...]
     parameter_values: jax.Array
+    calibrated_parameter_names: tuple[str, ...]
     timings: DSGETimings
     steady_state_names: tuple[str, ...]
     steady_state_reference_names: tuple[str, ...]
@@ -104,6 +116,12 @@ class MacroModel:
     _dynamic_input_symbols: tuple[sp.Symbol, ...]
     _steady_state_fn: object
     _steady_state_jacobian_fn: object
+    _steady_state_parameter_jacobian_fn: object
+    _parameter_equations_depend_on_steady_state: bool
+    _parameter_equation_fn: object
+    _parameter_equation_jacobian_fn: object
+    _joint_steady_state_fn: object
+    _joint_steady_state_jacobian_fn: object
     _dynamic_jacobian_fn: object
     _dynamic_hessian_fn: object
     _dynamic_third_order_fn: object
@@ -173,6 +191,22 @@ class MacroModel:
             raise ValueError(f"Could not expand steady state value for `{name}`.")
         return full
 
+    def _extract_base_steady_state(
+        self,
+        full_steady_state: Sequence[float],
+    ) -> np.ndarray:
+        full = np.asarray(full_steady_state, dtype=np.float64)
+        if full.shape != (self.timings.nVars,):
+            raise ValueError(
+                "full_steady_state must have shape "
+                f"({self.timings.nVars},), got {full.shape}."
+            )
+        lookup = dict(zip(self.timings.var, full))
+        return np.asarray(
+            [lookup[name] for name in self.steady_state_names],
+            dtype=np.float64,
+        )
+
     def _coerce_full_steady_state(
         self,
         steady_state: Optional[Sequence[float]],
@@ -208,6 +242,94 @@ class MacroModel:
             raise ValueError(f"Missing steady-state reference value for `{name}`.")
         return refs
 
+    def resolve_parameter_values(
+        self,
+        *,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        tol: float = 1e-12,
+        max_iter: int = 100,
+        line_search_min_step: float = 2.0**-16,
+    ) -> jax.Array:
+        parameters = self._coerce_parameter_values(parameter_values)
+
+        if len(self.parameter_names) == 0:
+            return jnp.asarray(parameters, dtype=jnp.float64)
+
+        if steady_state is None:
+            if self._parameter_equations_depend_on_steady_state:
+                raise ValueError(
+                    "Resolving parameter values requires `steady_state` when the "
+                    "`@parameters` block contains calibration equations."
+                )
+            base_steady_state = np.ones(len(self.steady_state_names), dtype=np.float64)
+            residual_fns = (
+                lambda x: np.asarray(
+                    self._parameter_equation_fn(*base_steady_state, *x),
+                    dtype=np.float64,
+                ).reshape(-1),
+            )
+            jacobian_fns = (
+                lambda x: np.asarray(
+                    self._parameter_equation_jacobian_fn(*base_steady_state, *x),
+                    dtype=np.float64,
+                ),
+            )
+        else:
+            state = np.asarray(steady_state, dtype=np.float64)
+            if state.shape == (len(self.steady_state_names),):
+                base_steady_state = state
+            elif state.shape == (self.timings.nVars,):
+                base_steady_state = self._extract_base_steady_state(state)
+            else:
+                raise ValueError(
+                    "steady_state must have shape "
+                    f"({len(self.steady_state_names)},) or ({self.timings.nVars},), got {state.shape}."
+                )
+            residual_fns = (
+                lambda x: np.concatenate(
+                    [
+                        np.asarray(
+                            self._steady_state_fn(*base_steady_state, *x),
+                            dtype=np.float64,
+                        ).reshape(-1),
+                        np.asarray(
+                            self._parameter_equation_fn(*base_steady_state, *x),
+                            dtype=np.float64,
+                        ).reshape(-1),
+                    ]
+                ),
+            )
+            jacobian_fns = (
+                lambda x: np.concatenate(
+                    [
+                        np.asarray(
+                            self._steady_state_parameter_jacobian_fn(
+                                *base_steady_state,
+                                *x,
+                            ),
+                            dtype=np.float64,
+                        ),
+                        np.asarray(
+                            self._parameter_equation_jacobian_fn(*base_steady_state, *x),
+                            dtype=np.float64,
+                        ),
+                    ],
+                    axis=0,
+                ),
+            )
+
+        resolved, _, _, _ = _solve_newton_system(
+            parameters,
+            residual_fn=residual_fns[0],
+            jacobian_fn=jacobian_fns[0],
+            tol=tol,
+            max_iter=max_iter,
+            line_search_min_step=line_search_min_step,
+            nonfinite_message="Initial parameter guess produced non-finite residuals.",
+        )
+        return jnp.asarray(resolved, dtype=jnp.float64)
+
     def solve_steady_state(
         self,
         *,
@@ -217,83 +339,83 @@ class MacroModel:
         max_iter: int = 100,
         line_search_min_step: float = 2.0**-16,
     ) -> SteadyStateResult:
-        parameters = self._coerce_parameter_values(parameter_values)
         guess = self._coerce_steady_state_guess(initial_guess)
+        initial_parameters = self._coerce_parameter_values(parameter_values)
 
-        def residual_fn(x: np.ndarray) -> np.ndarray:
-            return np.asarray(self._steady_state_fn(*x, *parameters), dtype=np.float64).reshape(-1)
+        if self._parameter_equations_depend_on_steady_state:
+            joint_initial = np.concatenate([guess, initial_parameters])
 
-        def jacobian_fn(x: np.ndarray) -> np.ndarray:
-            return np.asarray(
-                self._steady_state_jacobian_fn(*x, *parameters),
+            def residual_fn(x: np.ndarray) -> np.ndarray:
+                return np.asarray(
+                    self._joint_steady_state_fn(*x),
+                    dtype=np.float64,
+                ).reshape(-1)
+
+            def jacobian_fn(x: np.ndarray) -> np.ndarray:
+                return np.asarray(
+                    self._joint_steady_state_jacobian_fn(*x),
+                    dtype=np.float64,
+                )
+
+            solution, converged, iterations, residual_norm = _solve_newton_system(
+                joint_initial,
+                residual_fn=residual_fn,
+                jacobian_fn=jacobian_fn,
+                tol=tol,
+                max_iter=max_iter,
+                line_search_min_step=line_search_min_step,
+                nonfinite_message="Initial steady-state guess produced non-finite residuals.",
+            )
+            base_steady_state = solution[: len(self.steady_state_names)]
+            resolved_parameters = solution[len(self.steady_state_names) :]
+        else:
+            resolved_parameters = np.asarray(
+                self.resolve_parameter_values(
+                    parameter_values=parameter_values,
+                    tol=tol,
+                    max_iter=max_iter,
+                    line_search_min_step=line_search_min_step,
+                ),
                 dtype=np.float64,
             )
 
-        x = guess
-        residual = residual_fn(x)
-        residual_norm = float(np.linalg.norm(residual, ord=np.inf))
-        if not np.isfinite(residual_norm):
-            raise ValueError("Initial steady-state guess produced non-finite residuals.")
+            def residual_fn(x: np.ndarray) -> np.ndarray:
+                return np.asarray(
+                    self._steady_state_fn(*x, *resolved_parameters),
+                    dtype=np.float64,
+                ).reshape(-1)
 
-        for iteration in range(1, max_iter + 1):
-            if residual_norm < tol:
-                full = self._expand_to_full_steady_state(x)
-                return SteadyStateResult(
-                    steady_state=jnp.asarray(full, dtype=jnp.float64),
-                    base_steady_state=jnp.asarray(x, dtype=jnp.float64),
-                    converged=True,
-                    iterations=iteration - 1,
-                    residual_norm=residual_norm,
+            def jacobian_fn(x: np.ndarray) -> np.ndarray:
+                return np.asarray(
+                    self._steady_state_jacobian_fn(*x, *resolved_parameters),
+                    dtype=np.float64,
                 )
 
-            jacobian = jacobian_fn(x)
-            try:
-                direction = np.linalg.solve(jacobian, -residual)
-            except np.linalg.LinAlgError:
-                direction, *_ = np.linalg.lstsq(jacobian, -residual, rcond=None)
+            base_steady_state, converged, iterations, residual_norm = _solve_newton_system(
+                guess,
+                residual_fn=residual_fn,
+                jacobian_fn=jacobian_fn,
+                tol=tol,
+                max_iter=max_iter,
+                line_search_min_step=line_search_min_step,
+                nonfinite_message="Initial steady-state guess produced non-finite residuals.",
+            )
 
-            step = 1.0
-            accepted = False
-            while step >= line_search_min_step:
-                candidate = x + step * direction
-                if np.isfinite(candidate).all():
-                    candidate_residual = residual_fn(candidate)
-                    candidate_norm = float(np.linalg.norm(candidate_residual, ord=np.inf))
-                    if np.isfinite(candidate_norm) and candidate_norm < residual_norm:
-                        x = candidate
-                        residual = candidate_residual
-                        residual_norm = candidate_norm
-                        accepted = True
-                        break
-                step *= 0.5
-
-            if not accepted:
-                x = x + direction
-                residual = residual_fn(x)
-                residual_norm = float(np.linalg.norm(residual, ord=np.inf))
-                if not np.isfinite(residual_norm):
-                    break
-
-        full = self._expand_to_full_steady_state(x)
+        full = self._expand_to_full_steady_state(base_steady_state)
         return SteadyStateResult(
             steady_state=jnp.asarray(full, dtype=jnp.float64),
-            base_steady_state=jnp.asarray(x, dtype=jnp.float64),
-            converged=residual_norm < tol,
-            iterations=max_iter,
+            base_steady_state=jnp.asarray(base_steady_state, dtype=jnp.float64),
+            parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
+            converged=converged,
+            iterations=iterations,
             residual_norm=residual_norm,
         )
 
     def _dynamic_evaluation_args(
         self,
-        *,
-        parameter_values: Optional[Sequence[float]] = None,
-        steady_state: Optional[Sequence[float]] = None,
+        full_steady_state: np.ndarray,
+        parameter_values: np.ndarray,
     ) -> list[float]:
-        parameters = self._coerce_parameter_values(parameter_values)
-        full_steady_state = self._coerce_full_steady_state(
-            steady_state,
-            parameter_values=parameter_values,
-        )
         steady_refs = self._steady_reference_values(full_steady_state)
         full_lookup = dict(zip(self.timings.var, full_steady_state))
         args: list[float] = []
@@ -305,7 +427,7 @@ class MacroModel:
             args.append(float(full_lookup[name]))
         args.extend([0.0] * self.timings.nExo)
         args.extend(float(x) for x in steady_refs)
-        args.extend(float(x) for x in parameters)
+        args.extend(float(x) for x in parameter_values)
         return args
 
     def calculate_jacobian(
@@ -314,11 +436,27 @@ class MacroModel:
         parameter_values: Optional[Sequence[float]] = None,
         steady_state: Optional[Sequence[float]] = None,
     ) -> jax.Array:
+        if steady_state is None:
+            steady_state_result = self.solve_steady_state(parameter_values=parameter_values)
+            full_steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
+        else:
+            full_steady_state = self._coerce_full_steady_state(steady_state)
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
+            )
         values = np.asarray(
-            self._dynamic_jacobian_fn(*self._dynamic_evaluation_args(
-                parameter_values=parameter_values,
-                steady_state=steady_state,
-            )),
+            self._dynamic_jacobian_fn(
+                *self._dynamic_evaluation_args(full_steady_state, resolved_parameters)
+            ),
             dtype=np.float64,
         )
         return jnp.asarray(values, dtype=jnp.float64)
@@ -329,11 +467,27 @@ class MacroModel:
         parameter_values: Optional[Sequence[float]] = None,
         steady_state: Optional[Sequence[float]] = None,
     ) -> jax.Array:
+        if steady_state is None:
+            steady_state_result = self.solve_steady_state(parameter_values=parameter_values)
+            full_steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
+        else:
+            full_steady_state = self._coerce_full_steady_state(steady_state)
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
+            )
         values = np.asarray(
-            self._dynamic_hessian_fn(*self._dynamic_evaluation_args(
-                parameter_values=parameter_values,
-                steady_state=steady_state,
-            )),
+            self._dynamic_hessian_fn(
+                *self._dynamic_evaluation_args(full_steady_state, resolved_parameters)
+            ),
             dtype=np.float64,
         )
         return jnp.asarray(values, dtype=jnp.float64)
@@ -344,11 +498,27 @@ class MacroModel:
         parameter_values: Optional[Sequence[float]] = None,
         steady_state: Optional[Sequence[float]] = None,
     ) -> jax.Array:
+        if steady_state is None:
+            steady_state_result = self.solve_steady_state(parameter_values=parameter_values)
+            full_steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
+        else:
+            full_steady_state = self._coerce_full_steady_state(steady_state)
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
+            )
         values = np.asarray(
-            self._dynamic_third_order_fn(*self._dynamic_evaluation_args(
-                parameter_values=parameter_values,
-                steady_state=steady_state,
-            )),
+            self._dynamic_third_order_fn(
+                *self._dynamic_evaluation_args(full_steady_state, resolved_parameters)
+            ),
             dtype=np.float64,
         )
         return jnp.asarray(values, dtype=jnp.float64)
@@ -375,18 +545,28 @@ class MacroModel:
                 max_iter=steady_state_max_iter,
             )
             full_steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
         else:
-            full_steady_state = self._coerce_full_steady_state(
-                steady_state,
-                parameter_values=parameter_values,
+            full_steady_state = self._coerce_full_steady_state(steady_state)
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
             )
         jacobian = self.calculate_jacobian(
-            parameter_values=parameter_values,
+            parameter_values=resolved_parameters,
             steady_state=full_steady_state,
         )
         solution = solve_first_order_dsge_solution(jacobian, self.timings)
         return ParsedModelFirstOrderResult(
             steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+            parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
             jacobian=jacobian,
             solution=solution,
         )
@@ -420,17 +600,26 @@ class MacroModel:
                 max_iter=steady_state_max_iter,
             )
             full_steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
         else:
-            full_steady_state = self._coerce_full_steady_state(
-                steady_state,
-                parameter_values=parameter_values,
+            full_steady_state = self._coerce_full_steady_state(steady_state)
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
             )
         jacobian = self.calculate_jacobian(
-            parameter_values=parameter_values,
+            parameter_values=resolved_parameters,
             steady_state=full_steady_state,
         )
         hessian = self.calculate_hessian(
-            parameter_values=parameter_values,
+            parameter_values=resolved_parameters,
             steady_state=full_steady_state,
         )
         first_order_solution = solve_first_order_dsge_solution(jacobian, self.timings)
@@ -454,6 +643,7 @@ class MacroModel:
         )
         return ParsedModelSecondOrderResult(
             steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+            parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
             jacobian=jacobian,
             hessian=hessian,
             first_order_solution=first_order_solution,
@@ -490,21 +680,30 @@ class MacroModel:
                 max_iter=steady_state_max_iter,
             )
             full_steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
         else:
-            full_steady_state = self._coerce_full_steady_state(
-                steady_state,
-                parameter_values=parameter_values,
+            full_steady_state = self._coerce_full_steady_state(steady_state)
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
             )
         jacobian = self.calculate_jacobian(
-            parameter_values=parameter_values,
+            parameter_values=resolved_parameters,
             steady_state=full_steady_state,
         )
         hessian = self.calculate_hessian(
-            parameter_values=parameter_values,
+            parameter_values=resolved_parameters,
             steady_state=full_steady_state,
         )
         third_order_derivatives = self.calculate_third_order_derivatives(
-            parameter_values=parameter_values,
+            parameter_values=resolved_parameters,
             steady_state=full_steady_state,
         )
         first_order_solution = solve_first_order_dsge_solution(jacobian, self.timings)
@@ -541,6 +740,7 @@ class MacroModel:
         )
         return ParsedModelThirdOrderResult(
             steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+            parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
             jacobian=jacobian,
             hessian=hessian,
             third_order_derivatives=third_order_derivatives,
@@ -592,23 +792,34 @@ def parse_macro_model(source: str) -> MacroModel:
             )
         )
 
+    parsed_parameter_block = _parse_parameter_block(
+        parameter_block["body"],
+        timed_symbols,
+        timed_metadata,
+        exogenous_names,
+    )
     timings = _build_timings(timed_metadata)
     parameter_names = tuple(
         sorted(
             _extract_parameter_names(
-                dynamic_texts + steady_state_texts,
+                dynamic_texts
+                + steady_state_texts
+                + list(parsed_parameter_block.equation_texts),
                 timed_symbols,
             )
         )
     )
-    parameter_defaults = _parse_parameter_defaults(parameter_block["body"])
-    missing = [name for name in parameter_names if name not in parameter_defaults]
+    missing = [
+        name
+        for name in parameter_names
+        if name not in parsed_parameter_block.target_names
+    ]
     if missing:
         raise ValueError(
             "Missing parameter assignments for: " + ", ".join(sorted(missing))
         )
     parameter_values = jnp.asarray(
-        [parameter_defaults[name] for name in parameter_names],
+        [parsed_parameter_block.initial_values.get(name, 1.0) for name in parameter_names],
         dtype=jnp.float64,
     )
 
@@ -623,6 +834,10 @@ def parse_macro_model(source: str) -> MacroModel:
     steady_state_exprs = tuple(
         parse_expr(text, local_dict=parse_locals, transformations=_TRANSFORMATIONS)
         for text in steady_state_texts
+    )
+    parameter_exprs = tuple(
+        parse_expr(text, local_dict=parse_locals, transformations=_TRANSFORMATIONS)
+        for text in parsed_parameter_block.equation_texts
     )
 
     steady_state_names = tuple(
@@ -656,6 +871,9 @@ def parse_macro_model(source: str) -> MacroModel:
 
     steady_matrix = sp.Matrix(steady_state_exprs)
     steady_jacobian = steady_matrix.jacobian(steady_state_symbols)
+    steady_parameter_jacobian = steady_matrix.jacobian(parameter_symbols)
+    parameter_matrix = sp.Matrix(parameter_exprs)
+    parameter_jacobian = parameter_matrix.jacobian(parameter_symbols)
     dynamic_matrix = sp.Matrix(dynamic_exprs)
     dynamic_jacobian = dynamic_matrix.jacobian(dynamic_symbols)
     dynamic_hessian = sp.Matrix(
@@ -664,12 +882,22 @@ def parse_macro_model(source: str) -> MacroModel:
     dynamic_third = sp.Matrix(
         [_flatten_third_order(expr, dynamic_symbols) for expr in dynamic_exprs]
     )
+    joint_unknown_symbols = tuple(list(steady_state_symbols) + list(parameter_symbols))
+    joint_matrix = sp.Matrix(list(steady_state_exprs) + list(parameter_exprs))
+    joint_jacobian = joint_matrix.jacobian(joint_unknown_symbols)
+    parameter_equations_depend_on_steady_state = any(
+        bool(expr.free_symbols & set(steady_state_symbols))
+        for expr in parameter_exprs
+    )
 
     return MacroModel(
         name=model_block["name"],
         equations=equations,
         parameter_names=parameter_names,
         parameter_values=parameter_values,
+        calibrated_parameter_names=tuple(
+            sorted(parsed_parameter_block.calibrated_target_names)
+        ),
         timings=timings,
         steady_state_names=steady_state_names,
         steady_state_reference_names=steady_state_reference_names,
@@ -690,6 +918,32 @@ def parse_macro_model(source: str) -> MacroModel:
             steady_jacobian,
             modules="numpy",
         ),
+        _steady_state_parameter_jacobian_fn=sp.lambdify(
+            list(steady_state_symbols) + list(parameter_symbols),
+            steady_parameter_jacobian,
+            modules="numpy",
+        ),
+        _parameter_equations_depend_on_steady_state=parameter_equations_depend_on_steady_state,
+        _parameter_equation_fn=sp.lambdify(
+            list(steady_state_symbols) + list(parameter_symbols),
+            parameter_matrix,
+            modules="numpy",
+        ),
+        _parameter_equation_jacobian_fn=sp.lambdify(
+            list(steady_state_symbols) + list(parameter_symbols),
+            parameter_jacobian,
+            modules="numpy",
+        ),
+        _joint_steady_state_fn=sp.lambdify(
+            joint_unknown_symbols,
+            joint_matrix,
+            modules="numpy",
+        ),
+        _joint_steady_state_jacobian_fn=sp.lambdify(
+            joint_unknown_symbols,
+            joint_jacobian,
+            modules="numpy",
+        ),
         _dynamic_jacobian_fn=sp.lambdify(dynamic_input_symbols, dynamic_jacobian, modules="numpy"),
         _dynamic_hessian_fn=sp.lambdify(dynamic_input_symbols, dynamic_hessian, modules="numpy"),
         _dynamic_third_order_fn=sp.lambdify(dynamic_input_symbols, dynamic_third, modules="numpy"),
@@ -707,6 +961,22 @@ def solve_steady_state(
     return model.solve_steady_state(
         parameter_values=parameter_values,
         initial_guess=initial_guess,
+        tol=tol,
+        max_iter=max_iter,
+    )
+
+
+def resolve_parameter_values(
+    model: MacroModel,
+    *,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    tol: float = 1e-12,
+    max_iter: int = 100,
+) -> jax.Array:
+    return model.resolve_parameter_values(
+        parameter_values=parameter_values,
+        steady_state=steady_state,
         tol=tol,
         max_iter=max_iter,
     )
@@ -828,6 +1098,60 @@ def solve_third_order_model(
         stochastic_steady_state_tol=stochastic_steady_state_tol,
         stochastic_steady_state_max_iter=stochastic_steady_state_max_iter,
     )
+
+
+def _solve_newton_system(
+    initial: Sequence[float],
+    *,
+    residual_fn: object,
+    jacobian_fn: object,
+    tol: float,
+    max_iter: int,
+    line_search_min_step: float,
+    nonfinite_message: str,
+) -> tuple[np.ndarray, bool, int, float]:
+    x = np.asarray(initial, dtype=np.float64)
+    residual = np.asarray(residual_fn(x), dtype=np.float64).reshape(-1)
+    residual_norm = float(np.linalg.norm(residual, ord=np.inf))
+    if not np.isfinite(residual_norm):
+        raise ValueError(nonfinite_message)
+
+    for iteration in range(1, max_iter + 1):
+        if residual_norm < tol:
+            return x, True, iteration - 1, residual_norm
+
+        jacobian = np.asarray(jacobian_fn(x), dtype=np.float64)
+        try:
+            direction = np.linalg.solve(jacobian, -residual)
+        except np.linalg.LinAlgError:
+            direction, *_ = np.linalg.lstsq(jacobian, -residual, rcond=None)
+
+        step = 1.0
+        accepted = False
+        while step >= line_search_min_step:
+            candidate = x + step * direction
+            if np.isfinite(candidate).all():
+                candidate_residual = np.asarray(
+                    residual_fn(candidate),
+                    dtype=np.float64,
+                ).reshape(-1)
+                candidate_norm = float(np.linalg.norm(candidate_residual, ord=np.inf))
+                if np.isfinite(candidate_norm) and candidate_norm < residual_norm:
+                    x = candidate
+                    residual = candidate_residual
+                    residual_norm = candidate_norm
+                    accepted = True
+                    break
+            step *= 0.5
+
+        if not accepted:
+            x = x + direction
+            residual = np.asarray(residual_fn(x), dtype=np.float64).reshape(-1)
+            residual_norm = float(np.linalg.norm(residual, ord=np.inf))
+            if not np.isfinite(residual_norm):
+                break
+
+    return x, residual_norm < tol, max_iter, residual_norm
 
 
 def _extract_block(
@@ -1180,27 +1504,172 @@ def _extract_parameter_names(
     return parameters
 
 
-def _parse_parameter_defaults(body: str) -> dict[str, float]:
-    assignments = {}
-    environment: dict[str, float] = {}
+def _parse_parameter_block(
+    body: str,
+    timed_symbols: dict[str, sp.Symbol],
+    timed_metadata: dict[str, tuple[str, str, int]],
+    exogenous_names: set[str],
+) -> ParsedParameterBlock:
+    target_names: list[str] = []
+    calibrated_target_names: list[str] = []
+    equation_texts: list[str] = []
+    direct_definition_texts: dict[str, str] = {}
+    seen_targets: set[str] = set()
+
     for line in _split_body_lines(body):
-        if "|" in line:
-            raise NotImplementedError(
-                "Calibration equations in `@parameters` blocks are not ported yet."
-            )
         if "=" not in line:
             continue
-        name, expr = line.split("=", 1)
-        parameter_name = name.strip()
-        value = parse_expr(
-            expr.strip(),
-            local_dict={**environment, **_function_locals()},
-            transformations=_TRANSFORMATIONS,
+        (
+            target_name,
+            calibrated_target_name,
+            equation_text,
+            direct_definition_text,
+        ) = _parse_parameter_line(
+            line,
+            timed_symbols,
+            timed_metadata,
+            exogenous_names,
         )
-        numeric_value = float(value)
-        environment[parameter_name] = numeric_value
-        assignments[parameter_name] = numeric_value
-    return assignments
+        if target_name in seen_targets:
+            raise ValueError(f"Parameter `{target_name}` is defined more than once.")
+        seen_targets.add(target_name)
+        target_names.append(target_name)
+        equation_texts.append(equation_text)
+        if calibrated_target_name is not None:
+            calibrated_target_names.append(calibrated_target_name)
+        if direct_definition_text is not None:
+            direct_definition_texts[target_name] = direct_definition_text
+
+    return ParsedParameterBlock(
+        target_names=tuple(target_names),
+        calibrated_target_names=tuple(calibrated_target_names),
+        equation_texts=tuple(equation_texts),
+        initial_values=_initial_parameter_guesses(target_names, direct_definition_texts),
+    )
+
+
+def _parse_parameter_line(
+    line: str,
+    timed_symbols: dict[str, sp.Symbol],
+    timed_metadata: dict[str, tuple[str, str, int]],
+    exogenous_names: set[str],
+) -> tuple[str, Optional[str], str, Optional[str]]:
+    lhs_text, rhs_text = (part.strip() for part in line.split("=", 1))
+    if "|" in lhs_text:
+        target_text, equation_lhs = (part.strip() for part in lhs_text.split("|", 1))
+        target_name = _validate_parameter_target(target_text)
+        transformed_lhs = _transform_parameter_expression(
+            equation_lhs,
+            timed_symbols,
+            timed_metadata,
+            exogenous_names,
+        )
+        transformed_rhs = _transform_parameter_expression(
+            rhs_text,
+            timed_symbols,
+            timed_metadata,
+            exogenous_names,
+        )
+        return (
+            target_name,
+            target_name,
+            f"({transformed_lhs}) - ({transformed_rhs})",
+            None,
+        )
+    if "|" in rhs_text:
+        equation_rhs, target_text = (part.strip() for part in rhs_text.rsplit("|", 1))
+        target_name = _validate_parameter_target(target_text)
+        transformed_lhs = _transform_parameter_expression(
+            lhs_text,
+            timed_symbols,
+            timed_metadata,
+            exogenous_names,
+        )
+        transformed_rhs = _transform_parameter_expression(
+            equation_rhs,
+            timed_symbols,
+            timed_metadata,
+            exogenous_names,
+        )
+        return (
+            target_name,
+            target_name,
+            f"({transformed_lhs}) - ({transformed_rhs})",
+            None,
+        )
+
+    target_name = _validate_parameter_target(lhs_text)
+    transformed_rhs = _transform_parameter_expression(
+        rhs_text,
+        timed_symbols,
+        timed_metadata,
+        exogenous_names,
+    )
+    return (
+        target_name,
+        None,
+        f"({target_name}) - ({transformed_rhs})",
+        rhs_text,
+    )
+
+
+def _validate_parameter_target(target_text: str) -> str:
+    if not re.fullmatch(r"(?!\d)\w+", target_text):
+        raise ValueError(
+            "Parameter targets in `@parameters` must be plain identifiers, "
+            f"got `{target_text}`."
+        )
+    return target_text
+
+
+def _transform_parameter_expression(
+    expr_text: str,
+    timed_symbols: dict[str, sp.Symbol],
+    timed_metadata: dict[str, tuple[str, str, int]],
+    exogenous_names: set[str],
+) -> str:
+    def replace(match: re.Match[str]) -> str:
+        base_name = match.group("name").strip()
+        kind, _ = _parse_reference_index(match.group("index"))
+        if kind == "steady":
+            return _register_steady_state_token(base_name, timed_symbols, timed_metadata)
+        if kind == "exo":
+            exogenous_names.add(base_name)
+            return "0"
+        raise ValueError(
+            "Expressions in `@parameters` may only use steady-state references "
+            f"like `{base_name}[ss]`, got `{match.group(0)}`."
+        )
+
+    return _REFERENCE_RE.sub(replace, expr_text)
+
+
+def _initial_parameter_guesses(
+    target_names: Sequence[str],
+    direct_definition_texts: Mapping[str, str],
+) -> dict[str, float]:
+    environment: dict[str, float] = {}
+    unresolved = dict(direct_definition_texts)
+
+    progress = True
+    while progress and unresolved:
+        progress = False
+        for name in list(unresolved):
+            try:
+                value = parse_expr(
+                    unresolved[name],
+                    local_dict={**environment, **_function_locals()},
+                    transformations=_TRANSFORMATIONS,
+                )
+                numeric_value = float(value)
+            except Exception:
+                continue
+            if np.isfinite(numeric_value):
+                environment[name] = numeric_value
+                del unresolved[name]
+                progress = True
+
+    return {name: environment.get(name, 1.0) for name in target_names}
 
 
 def _flatten_hessian(expr: sp.Expr, symbols: Sequence[sp.Symbol]) -> list[sp.Expr]:

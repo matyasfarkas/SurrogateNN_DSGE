@@ -20,8 +20,11 @@ Implemented:
 - linear Gaussian state-space simulation, Kalman likelihood, filtering, and RTS smoothing
 - quadratic matrix equation doubling solver
 - MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
+- order-independent parameter definitions in `@parameters` blocks
+- calibration equations in `@parameters` blocks, including both `par | lhs = rhs` and `lhs = rhs | par` forms
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
 - damped Newton non-stochastic steady-state solver
+- calibrated-parameter resolution from either the joint steady-state solve or a supplied steady state
 - first-order DSGE perturbation solver with Julia `RBC_CME` fixture coverage
 - second-order DSGE perturbation solver with Julia-compatible compression matrices and Sylvester solve
 - second-order stochastic steady-state solver for both standard and pruned second-order updates
@@ -30,13 +33,13 @@ Implemented:
 - third-order stochastic steady-state solver for standard third-order solutions plus pruned third-order state updates
 - parsed-model third-order solve path from MacroModelling-style source through symbolic third derivatives to the perturbation solution
 - generic callback-based stochastic extended path solver with Gauss-Hermite branching
-- focused tests for residuals, symmetry, fallback behavior, JIT, and autodiff
+- focused tests for residuals, symmetry, fallback behavior, JIT, autodiff, parser parity, and JAX device accessibility
 
 Not implemented yet:
 
 - perturbation orders above third
-- calibration equations in `@parameters` blocks
 - MacroModelling programmatic `for`-loop parsing
+- parameter bounds and other non-equation `@parameters` directives from the Julia macro layer
 - occasionally binding constraint parsing from the Julia macro layer
 - full SEP integration with symbolic model objects
 - regime switching
