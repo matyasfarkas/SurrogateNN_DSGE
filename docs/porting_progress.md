@@ -175,6 +175,22 @@ Python/JAX status:
 - top-level symbolic/indexed `for`-loop blocks remain explicitly unported and raise `NotImplementedError`
 - tests verify additive-loop parity, product-loop parity through Hessians and first-order solutions, multiline loop parity, and the explicit unsupported-block boundary
 
+### 11. Parsed-model stochastic extended path wiring
+
+Julia reference:
+
+- `src/sep_solver.jl`
+- `src/sep_simulation.jl`
+
+Python/JAX status:
+
+- `solve_stochastic_extended_path_residual_expectation` implemented to average conditional nonlinear residuals over future SEP branches
+- parsed models now expose `evaluate_dynamic_residual` for arbitrary lag/current/lead states and current shocks
+- high-level parsed SEP solves are implemented via `solve_stochastic_extended_path_model`
+- parsed SEP solves resolve steady states and calibrated parameters first, then evaluate JAX-native symbolic residuals directly inside the SEP Newton solve
+- deterministic shocks can be passed either as a matrix in model exogenous order or as a mapping from shock names to time series
+- tests verify low-level residual-expectation equivalence, direct dynamic-residual evaluation, and parsed-model SEP parity against the same nonlinear equation written as a manual conditional residual callback
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -186,9 +202,9 @@ Python/JAX status:
 - The current parsed front end does not yet port parameter bounds and other non-equation `@parameters` directives from the Julia macro layer.
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
-- The current SEP solver is callback-based and generic; it is not yet wired to the parsed model objects or the full Julia tree-layout machinery.
+- The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
-- No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, and generic SEP core.
+- No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, and the parsed full-tree SEP path.
 
 ## Environment note
 

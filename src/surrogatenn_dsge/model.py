@@ -28,6 +28,11 @@ from .dsge import (
     solve_third_order_dsge_solution,
     solve_third_order_stochastic_steady_state,
 )
+from .sep import (
+    SEPConfig,
+    SEPSolution,
+    solve_stochastic_extended_path_residual_expectation,
+)
 
 _TRANSFORMATIONS = standard_transformations + (
     convert_xor,
@@ -90,6 +95,12 @@ class ParsedModelThirdOrderResult(NamedTuple):
     stochastic_steady_state: ThirdOrderStochasticSteadyStateResult
 
 
+class ParsedModelSEPResult(NamedTuple):
+    steady_state: jax.Array
+    parameter_values: jax.Array
+    solution: SEPSolution
+
+
 class ParsedParameterBlock(NamedTuple):
     target_names: tuple[str, ...]
     calibrated_target_names: tuple[str, ...]
@@ -122,6 +133,7 @@ class MacroModel:
     _parameter_equation_jacobian_fn: object
     _joint_steady_state_fn: object
     _joint_steady_state_jacobian_fn: object
+    _dynamic_residual_fn: object
     _dynamic_jacobian_fn: object
     _dynamic_hessian_fn: object
     _dynamic_third_order_fn: object
@@ -241,6 +253,149 @@ class MacroModel:
                 continue
             raise ValueError(f"Missing steady-state reference value for `{name}`.")
         return refs
+
+    def _coerce_dynamic_state_vector(
+        self,
+        state: Sequence[float],
+        *,
+        label: str,
+    ) -> jax.Array:
+        values = np.asarray(state, dtype=np.float64)
+        if values.shape == (self.timings.nVars,):
+            return jnp.asarray(values, dtype=jnp.float64)
+        if values.shape == (len(self.steady_state_names),) and self.timings.nVars == len(
+            self.steady_state_names
+        ):
+            return jnp.asarray(values, dtype=jnp.float64)
+        raise ValueError(
+            f"{label} must have shape ({self.timings.nVars},), got {values.shape}."
+        )
+
+    def _coerce_sep_deterministic_shocks(
+        self,
+        deterministic_shocks: Optional[
+            Sequence[Sequence[float]] | Mapping[str, Sequence[float]]
+        ],
+        *,
+        periods: int,
+    ) -> Optional[jax.Array]:
+        if deterministic_shocks is None:
+            return None
+        if isinstance(deterministic_shocks, Mapping):
+            unexpected = sorted(
+                set(deterministic_shocks).difference(self.timings.exo)
+            )
+            if unexpected:
+                raise ValueError(
+                    "Unknown deterministic shock names: "
+                    + ", ".join(unexpected)
+                )
+            values = np.zeros((periods, self.timings.nExo), dtype=np.float64)
+            for idx, name in enumerate(self.timings.exo):
+                if name not in deterministic_shocks:
+                    continue
+                series = np.asarray(deterministic_shocks[name], dtype=np.float64)
+                if series.shape != (periods,):
+                    raise ValueError(
+                        f"Deterministic shock `{name}` must have shape ({periods},), got {series.shape}."
+                    )
+                values[:, idx] = series
+            return jnp.asarray(values, dtype=jnp.float64)
+        values = np.asarray(deterministic_shocks, dtype=np.float64)
+        if values.shape != (periods, self.timings.nExo):
+            raise ValueError(
+                "deterministic_shocks must have shape "
+                f"({periods}, {self.timings.nExo}), got {values.shape}."
+            )
+        return jnp.asarray(values, dtype=jnp.float64)
+
+    def _evaluate_dynamic_residual_with_context(
+        self,
+        lag_state: jax.Array,
+        current_state: jax.Array,
+        lead_state: jax.Array,
+        shock: jax.Array,
+        *,
+        parameter_values: jax.Array,
+        steady_reference_values: jax.Array,
+    ) -> jax.Array:
+        args = (
+            tuple(lead_state[idx] for idx in self.timings.future_not_past_and_mixed_idx)
+            + tuple(current_state[idx] for idx in range(self.timings.nVars))
+            + tuple(lag_state[idx] for idx in self.timings.past_not_future_and_mixed_idx)
+            + tuple(shock[idx] for idx in range(self.timings.nExo))
+            + tuple(
+                steady_reference_values[idx]
+                for idx in range(len(self.steady_state_reference_names))
+            )
+            + tuple(parameter_values[idx] for idx in range(len(self.parameter_names)))
+        )
+        return jnp.asarray(self._dynamic_residual_fn(*args), dtype=jnp.float64).reshape(-1)
+
+    def evaluate_dynamic_residual(
+        self,
+        lag_state: Sequence[float],
+        current_state: Sequence[float],
+        lead_state: Sequence[float],
+        *,
+        shock: Optional[Sequence[float]] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+    ) -> jax.Array:
+        lag = self._coerce_dynamic_state_vector(lag_state, label="lag_state")
+        current = self._coerce_dynamic_state_vector(
+            current_state,
+            label="current_state",
+        )
+        lead = self._coerce_dynamic_state_vector(lead_state, label="lead_state")
+        if shock is None:
+            shock_values = jnp.zeros((self.timings.nExo,), dtype=jnp.float64)
+        else:
+            shock_values = np.asarray(shock, dtype=np.float64)
+            if shock_values.shape != (self.timings.nExo,):
+                raise ValueError(
+                    "shock must have shape "
+                    f"({self.timings.nExo},), got {shock_values.shape}."
+                )
+            shock_values = jnp.asarray(shock_values, dtype=jnp.float64)
+
+        if steady_state is None:
+            steady_state_result = self.solve_steady_state(
+                parameter_values=parameter_values,
+            )
+            full_steady_state = np.asarray(
+                steady_state_result.steady_state,
+                dtype=np.float64,
+            )
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
+        else:
+            full_steady_state = self._coerce_full_steady_state(
+                steady_state,
+                parameter_values=parameter_values,
+            )
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
+            )
+
+        return self._evaluate_dynamic_residual_with_context(
+            lag,
+            current,
+            lead,
+            shock_values,
+            parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
+            steady_reference_values=jnp.asarray(
+                self._steady_reference_values(full_steady_state),
+                dtype=jnp.float64,
+            ),
+        )
 
     def resolve_parameter_values(
         self,
@@ -522,6 +677,117 @@ class MacroModel:
             dtype=np.float64,
         )
         return jnp.asarray(values, dtype=jnp.float64)
+
+    def solve_stochastic_extended_path(
+        self,
+        *,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        initial_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+        config: SEPConfig = SEPConfig(),
+        deterministic_shocks: Optional[
+            Sequence[Sequence[float]] | Mapping[str, Sequence[float]]
+        ] = None,
+        initial_guess: Optional[Sequence[Sequence[float]]] = None,
+    ) -> ParsedModelSEPResult:
+        if len(self._dynamic_expressions) != self.timings.nVars:
+            raise ValueError(
+                "SEP solution requires as many dynamic equations as present variables. "
+                f"Got {len(self._dynamic_expressions)} equations and {self.timings.nVars} variables."
+            )
+
+        if steady_state is None:
+            steady_state_result = self.solve_steady_state(
+                parameter_values=parameter_values,
+                initial_guess=steady_state_initial_guess,
+                tol=steady_state_tol,
+                max_iter=steady_state_max_iter,
+            )
+            full_steady_state = np.asarray(
+                steady_state_result.steady_state,
+                dtype=np.float64,
+            )
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
+        else:
+            full_steady_state = self._coerce_full_steady_state(
+                steady_state,
+                parameter_values=parameter_values,
+            )
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
+            )
+
+        initial_state_values = (
+            jnp.asarray(full_steady_state, dtype=jnp.float64)
+            if initial_state is None
+            else self._coerce_dynamic_state_vector(
+                initial_state,
+                label="initial_state",
+            )
+        )
+        terminal_state_values = jnp.asarray(
+            self._coerce_full_steady_state(
+                terminal_state,
+                parameter_values=resolved_parameters,
+            )
+            if terminal_state is not None
+            else full_steady_state,
+            dtype=jnp.float64,
+        )
+        deterministic_shock_values = self._coerce_sep_deterministic_shocks(
+            deterministic_shocks,
+            periods=config.periods,
+        )
+
+        parameter_array = jnp.asarray(resolved_parameters, dtype=jnp.float64)
+        steady_reference_values = jnp.asarray(
+            self._steady_reference_values(full_steady_state),
+            dtype=jnp.float64,
+        )
+
+        def conditional_residual(
+            lag_state: jax.Array,
+            current_state: jax.Array,
+            lead_state: jax.Array,
+            current_shock: jax.Array,
+            _params: object,
+        ) -> jax.Array:
+            return self._evaluate_dynamic_residual_with_context(
+                lag_state,
+                current_state,
+                lead_state,
+                current_shock,
+                parameter_values=parameter_array,
+                steady_reference_values=steady_reference_values,
+            )
+
+        solution = solve_stochastic_extended_path_residual_expectation(
+            conditional_residual,
+            initial_state=initial_state_values,
+            terminal_state=terminal_state_values,
+            shock_dim=self.timings.nExo,
+            config=config,
+            deterministic_shocks=deterministic_shock_values,
+            initial_guess=initial_guess,
+        )
+
+        return ParsedModelSEPResult(
+            steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+            parameter_values=parameter_array,
+            solution=solution,
+        )
 
     def solve_first_order(
         self,
@@ -944,6 +1210,7 @@ def parse_macro_model(source: str) -> MacroModel:
             joint_jacobian,
             modules="numpy",
         ),
+        _dynamic_residual_fn=sp.lambdify(dynamic_input_symbols, dynamic_matrix, modules="jax"),
         _dynamic_jacobian_fn=sp.lambdify(dynamic_input_symbols, dynamic_jacobian, modules="numpy"),
         _dynamic_hessian_fn=sp.lambdify(dynamic_input_symbols, dynamic_hessian, modules="numpy"),
         _dynamic_third_order_fn=sp.lambdify(dynamic_input_symbols, dynamic_third, modules="numpy"),
@@ -1018,6 +1285,26 @@ def calculate_third_order_derivatives(
     )
 
 
+def evaluate_dynamic_residual(
+    model: MacroModel,
+    lag_state: Sequence[float],
+    current_state: Sequence[float],
+    lead_state: Sequence[float],
+    *,
+    shock: Optional[Sequence[float]] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+) -> jax.Array:
+    return model.evaluate_dynamic_residual(
+        lag_state,
+        current_state,
+        lead_state,
+        shock=shock,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+    )
+
+
 def solve_first_order_model(
     model: MacroModel,
     *,
@@ -1033,6 +1320,36 @@ def solve_first_order_model(
         steady_state_initial_guess=steady_state_initial_guess,
         steady_state_tol=steady_state_tol,
         steady_state_max_iter=steady_state_max_iter,
+    )
+
+
+def solve_stochastic_extended_path_model(
+    model: MacroModel,
+    *,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+    config: SEPConfig = SEPConfig(),
+    deterministic_shocks: Optional[
+        Sequence[Sequence[float]] | Mapping[str, Sequence[float]]
+    ] = None,
+    initial_guess: Optional[Sequence[Sequence[float]]] = None,
+) -> ParsedModelSEPResult:
+    return model.solve_stochastic_extended_path(
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        config=config,
+        deterministic_shocks=deterministic_shocks,
+        initial_guess=initial_guess,
     )
 
 

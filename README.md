@@ -34,6 +34,7 @@ Implemented:
 - third-order stochastic steady-state solver for standard third-order solutions plus pruned third-order state updates
 - parsed-model third-order solve path from MacroModelling-style source through symbolic third derivatives to the perturbation solution
 - generic callback-based stochastic extended path solver with Gauss-Hermite branching
+- parsed-model stochastic extended path solve path with JAX dynamic residual evaluation and residual-expectation averaging over future branches
 - focused tests for residuals, symmetry, fallback behavior, JIT, autodiff, parser parity, and JAX device accessibility
 
 Not implemented yet:
@@ -42,7 +43,7 @@ Not implemented yet:
 - top-level symbolic/indexed `for`-loop model generation from the Julia macro layer
 - parameter bounds and other non-equation `@parameters` directives from the Julia macro layer
 - occasionally binding constraint parsing from the Julia macro layer
-- full SEP integration with symbolic model objects
+- Julia sparse-tree / HMC SEP variants and OBC-specific SEP machinery
 - regime switching
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).

@@ -3,7 +3,12 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
-from surrogatenn_dsge import SEPConfig, gauss_hermite_rule, solve_stochastic_extended_path
+from surrogatenn_dsge import (
+    SEPConfig,
+    gauss_hermite_rule,
+    solve_stochastic_extended_path,
+    solve_stochastic_extended_path_residual_expectation,
+)
 
 
 def test_gauss_hermite_rule_has_unit_total_weight() -> None:
@@ -81,3 +86,49 @@ def test_sep_handles_nonlinear_expectational_equation() -> None:
     assert solution.converged
     assert solution.residual_norm < 1e-8
     assert np.all(np.isfinite(solution.mean_path))
+
+
+def test_sep_conditional_residual_mode_matches_expectation_api_when_equivalent() -> None:
+    deterministic_shocks = jnp.array([[0.2], [0.0], [0.0]])
+
+    def residual(y_prev, y_curr, expected_square, shock, params):
+        return y_curr - (0.25 * y_prev + 0.15 * expected_square + shock)
+
+    def expectation(next_state, next_shock, params):
+        return next_state**2
+
+    def conditional_residual(y_prev, y_curr, next_state, shock, params):
+        return y_curr - (0.25 * y_prev + 0.15 * next_state**2 + shock)
+
+    expectation_solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(periods=3, branching_order=2, nnodes=3, tol=1e-10),
+        deterministic_shocks=deterministic_shocks,
+        expectation_fn=expectation,
+    )
+    conditional_solution = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(periods=3, branching_order=2, nnodes=3, tol=1e-10),
+        deterministic_shocks=deterministic_shocks,
+    )
+
+    assert expectation_solution.converged
+    assert conditional_solution.converged
+    np.testing.assert_allclose(
+        conditional_solution.stacked_states,
+        expectation_solution.stacked_states,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        conditional_solution.mean_path,
+        expectation_solution.mean_path,
+        rtol=1e-10,
+        atol=1e-10,
+    )

@@ -10,6 +10,10 @@ import numpy as np
 
 SEPResidualFn = Callable[[jax.Array, jax.Array, jax.Array, jax.Array, object], jax.Array]
 SEPExpectationFn = Callable[[jax.Array, jax.Array, object], jax.Array]
+SEPConditionalResidualFn = Callable[
+    [jax.Array, jax.Array, jax.Array, jax.Array, object],
+    jax.Array,
+]
 
 
 class GaussHermiteRule(NamedTuple):
@@ -108,11 +112,67 @@ def solve_stochastic_extended_path(
     expectation_fn: Optional[SEPExpectationFn] = None,
     initial_guess: Optional[Sequence[Sequence[float]]] = None,
 ) -> SEPSolution:
+    return _solve_stochastic_extended_path_impl(
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        shock_dim=shock_dim,
+        config=config,
+        deterministic_shocks=deterministic_shocks,
+        params=params,
+        expectation_fn=expectation_fn,
+        initial_guess=initial_guess,
+        residual_fn=residual_fn,
+        conditional_residual_fn=None,
+    )
+
+
+def solve_stochastic_extended_path_residual_expectation(
+    conditional_residual_fn: SEPConditionalResidualFn,
+    *,
+    initial_state: Sequence[float],
+    terminal_state: Sequence[float],
+    shock_dim: int,
+    config: SEPConfig = SEPConfig(),
+    deterministic_shocks: Optional[Sequence[Sequence[float]]] = None,
+    params: object = None,
+    initial_guess: Optional[Sequence[Sequence[float]]] = None,
+) -> SEPSolution:
+    return _solve_stochastic_extended_path_impl(
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        shock_dim=shock_dim,
+        config=config,
+        deterministic_shocks=deterministic_shocks,
+        params=params,
+        expectation_fn=None,
+        initial_guess=initial_guess,
+        residual_fn=None,
+        conditional_residual_fn=conditional_residual_fn,
+    )
+
+
+def _solve_stochastic_extended_path_impl(
+    *,
+    initial_state: Sequence[float],
+    terminal_state: Sequence[float],
+    shock_dim: int,
+    config: SEPConfig,
+    deterministic_shocks: Optional[Sequence[Sequence[float]]],
+    params: object,
+    expectation_fn: Optional[SEPExpectationFn],
+    initial_guess: Optional[Sequence[Sequence[float]]],
+    residual_fn: Optional[SEPResidualFn],
+    conditional_residual_fn: Optional[SEPConditionalResidualFn],
+) -> SEPSolution:
     initial_state_arr = jnp.asarray(initial_state, dtype=jnp.float64)
     terminal_state_arr = jnp.asarray(terminal_state, dtype=jnp.float64)
     state_dim = int(initial_state_arr.shape[0])
     if terminal_state_arr.shape != initial_state_arr.shape:
         raise ValueError("initial_state and terminal_state must have identical shapes.")
+    if residual_fn is None and conditional_residual_fn is None:
+        raise ValueError(
+            "Either `residual_fn` or `conditional_residual_fn` must be provided."
+        )
 
     if deterministic_shocks is None:
         deterministic = jnp.zeros((config.periods, shock_dim), dtype=jnp.float64)
@@ -129,7 +189,7 @@ def solve_stochastic_extended_path(
     counts = _group_counts(config.periods, config.branching_order, num_nodes)
     probabilities = _group_probabilities(rule, config.periods, config.branching_order)
 
-    if expectation_fn is None:
+    if expectation_fn is None and conditional_residual_fn is None:
         def expectation_fn(next_state: jax.Array, next_shock: jax.Array, _params: object) -> jax.Array:
             return next_state
 
@@ -161,7 +221,9 @@ def solve_stochastic_extended_path(
         states_by_time = unflatten(stacked)
         residuals = []
         zero_shock = jnp.zeros((shock_dim,), dtype=jnp.float64)
-        terminal_expectation = expectation_fn(terminal_state_arr, zero_shock, params)
+        terminal_expectation = None
+        if conditional_residual_fn is None:
+            terminal_expectation = expectation_fn(terminal_state_arr, zero_shock, params)
         for t in range(1, config.periods + 1):
             current_states = states_by_time[t - 1]
             prev_states = (
@@ -185,28 +247,87 @@ def solve_stochastic_extended_path(
                 )
                 current_shock = deterministic_shock + stochastic_shock
 
-                if t == config.periods:
-                    expected_term = terminal_expectation
-                else:
-                    child_groups = _child_groups(g, t, config.branching_order, num_nodes)
-                    if len(child_groups) == 1:
-                        child_shock = (
-                            deterministic[t]
-                            + (_group_shock(rule, child_groups[0], num_nodes) if t + 1 <= config.branching_order else zero_shock)
-                        )
-                        expected_term = expectation_fn(next_states[child_groups[0]], child_shock, params)
+                if conditional_residual_fn is None:
+                    if t == config.periods:
+                        expected_term = terminal_expectation
                     else:
-                        child_terms = []
-                        for local_idx, child in enumerate(child_groups):
-                            child_shock = deterministic[t] + _group_shock(rule, child, num_nodes)
-                            child_terms.append(
-                                rule.weights[local_idx] * expectation_fn(next_states[child], child_shock, params)
+                        child_groups = _child_groups(g, t, config.branching_order, num_nodes)
+                        if len(child_groups) == 1:
+                            child_shock = (
+                                deterministic[t]
+                                + (
+                                    _group_shock(rule, child_groups[0], num_nodes)
+                                    if t + 1 <= config.branching_order
+                                    else zero_shock
+                                )
                             )
-                        expected_term = sum(child_terms)
+                            expected_term = expectation_fn(
+                                next_states[child_groups[0]],
+                                child_shock,
+                                params,
+                            )
+                        else:
+                            child_terms = []
+                            for local_idx, child in enumerate(child_groups):
+                                child_shock = deterministic[t] + _group_shock(rule, child, num_nodes)
+                                child_terms.append(
+                                    rule.weights[local_idx]
+                                    * expectation_fn(next_states[child], child_shock, params)
+                                )
+                            expected_term = jnp.sum(
+                                jnp.stack(child_terms, axis=0),
+                                axis=0,
+                            )
 
-                residuals.append(
-                    residual_fn(prev_state, current_states[g], expected_term, current_shock, params)
-                )
+                    residuals.append(
+                        residual_fn(
+                            prev_state,
+                            current_states[g],
+                            expected_term,
+                            current_shock,
+                            params,
+                        )
+                    )
+                    continue
+
+                if t == config.periods:
+                    residuals.append(
+                        conditional_residual_fn(
+                            prev_state,
+                            current_states[g],
+                            terminal_state_arr,
+                            current_shock,
+                            params,
+                        )
+                    )
+                    continue
+
+                child_groups = _child_groups(g, t, config.branching_order, num_nodes)
+                if len(child_groups) == 1:
+                    residuals.append(
+                        conditional_residual_fn(
+                            prev_state,
+                            current_states[g],
+                            next_states[child_groups[0]],
+                            current_shock,
+                            params,
+                        )
+                    )
+                    continue
+
+                child_terms = []
+                for local_idx, child in enumerate(child_groups):
+                    child_terms.append(
+                        rule.weights[local_idx]
+                        * conditional_residual_fn(
+                            prev_state,
+                            current_states[g],
+                            next_states[child],
+                            current_shock,
+                            params,
+                        )
+                    )
+                residuals.append(jnp.sum(jnp.stack(child_terms, axis=0), axis=0))
         return jnp.concatenate(residuals, axis=0)
 
     residual_norm = float(np.asarray(jnp.linalg.norm(residual_vector(guess), ord=jnp.inf)))
