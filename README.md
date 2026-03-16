@@ -26,6 +26,7 @@ Implemented:
 - order-independent parameter definitions in `@parameters` blocks
 - calibration equations in `@parameters` blocks, including both `par | lhs = rhs` and `lhs = rhs | par` forms
 - indexed parameter-family broadcasting in `@parameters`, including `alpha = 0.3` style direct definitions and one-family calibration equations like `y[ss] = target | beta`
+- lazy symbolic matrix construction and cached `sympy.lambdify` compilation for parsed models, so large MacroModelling-style sources parse without eagerly compiling every derivative object
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
 - damped Newton non-stochastic steady-state solver
 - calibrated-parameter resolution from either the joint steady-state solve or a supplied steady state

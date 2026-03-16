@@ -221,6 +221,21 @@ Python/JAX status:
 - generic steady-state references inside those one-family calibration equations are rewritten before symbolic parsing, preserving JAX-native steady-state and first-order solution paths
 - tests verify direct-definition family broadcasting, calibration-equation family broadcasting, resolved parameter values, steady states, Jacobians, and first-order solutions against explicit fully indexed equivalents
 
+### 14. Lazy symbolic compilation for parsed models
+
+Julia reference:
+
+- `src/macros.jl`
+- `models/Backus_Kehoe_Kydland_1992.jl`
+
+Python/JAX status:
+
+- `parse_macro_model` no longer eagerly builds every symbolic matrix and `sympy.lambdify` artifact during parse
+- parsed models now compile steady-state, calibration, residual, Jacobian, Hessian, and third-order derivative callables lazily on first use and cache them afterward
+- repeated steady-state and derivative evaluations reuse the cached compiled functions rather than recompiling symbolic kernels
+- targeted tests verify zero eager `lambdify` calls at parse time and cache reuse across steady-state, Jacobian, Hessian, third-order, and dynamic-residual evaluation paths
+- the upstream `Backus_Kehoe_Kydland_1992.jl` model now parses successfully as a smoke check instead of stalling in eager compilation
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.

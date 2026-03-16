@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 import re
 from typing import Mapping, NamedTuple, Optional, Sequence
 
@@ -122,22 +123,155 @@ class MacroModel:
     dynamic_symbol_names: tuple[str, ...]
     _dynamic_expressions: tuple[sp.Expr, ...]
     _steady_state_expressions: tuple[sp.Expr, ...]
+    _parameter_expressions: tuple[sp.Expr, ...]
     _parameter_symbols: tuple[sp.Symbol, ...]
     _steady_state_symbols: tuple[sp.Symbol, ...]
     _dynamic_symbols: tuple[sp.Symbol, ...]
     _dynamic_input_symbols: tuple[sp.Symbol, ...]
-    _steady_state_fn: object
-    _steady_state_jacobian_fn: object
-    _steady_state_parameter_jacobian_fn: object
     _parameter_equations_depend_on_steady_state: bool
-    _parameter_equation_fn: object
-    _parameter_equation_jacobian_fn: object
-    _joint_steady_state_fn: object
-    _joint_steady_state_jacobian_fn: object
-    _dynamic_residual_fn: object
-    _dynamic_jacobian_fn: object
-    _dynamic_hessian_fn: object
-    _dynamic_third_order_fn: object
+
+    @cached_property
+    def _steady_state_matrix(self) -> sp.Matrix:
+        return sp.Matrix(self._steady_state_expressions)
+
+    @cached_property
+    def _steady_state_jacobian(self) -> sp.Matrix:
+        return self._steady_state_matrix.jacobian(self._steady_state_symbols)
+
+    @cached_property
+    def _steady_state_parameter_jacobian(self) -> sp.Matrix:
+        return self._steady_state_matrix.jacobian(self._parameter_symbols)
+
+    @cached_property
+    def _parameter_matrix(self) -> sp.Matrix:
+        return sp.Matrix(self._parameter_expressions)
+
+    @cached_property
+    def _parameter_equation_jacobian(self) -> sp.Matrix:
+        return self._parameter_matrix.jacobian(self._parameter_symbols)
+
+    @cached_property
+    def _dynamic_matrix(self) -> sp.Matrix:
+        return sp.Matrix(self._dynamic_expressions)
+
+    @cached_property
+    def _dynamic_jacobian(self) -> sp.Matrix:
+        return self._dynamic_matrix.jacobian(self._dynamic_symbols)
+
+    @cached_property
+    def _dynamic_hessian(self) -> sp.Matrix:
+        return sp.Matrix(
+            [_flatten_hessian(expr, self._dynamic_symbols) for expr in self._dynamic_expressions]
+        )
+
+    @cached_property
+    def _dynamic_third(self) -> sp.Matrix:
+        return sp.Matrix(
+            [
+                _flatten_third_order(expr, self._dynamic_symbols)
+                for expr in self._dynamic_expressions
+            ]
+        )
+
+    @cached_property
+    def _joint_unknown_symbols(self) -> tuple[sp.Symbol, ...]:
+        return tuple(list(self._steady_state_symbols) + list(self._parameter_symbols))
+
+    @cached_property
+    def _joint_steady_state_matrix(self) -> sp.Matrix:
+        return sp.Matrix(list(self._steady_state_expressions) + list(self._parameter_expressions))
+
+    @cached_property
+    def _joint_steady_state_jacobian(self) -> sp.Matrix:
+        return self._joint_steady_state_matrix.jacobian(self._joint_unknown_symbols)
+
+    @cached_property
+    def _steady_state_fn(self) -> object:
+        return sp.lambdify(
+            list(self._steady_state_symbols) + list(self._parameter_symbols),
+            self._steady_state_matrix,
+            modules="numpy",
+        )
+
+    @cached_property
+    def _steady_state_jacobian_fn(self) -> object:
+        return sp.lambdify(
+            list(self._steady_state_symbols) + list(self._parameter_symbols),
+            self._steady_state_jacobian,
+            modules="numpy",
+        )
+
+    @cached_property
+    def _steady_state_parameter_jacobian_fn(self) -> object:
+        return sp.lambdify(
+            list(self._steady_state_symbols) + list(self._parameter_symbols),
+            self._steady_state_parameter_jacobian,
+            modules="numpy",
+        )
+
+    @cached_property
+    def _parameter_equation_fn(self) -> object:
+        return sp.lambdify(
+            list(self._steady_state_symbols) + list(self._parameter_symbols),
+            self._parameter_matrix,
+            modules="numpy",
+        )
+
+    @cached_property
+    def _parameter_equation_jacobian_fn(self) -> object:
+        return sp.lambdify(
+            list(self._steady_state_symbols) + list(self._parameter_symbols),
+            self._parameter_equation_jacobian,
+            modules="numpy",
+        )
+
+    @cached_property
+    def _joint_steady_state_fn(self) -> object:
+        return sp.lambdify(
+            self._joint_unknown_symbols,
+            self._joint_steady_state_matrix,
+            modules="numpy",
+        )
+
+    @cached_property
+    def _joint_steady_state_jacobian_fn(self) -> object:
+        return sp.lambdify(
+            self._joint_unknown_symbols,
+            self._joint_steady_state_jacobian,
+            modules="numpy",
+        )
+
+    @cached_property
+    def _dynamic_residual_fn(self) -> object:
+        return sp.lambdify(
+            self._dynamic_input_symbols,
+            self._dynamic_matrix,
+            modules="jax",
+        )
+
+    @cached_property
+    def _dynamic_jacobian_fn(self) -> object:
+        return sp.lambdify(
+            self._dynamic_input_symbols,
+            self._dynamic_jacobian,
+            modules="numpy",
+        )
+
+    @cached_property
+    def _dynamic_hessian_fn(self) -> object:
+        return sp.lambdify(
+            self._dynamic_input_symbols,
+            self._dynamic_hessian,
+            modules="numpy",
+        )
+
+    @cached_property
+    def _dynamic_third_order_fn(self) -> object:
+        return sp.lambdify(
+            self._dynamic_input_symbols,
+            self._dynamic_third,
+            modules="numpy",
+        )
 
     def _coerce_parameter_values(
         self,
@@ -1159,23 +1293,6 @@ def parse_macro_model(source: str) -> MacroModel:
         + [timed_symbols[_steady_state_token_name(name)] for name in steady_state_reference_names]
         + list(parameter_symbols)
     )
-
-    steady_matrix = sp.Matrix(steady_state_exprs)
-    steady_jacobian = steady_matrix.jacobian(steady_state_symbols)
-    steady_parameter_jacobian = steady_matrix.jacobian(parameter_symbols)
-    parameter_matrix = sp.Matrix(parameter_exprs)
-    parameter_jacobian = parameter_matrix.jacobian(parameter_symbols)
-    dynamic_matrix = sp.Matrix(dynamic_exprs)
-    dynamic_jacobian = dynamic_matrix.jacobian(dynamic_symbols)
-    dynamic_hessian = sp.Matrix(
-        [_flatten_hessian(expr, dynamic_symbols) for expr in dynamic_exprs]
-    )
-    dynamic_third = sp.Matrix(
-        [_flatten_third_order(expr, dynamic_symbols) for expr in dynamic_exprs]
-    )
-    joint_unknown_symbols = tuple(list(steady_state_symbols) + list(parameter_symbols))
-    joint_matrix = sp.Matrix(list(steady_state_exprs) + list(parameter_exprs))
-    joint_jacobian = joint_matrix.jacobian(joint_unknown_symbols)
     parameter_equations_depend_on_steady_state = any(
         bool(expr.free_symbols & set(steady_state_symbols))
         for expr in parameter_exprs
@@ -1195,50 +1312,12 @@ def parse_macro_model(source: str) -> MacroModel:
         dynamic_symbol_names=dynamic_symbol_names,
         _dynamic_expressions=dynamic_exprs,
         _steady_state_expressions=steady_state_exprs,
+        _parameter_expressions=parameter_exprs,
         _parameter_symbols=parameter_symbols,
         _steady_state_symbols=steady_state_symbols,
         _dynamic_symbols=dynamic_symbols,
         _dynamic_input_symbols=dynamic_input_symbols,
-        _steady_state_fn=sp.lambdify(
-            list(steady_state_symbols) + list(parameter_symbols),
-            steady_matrix,
-            modules="numpy",
-        ),
-        _steady_state_jacobian_fn=sp.lambdify(
-            list(steady_state_symbols) + list(parameter_symbols),
-            steady_jacobian,
-            modules="numpy",
-        ),
-        _steady_state_parameter_jacobian_fn=sp.lambdify(
-            list(steady_state_symbols) + list(parameter_symbols),
-            steady_parameter_jacobian,
-            modules="numpy",
-        ),
         _parameter_equations_depend_on_steady_state=parameter_equations_depend_on_steady_state,
-        _parameter_equation_fn=sp.lambdify(
-            list(steady_state_symbols) + list(parameter_symbols),
-            parameter_matrix,
-            modules="numpy",
-        ),
-        _parameter_equation_jacobian_fn=sp.lambdify(
-            list(steady_state_symbols) + list(parameter_symbols),
-            parameter_jacobian,
-            modules="numpy",
-        ),
-        _joint_steady_state_fn=sp.lambdify(
-            joint_unknown_symbols,
-            joint_matrix,
-            modules="numpy",
-        ),
-        _joint_steady_state_jacobian_fn=sp.lambdify(
-            joint_unknown_symbols,
-            joint_jacobian,
-            modules="numpy",
-        ),
-        _dynamic_residual_fn=sp.lambdify(dynamic_input_symbols, dynamic_matrix, modules="jax"),
-        _dynamic_jacobian_fn=sp.lambdify(dynamic_input_symbols, dynamic_jacobian, modules="numpy"),
-        _dynamic_hessian_fn=sp.lambdify(dynamic_input_symbols, dynamic_hessian, modules="numpy"),
-        _dynamic_third_order_fn=sp.lambdify(dynamic_input_symbols, dynamic_third, modules="numpy"),
     )
 
 
