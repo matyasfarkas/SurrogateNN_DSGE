@@ -20,6 +20,7 @@ Implemented:
 - linear Gaussian state-space simulation, Kalman likelihood, filtering, and RTS smoothing
 - quadratic matrix equation doubling solver
 - MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
+- MacroModelling-style inline time-index `for` loops inside `@model` equations, including additive and `operator = :*` forms
 - order-independent parameter definitions in `@parameters` blocks
 - calibration equations in `@parameters` blocks, including both `par | lhs = rhs` and `lhs = rhs | par` forms
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
@@ -38,7 +39,7 @@ Implemented:
 Not implemented yet:
 
 - perturbation orders above third
-- MacroModelling programmatic `for`-loop parsing
+- top-level symbolic/indexed `for`-loop model generation from the Julia macro layer
 - parameter bounds and other non-equation `@parameters` directives from the Julia macro layer
 - occasionally binding constraint parsing from the Julia macro layer
 - full SEP integration with symbolic model objects

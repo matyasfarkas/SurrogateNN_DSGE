@@ -38,11 +38,11 @@ _STEADY_STATE_ALIASES = {"ss", "stst", "steady", "steadystate", "steady_state"}
 _EXOGENOUS_ALIASES = {"x", "ex", "exo", "exogenous"}
 
 _MODEL_BLOCK_RE = re.compile(
-    r"@model\s+(?P<name>[^\s]+)(?P<options>.*?)\bbegin\b(?P<body>.*?)\bend\b",
+    r"@model\s+(?P<name>[^\s]+)(?P<options>.*?)\bbegin\b",
     re.DOTALL,
 )
 _PARAMETERS_BLOCK_RE = re.compile(
-    r"@parameters\s+(?P<name>[^\s]+)(?P<options>.*?)\bbegin\b(?P<body>.*?)\bend\b",
+    r"@parameters\s+(?P<name>[^\s]+)(?P<options>.*?)\bbegin\b",
     re.DOTALL,
 )
 _REFERENCE_RE = re.compile(
@@ -759,7 +759,7 @@ def parse_macro_model(source: str) -> MacroModel:
             "The `@parameters` block must target the same model name as `@model`."
         )
 
-    equations = tuple(_split_body_lines(model_block["body"]))
+    equations = tuple(_split_model_body_lines(model_block["body"]))
     if not equations:
         raise ValueError("Model block does not contain any equations.")
 
@@ -1162,7 +1162,19 @@ def _extract_block(
     match = pattern.search(source)
     if match is None:
         raise ValueError(f"Could not find `@{label}` block in source.")
-    return match.groupdict()
+    block = match.groupdict()
+    body_lines: list[str] = []
+    nested_depth = 0
+    for raw_line in source[match.end() :].splitlines():
+        visible = _strip_comment(raw_line).strip()
+        if visible == "end" and nested_depth == 0:
+            block["body"] = "\n".join(body_lines)
+            return block
+        body_lines.append(raw_line)
+        nested_depth += _block_line_delta(visible)
+        if nested_depth < 0:
+            raise ValueError(f"Encountered unmatched `end` while parsing `@{label}`.")
+    raise ValueError(f"Could not find closing `end` for `@{label}` block.")
 
 
 def _split_body_lines(body: str) -> list[str]:
@@ -1172,6 +1184,217 @@ def _split_body_lines(body: str) -> list[str]:
         if line:
             lines.append(line)
     return lines
+
+
+def _split_model_body_lines(body: str) -> list[str]:
+    lines = _split_body_lines(body)
+    statements: list[str] = []
+    current: list[str] = []
+    loop_depth = 0
+
+    for line in lines:
+        stripped = line.strip()
+        current.append(stripped)
+        loop_depth += _block_line_delta(stripped)
+        if loop_depth < 0:
+            raise ValueError("Encountered `end` without a matching `for` in `@model`.")
+
+        if loop_depth == 0 and not _model_line_requires_continuation(stripped):
+            if _is_unsupported_block_for_statement(current):
+                raise NotImplementedError(
+                    "Top-level symbolic/indexed `for`-loop blocks in `@model` are not "
+                    "ported yet. Time-index expression loops are supported."
+                )
+            statements.append(_expand_inline_for_loops(" ".join(current)))
+            current = []
+
+    if loop_depth != 0:
+        raise ValueError("Unbalanced `for` / `end` blocks in `@model`.")
+    if current:
+        if _is_unsupported_block_for_statement(current):
+            raise NotImplementedError(
+                "Top-level symbolic/indexed `for`-loop blocks in `@model` are not "
+                "ported yet. Time-index expression loops are supported."
+            )
+        statements.append(_expand_inline_for_loops(" ".join(current)))
+    return statements
+
+
+def _model_line_requires_continuation(line: str) -> bool:
+    return bool(re.search(r"[+\-*/=]$", line))
+
+
+def _block_line_delta(line: str) -> int:
+    if not line:
+        return 0
+    return len(re.findall(r"\bfor\b", line)) - len(re.findall(r"\bend\b", line))
+
+
+def _is_unsupported_block_for_statement(lines: Sequence[str]) -> bool:
+    return (
+        bool(lines)
+        and lines[0].startswith("for ")
+        and lines[-1] == "end"
+        and len(lines) > 1
+    )
+
+
+def _expand_inline_for_loops(statement: str) -> str:
+    expanded = statement
+    while re.search(r"\bfor\b", expanded):
+        start, end = _find_innermost_for_segment(expanded)
+        replacement = _expand_single_inline_for_loop(expanded[start:end])
+        expanded = expanded[:start] + replacement + expanded[end:]
+    return expanded
+
+
+def _find_innermost_for_segment(statement: str) -> tuple[int, int]:
+    stack: list[int] = []
+    for match in re.finditer(r"\bfor\b|\bend\b", statement):
+        token = match.group(0)
+        if token == "for":
+            stack.append(match.start())
+            continue
+        if not stack:
+            raise ValueError("Encountered `end` without a matching `for` in equation.")
+        start = stack.pop()
+        return start, match.end()
+    raise ValueError("Encountered `for` without a matching `end` in equation.")
+
+
+def _expand_single_inline_for_loop(segment: str) -> str:
+    segment_text = segment.strip()
+    if not re.search(r"\bend\s*$", segment_text):
+        raise ValueError(f"Could not find closing `end` in `for` loop `{segment}`.")
+    loop_text = re.sub(r"\s*\bend\s*$", "", segment_text)
+    rest = loop_text[len("for") :].strip()
+    operator = "+"
+    if rest.startswith("operator"):
+        operator_match = re.match(
+            r"operator\s*=\s*:(?P<op>[+*])\s*,\s*(?P<rest>.*)",
+            rest,
+        )
+        if operator_match is None:
+            raise ValueError(f"Could not parse `for`-loop operator in `{segment}`.")
+        operator = operator_match.group("op")
+        rest = operator_match.group("rest").strip()
+
+    header_match = re.match(r"(?P<var>(?!\d)\w+)\s+in\s+(?P<rest>.*)", rest)
+    if header_match is None:
+        raise ValueError(f"Could not parse `for`-loop header in `{segment}`.")
+    loop_var = header_match.group("var")
+    indices_text, body = _consume_loop_indices(header_match.group("rest"))
+    if not body:
+        raise NotImplementedError(
+            "Top-level symbolic/indexed `for`-loop blocks in `@model` are not "
+            "ported yet. Time-index expression loops are supported."
+        )
+
+    indices = _parse_for_loop_indices(indices_text)
+    terms = [
+        _expand_inline_for_loops(_substitute_loop_variable(body, loop_var, idx))
+        for idx in indices
+    ]
+    joiner = f" {operator} "
+    return "(" + joiner.join(f"({term})" for term in terms) + ")"
+
+
+def _consume_loop_indices(rest: str) -> tuple[str, str]:
+    text = rest.lstrip()
+    if not text:
+        raise ValueError("Missing `for`-loop indices.")
+    if text[0] == "[":
+        end = _find_matching_delimiter(text, 0, "[", "]")
+        return text[: end + 1], text[end + 1 :].strip()
+
+    depth = 0
+    for idx, char in enumerate(text):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char.isspace() and depth == 0:
+            return text[:idx], text[idx:].strip()
+    return text, ""
+
+
+def _find_matching_delimiter(
+    text: str,
+    start_idx: int,
+    opening: str,
+    closing: str,
+) -> int:
+    depth = 0
+    for idx in range(start_idx, len(text)):
+        char = text[idx]
+        if char == opening:
+            depth += 1
+        elif char == closing:
+            depth -= 1
+            if depth == 0:
+                return idx
+    raise ValueError(f"Could not find matching `{closing}` in `{text}`.")
+
+
+def _parse_for_loop_indices(indices_text: str) -> list[int]:
+    token = indices_text.strip()
+    if token.startswith("[") and token.endswith("]"):
+        entries = _split_top_level(token[1:-1], ",")
+        try:
+            return [_evaluate_integer_expression(entry) for entry in entries if entry.strip()]
+        except ValueError as exc:
+            raise NotImplementedError(
+                "Symbolic/indexed `for` loops in `@model` are not ported yet."
+            ) from exc
+
+    range_parts = _split_top_level(token, ":")
+    if len(range_parts) == 2:
+        start = _evaluate_integer_expression(range_parts[0])
+        stop = _evaluate_integer_expression(range_parts[1])
+        step = 1 if stop >= start else -1
+        return list(range(start, stop + step, step))
+
+    try:
+        return [_evaluate_integer_expression(token)]
+    except ValueError as exc:
+        raise NotImplementedError(
+            "Symbolic/indexed `for` loops in `@model` are not ported yet."
+        ) from exc
+
+
+def _split_top_level(text: str, delimiter: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in text:
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        if char == delimiter and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+    parts.append("".join(current).strip())
+    return parts
+
+
+def _evaluate_integer_expression(text: str) -> int:
+    value = parse_expr(
+        text.strip(),
+        local_dict=_function_locals(),
+        transformations=_TRANSFORMATIONS,
+    )
+    numeric_value = float(value)
+    rounded = int(round(numeric_value))
+    if not np.isfinite(numeric_value) or abs(numeric_value - rounded) > 1e-12:
+        raise ValueError(f"`{text}` does not evaluate to an integer loop bound.")
+    return rounded
+
+
+def _substitute_loop_variable(statement: str, loop_var: str, value: int) -> str:
+    return re.sub(rf"\b{re.escape(loop_var)}\b", str(value), statement)
 
 
 def _strip_comment(line: str) -> str:

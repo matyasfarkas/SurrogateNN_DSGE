@@ -160,6 +160,21 @@ Python/JAX status:
 - high-level parsed first-order solves now propagate resolved calibrated parameters through Jacobian evaluation and the perturbation solution
 - tests verify out-of-order parameter definitions, end-target calibration syntax, Julia-fixture parity for `RBC_CME` calibration equations plus parameter definitions, and JAX JIT/device accessibility on calibrated first-order state-space outputs
 
+### 10. Inline time-index `for` loops in parsed `@model` equations
+
+Julia reference:
+
+- `src/macros.jl`
+- `src/preprocess_model.jl`
+
+Python/JAX status:
+
+- parsed `@model` blocks now support inline time-index `for ... end` expressions inside equations
+- additive loop expansion and `operator = :*` product expansion are both implemented
+- multiline equations containing multiple inline time loops are normalized and expanded before symbolic differentiation
+- top-level symbolic/indexed `for`-loop blocks remain explicitly unported and raise `NotImplementedError`
+- tests verify additive-loop parity, product-loop parity through Hessians and first-order solutions, multiline loop parity, and the explicit unsupported-block boundary
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -167,7 +182,7 @@ Python/JAX status:
 - The Julia QME `:schur` variant is not ported yet; the Python port currently uses the doubling solver.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
-- The current parsed front end does not yet port programmatic `for`-loop model generation.
+- The current parsed front end only supports inline time-index `for` loops inside equations; programmatic symbolic/indexed `for`-loop model generation is not ported yet.
 - The current parsed front end does not yet port parameter bounds and other non-equation `@parameters` directives from the Julia macro layer.
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
