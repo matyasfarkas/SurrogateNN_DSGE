@@ -250,6 +250,33 @@ Python/JAX status:
 - guesses for calibrated parameters now seed the joint steady-state/calibration solve, while explicit `initial_guess` and `parameter_values` arguments still override the defaults
 - tests verify branch-sensitive steady-state behavior from the default guess and direct capture of calibrated-parameter guesses in the joint Newton initial condition
 
+### 16. `@parameters` inequality bounds
+
+Julia reference:
+
+- `src/macros.jl` (bound parsing in the `@parameters` macro)
+- `test/models/RBC_CME_calibration_equations_and_parameter_definitions_and_specfuns.jl`
+
+Python/JAX status:
+
+- parsed `@parameters` blocks now read one-sided and chained inequality bounds such as `x >= 0`, `10 >= R`, `0 < alpha < 1`, and `1 > y > -1`
+- bounds are stored on parsed models and intersected when multiple bound lines target the same variable or parameter
+- steady-state, parameter-only calibration, and joint steady-state/calibration Newton solves now project iterates into the parsed box constraints
+- tests verify open/closed bound parsing, feasible-branch selection under a lower bound, and bound vectors passed into the joint steady-state/calibration solve
+
+### 17. MacroModelling special-function aliases
+
+Julia reference:
+
+- `test/models/RBC_CME_calibration_equations_and_parameter_definitions_and_specfuns.jl`
+- `src/MacroModelling.jl` symbolic registrations for normal-distribution helpers
+
+Python/JAX status:
+
+- the parser now recognizes MacroModelling aliases `normpdf`, `dnorm`, `pnorm`, `normlogpdf`, and `erfcinv` in addition to the previously ported `normcdf`, `norminv`, `norminvcdf`, and `qnorm`
+- custom lambdify modules now provide a numeric implementation for `erfcinv`, so steady-state and derivative evaluation do not fail at runtime when those functions appear in parsed symbolic expressions
+- tests verify parsed-model steady-state evaluation for the special-function aliases, and the upstream `RBC_CME_calibration_equations_and_parameter_definitions_and_specfuns.jl` fixture now parses successfully as a smoke check
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -259,7 +286,7 @@ Python/JAX status:
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
 - The current parsed front end supports explicit identifier-list/range `for` expansion in `@model`, but not implicit symbolic collections such as `for co in countries`.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
-- The current parsed front end does not yet port parameter bounds and the remaining non-equation `@parameters` directives from the Julia macro layer.
+- The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.

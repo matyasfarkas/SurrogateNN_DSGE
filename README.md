@@ -27,6 +27,8 @@ Implemented:
 - calibration equations in `@parameters` blocks, including both `par | lhs = rhs` and `lhs = rhs | par` forms
 - indexed parameter-family broadcasting in `@parameters`, including `alpha = 0.3` style direct definitions and one-family calibration equations like `y[ss] = target | beta`
 - `@parameters ... guess = Dict(...)` default steady-state guesses for variables and calibrated parameters
+- inequality bounds in `@parameters` such as `0 < alpha < 1`, `x >= 0`, and `10 >= R`, with bounded Newton projection for steady-state and calibration solves
+- MacroModelling special-function aliases including `normpdf`, `dnorm`, `pnorm`, `normlogpdf`, and `erfcinv`
 - lazy symbolic matrix construction and cached `sympy.lambdify` compilation for parsed models, so large MacroModelling-style sources parse without eagerly compiling every derivative object
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
 - damped Newton non-stochastic steady-state solver
@@ -47,7 +49,7 @@ Not implemented yet:
 - perturbation orders above third
 - implicit symbolic collection loops such as `for co in countries` from the Julia macro layer
 - ambiguous multi-family calibration-equation broadcasting remains guarded rather than inferred
-- parameter bounds and the remaining non-equation `@parameters` directives from the Julia macro layer
+- the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds
 - occasionally binding constraint parsing from the Julia macro layer
 - Julia sparse-tree / HMC SEP variants and OBC-specific SEP machinery
 - regime switching

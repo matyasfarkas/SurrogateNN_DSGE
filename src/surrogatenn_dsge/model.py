@@ -8,6 +8,7 @@ from typing import Mapping, NamedTuple, Optional, Sequence
 import jax
 import jax.numpy as jnp
 import numpy as np
+import scipy.special as scipy_special
 import sympy as sp
 from sympy.parsing.sympy_parser import (
     convert_xor,
@@ -108,6 +109,7 @@ class ParsedParameterBlock(NamedTuple):
     calibrated_target_names: tuple[str, ...]
     equation_texts: tuple[str, ...]
     initial_values: dict[str, float]
+    bounds: dict[str, tuple[float, float]]
 
 
 @dataclass(frozen=True)
@@ -118,6 +120,7 @@ class MacroModel:
     parameter_values: jax.Array
     calibrated_parameter_names: tuple[str, ...]
     default_initial_guess: dict[str, float]
+    bounds: dict[str, tuple[float, float]]
     timings: DSGETimings
     steady_state_names: tuple[str, ...]
     steady_state_reference_names: tuple[str, ...]
@@ -191,7 +194,7 @@ class MacroModel:
         return sp.lambdify(
             list(self._steady_state_symbols) + list(self._parameter_symbols),
             self._steady_state_matrix,
-            modules="numpy",
+            modules=_numpy_lambdify_modules(),
         )
 
     @cached_property
@@ -199,7 +202,7 @@ class MacroModel:
         return sp.lambdify(
             list(self._steady_state_symbols) + list(self._parameter_symbols),
             self._steady_state_jacobian,
-            modules="numpy",
+            modules=_numpy_lambdify_modules(),
         )
 
     @cached_property
@@ -207,7 +210,7 @@ class MacroModel:
         return sp.lambdify(
             list(self._steady_state_symbols) + list(self._parameter_symbols),
             self._steady_state_parameter_jacobian,
-            modules="numpy",
+            modules=_numpy_lambdify_modules(),
         )
 
     @cached_property
@@ -215,7 +218,7 @@ class MacroModel:
         return sp.lambdify(
             list(self._steady_state_symbols) + list(self._parameter_symbols),
             self._parameter_matrix,
-            modules="numpy",
+            modules=_numpy_lambdify_modules(),
         )
 
     @cached_property
@@ -223,7 +226,7 @@ class MacroModel:
         return sp.lambdify(
             list(self._steady_state_symbols) + list(self._parameter_symbols),
             self._parameter_equation_jacobian,
-            modules="numpy",
+            modules=_numpy_lambdify_modules(),
         )
 
     @cached_property
@@ -231,7 +234,7 @@ class MacroModel:
         return sp.lambdify(
             self._joint_unknown_symbols,
             self._joint_steady_state_matrix,
-            modules="numpy",
+            modules=_numpy_lambdify_modules(),
         )
 
     @cached_property
@@ -239,7 +242,7 @@ class MacroModel:
         return sp.lambdify(
             self._joint_unknown_symbols,
             self._joint_steady_state_jacobian,
-            modules="numpy",
+            modules=_numpy_lambdify_modules(),
         )
 
     @cached_property
@@ -247,7 +250,7 @@ class MacroModel:
         return sp.lambdify(
             self._dynamic_input_symbols,
             self._dynamic_matrix,
-            modules="jax",
+            modules=_jax_lambdify_modules(),
         )
 
     @cached_property
@@ -255,7 +258,7 @@ class MacroModel:
         return sp.lambdify(
             self._dynamic_input_symbols,
             self._dynamic_jacobian,
-            modules="numpy",
+            modules=_numpy_lambdify_modules(),
         )
 
     @cached_property
@@ -263,7 +266,7 @@ class MacroModel:
         return sp.lambdify(
             self._dynamic_input_symbols,
             self._dynamic_hessian,
-            modules="numpy",
+            modules=_numpy_lambdify_modules(),
         )
 
     @cached_property
@@ -271,7 +274,7 @@ class MacroModel:
         return sp.lambdify(
             self._dynamic_input_symbols,
             self._dynamic_third,
-            modules="numpy",
+            modules=_numpy_lambdify_modules(),
         )
 
     def _coerce_parameter_values(
@@ -556,6 +559,7 @@ class MacroModel:
             parameters,
             parameter_values_provided=parameter_values is not None,
         )
+        lower_bounds, upper_bounds = self._bounds_vector(self.parameter_names)
 
         if steady_state is None:
             if self._parameter_equations_depend_on_steady_state:
@@ -624,6 +628,8 @@ class MacroModel:
             parameters,
             residual_fn=residual_fns[0],
             jacobian_fn=jacobian_fns[0],
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
             tol=tol,
             max_iter=max_iter,
             line_search_min_step=line_search_min_step,
@@ -648,6 +654,9 @@ class MacroModel:
 
         if self._parameter_equations_depend_on_steady_state:
             joint_initial = np.concatenate([guess, initial_parameters])
+            lower_bounds, upper_bounds = self._bounds_vector(
+                tuple(self.steady_state_names) + tuple(self.parameter_names)
+            )
 
             def residual_fn(x: np.ndarray) -> np.ndarray:
                 return np.asarray(
@@ -665,6 +674,8 @@ class MacroModel:
                 joint_initial,
                 residual_fn=residual_fn,
                 jacobian_fn=jacobian_fn,
+                lower_bounds=lower_bounds,
+                upper_bounds=upper_bounds,
                 tol=tol,
                 max_iter=max_iter,
                 line_search_min_step=line_search_min_step,
@@ -699,6 +710,8 @@ class MacroModel:
                 guess,
                 residual_fn=residual_fn,
                 jacobian_fn=jacobian_fn,
+                lower_bounds=self._bounds_vector(self.steady_state_names)[0],
+                upper_bounds=self._bounds_vector(self.steady_state_names)[1],
                 tol=tol,
                 max_iter=max_iter,
                 line_search_min_step=line_search_min_step,
@@ -729,6 +742,15 @@ class MacroModel:
             if name in calibrated and name in self.default_initial_guess:
                 updated[idx] = float(self.default_initial_guess[name])
         return updated
+
+    def _bounds_vector(self, names: Sequence[str]) -> tuple[np.ndarray, np.ndarray]:
+        lower = np.full((len(names),), -np.inf, dtype=np.float64)
+        upper = np.full((len(names),), np.inf, dtype=np.float64)
+        for idx, name in enumerate(names):
+            if name not in self.bounds:
+                continue
+            lower[idx], upper[idx] = self.bounds[name]
+        return lower, upper
 
     def _dynamic_evaluation_args(
         self,
@@ -1342,6 +1364,7 @@ def parse_macro_model(source: str) -> MacroModel:
             sorted(parsed_parameter_block.calibrated_target_names)
         ),
         default_initial_guess=default_initial_guess,
+        bounds=parsed_parameter_block.bounds,
         timings=timings,
         steady_state_names=steady_state_names,
         steady_state_reference_names=steady_state_reference_names,
@@ -1562,12 +1585,28 @@ def _solve_newton_system(
     *,
     residual_fn: object,
     jacobian_fn: object,
+    lower_bounds: Optional[Sequence[float]] = None,
+    upper_bounds: Optional[Sequence[float]] = None,
     tol: float,
     max_iter: int,
     line_search_min_step: float,
     nonfinite_message: str,
 ) -> tuple[np.ndarray, bool, int, float]:
     x = np.asarray(initial, dtype=np.float64)
+    if lower_bounds is not None or upper_bounds is not None:
+        lower = (
+            np.asarray(lower_bounds, dtype=np.float64)
+            if lower_bounds is not None
+            else np.full_like(x, -np.inf)
+        )
+        upper = (
+            np.asarray(upper_bounds, dtype=np.float64)
+            if upper_bounds is not None
+            else np.full_like(x, np.inf)
+        )
+        x = np.clip(x, lower, upper)
+    else:
+        lower = upper = None
     residual = np.asarray(residual_fn(x), dtype=np.float64).reshape(-1)
     residual_norm = float(np.linalg.norm(residual, ord=np.inf))
     if not np.isfinite(residual_norm):
@@ -1587,6 +1626,8 @@ def _solve_newton_system(
         accepted = False
         while step >= line_search_min_step:
             candidate = x + step * direction
+            if lower is not None and upper is not None:
+                candidate = np.clip(candidate, lower, upper)
             if np.isfinite(candidate).all():
                 candidate_residual = np.asarray(
                     residual_fn(candidate),
@@ -1603,6 +1644,8 @@ def _solve_newton_system(
 
         if not accepted:
             x = x + direction
+            if lower is not None and upper is not None:
+                x = np.clip(x, lower, upper)
             residual = np.asarray(residual_fn(x), dtype=np.float64).reshape(-1)
             residual_norm = float(np.linalg.norm(residual, ord=np.inf))
             if not np.isfinite(residual_norm):
@@ -1962,6 +2005,154 @@ def _expand_default_initial_guess(
             for name in indexed_targets[key]:
                 expanded[name] = float(value)
     return expanded
+
+
+def _parse_parameter_bounds_line(
+    line: str,
+    available_indexed_names: Mapping[str, tuple[str, ...]],
+) -> dict[str, tuple[float, float]]:
+    tokens = [
+        token.strip()
+        for token in re.split(r"\s*(<=|>=|<|>)\s*", line.strip())
+        if token.strip()
+    ]
+    if len(tokens) == 3:
+        return _parse_single_parameter_bound(
+            tokens[0],
+            tokens[1],
+            tokens[2],
+            available_indexed_names,
+        )
+    if len(tokens) == 5:
+        bounds = _parse_single_parameter_bound(
+            tokens[0],
+            tokens[1],
+            tokens[2],
+            available_indexed_names,
+        )
+        for name, bound in _parse_single_parameter_bound(
+            tokens[2],
+            tokens[3],
+            tokens[4],
+            available_indexed_names,
+        ).items():
+            bounds[name] = _merge_bounds(bounds.get(name), bound)
+        return bounds
+    raise ValueError(f"Unsupported bound syntax `{line}` in `@parameters`.")
+
+
+def _parse_single_parameter_bound(
+    lhs_text: str,
+    operator: str,
+    rhs_text: str,
+    available_indexed_names: Mapping[str, tuple[str, ...]],
+) -> dict[str, tuple[float, float]]:
+    lhs_is_identifier = _is_bound_identifier(lhs_text)
+    rhs_is_identifier = _is_bound_identifier(rhs_text)
+
+    if lhs_is_identifier == rhs_is_identifier:
+        raise ValueError(
+            "Bounds in `@parameters` must compare one identifier against one "
+            f"numeric expression, got `{lhs_text} {operator} {rhs_text}`."
+        )
+
+    if lhs_is_identifier:
+        target_names = _expand_bound_target_names(lhs_text, available_indexed_names)
+        bound = _bound_from_comparison(
+            target_on_left=True,
+            operator=operator,
+            value=_parse_bound_value(rhs_text),
+        )
+    else:
+        target_names = _expand_bound_target_names(rhs_text, available_indexed_names)
+        bound = _bound_from_comparison(
+            target_on_left=False,
+            operator=operator,
+            value=_parse_bound_value(lhs_text),
+        )
+
+    return {name: bound for name in target_names}
+
+
+def _is_bound_identifier(text: str) -> bool:
+    return bool(re.fullmatch(r"(?!\d)\w+(?:\{[^{}\[\]]+\})*", text.strip()))
+
+
+def _expand_bound_target_names(
+    name: str,
+    available_indexed_names: Mapping[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    target_name = name.strip()
+    if _is_indexed_identifier(target_name):
+        return (target_name,)
+    return available_indexed_names.get(target_name, (target_name,))
+
+
+def _parse_bound_value(text: str) -> float:
+    value = parse_expr(
+        text.strip(),
+        local_dict=_function_locals(),
+        transformations=_TRANSFORMATIONS,
+    )
+    numeric_value = float(value)
+    if not np.isfinite(numeric_value):
+        raise ValueError(f"Bound value `{text}` must evaluate to a finite number.")
+    return numeric_value
+
+
+def _bound_from_comparison(
+    *,
+    target_on_left: bool,
+    operator: str,
+    value: float,
+) -> tuple[float, float]:
+    if target_on_left:
+        if operator == "<":
+            return (-np.inf, _open_upper_bound(value))
+        if operator == "<=":
+            return (-np.inf, value)
+        if operator == ">":
+            return (_open_lower_bound(value), np.inf)
+        if operator == ">=":
+            return (value, np.inf)
+    else:
+        if operator == "<":
+            return (_open_lower_bound(value), np.inf)
+        if operator == "<=":
+            return (value, np.inf)
+        if operator == ">":
+            return (-np.inf, _open_upper_bound(value))
+        if operator == ">=":
+            return (-np.inf, value)
+    raise ValueError(f"Unsupported bound operator `{operator}`.")
+
+
+def _open_lower_bound(value: float) -> float:
+    return float(np.nextafter(value, np.inf))
+
+
+def _open_upper_bound(value: float) -> float:
+    return float(np.nextafter(value, -np.inf))
+
+
+def _merge_bounds(
+    current: Optional[tuple[float, float]],
+    update: tuple[float, float],
+) -> tuple[float, float]:
+    if current is None:
+        lower, upper = update
+    else:
+        lower = max(current[0], update[0])
+        upper = min(current[1], update[1])
+    if lower > upper:
+        raise ValueError(f"Invalid bounds after merging: ({lower}, {upper}).")
+    return (lower, upper)
+
+
+def _is_parameter_bounds_line(line: str) -> bool:
+    if not re.search(r"<=|>=|<|>", line):
+        return False
+    return re.search(r"(?<![<>=])=(?![=>])", line) is None
 
 
 def _evaluate_integer_expression(text: str) -> int:
@@ -2324,9 +2515,17 @@ def _parse_parameter_block(
     calibrated_target_names: list[str] = []
     equation_texts: list[str] = []
     direct_definition_texts: dict[str, str] = {}
+    bounds: dict[str, tuple[float, float]] = {}
     seen_targets: set[str] = set()
 
     for line in _split_body_lines(body):
+        if _is_parameter_bounds_line(line):
+            for name, bound in _parse_parameter_bounds_line(
+                line,
+                available_indexed_names,
+            ).items():
+                bounds[name] = _merge_bounds(bounds.get(name), bound)
+            continue
         if "=" not in line:
             continue
         for (
@@ -2356,6 +2555,7 @@ def _parse_parameter_block(
         calibrated_target_names=tuple(calibrated_target_names),
         equation_texts=tuple(equation_texts),
         initial_values=_initial_parameter_guesses(target_names, direct_definition_texts),
+        bounds=bounds,
     )
 
 
@@ -2699,18 +2899,33 @@ def _flatten_third_order(expr: sp.Expr, symbols: Sequence[sp.Symbol]) -> list[sp
 def _function_locals() -> dict[str, object]:
     normcdf = lambda x: sp.Rational(1, 2) * (1 + sp.erf(x / sp.sqrt(2)))
     norminv = lambda x: sp.sqrt(2) * sp.erfinv(2 * x - 1)
+    normpdf = lambda x: sp.exp(-(x**2) / 2) / sp.sqrt(2 * sp.pi)
+    normlogpdf = lambda x: -(x**2) / 2 - sp.log(sp.sqrt(2 * sp.pi))
     return {
         "abs": sp.Abs,
+        "dnorm": normpdf,
+        "erfcinv": sp.erfcinv,
         "exp": sp.exp,
         "log": sp.log,
         "max": sp.Max,
         "min": sp.Min,
         "normcdf": normcdf,
+        "normlogpdf": normlogpdf,
+        "normpdf": normpdf,
         "norminvcdf": norminv,
         "norminv": norminv,
+        "pnorm": normcdf,
         "qnorm": norminv,
         "sqrt": sp.sqrt,
     }
+
+
+def _numpy_lambdify_modules() -> list[object]:
+    return [{"erfcinv": scipy_special.erfcinv}, "numpy"]
+
+
+def _jax_lambdify_modules() -> list[object]:
+    return [{"erfcinv": scipy_special.erfcinv}, "jax"]
 
 
 def _is_indexed_identifier(name: str) -> bool:
