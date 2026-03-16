@@ -236,6 +236,20 @@ Python/JAX status:
 - targeted tests verify zero eager `lambdify` calls at parse time and cache reuse across steady-state, Jacobian, Hessian, third-order, and dynamic-residual evaluation paths
 - the upstream `Backus_Kehoe_Kydland_1992.jl` model now parses successfully as a smoke check instead of stalling in eager compilation
 
+### 15. `@parameters` default `guess = Dict(...)` support
+
+Julia reference:
+
+- `src/macros.jl`
+- `test/runtests.jl` (`guess = Dict(:alpha => .2, :beta => .99)`)
+
+Python/JAX status:
+
+- parsed `@parameters` options now read `guess = Dict(...)` entries with Julia-style symbol or string keys
+- default guesses are applied to steady-state variables when no explicit `initial_guess` is passed to `solve_steady_state`
+- guesses for calibrated parameters now seed the joint steady-state/calibration solve, while explicit `initial_guess` and `parameter_values` arguments still override the defaults
+- tests verify branch-sensitive steady-state behavior from the default guess and direct capture of calibrated-parameter guesses in the joint Newton initial condition
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -245,7 +259,7 @@ Python/JAX status:
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
 - The current parsed front end supports explicit identifier-list/range `for` expansion in `@model`, but not implicit symbolic collections such as `for co in countries`.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
-- The current parsed front end does not yet port parameter bounds and other non-equation `@parameters` directives from the Julia macro layer.
+- The current parsed front end does not yet port parameter bounds and the remaining non-equation `@parameters` directives from the Julia macro layer.
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.

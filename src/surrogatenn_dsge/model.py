@@ -117,6 +117,7 @@ class MacroModel:
     parameter_names: tuple[str, ...]
     parameter_values: jax.Array
     calibrated_parameter_names: tuple[str, ...]
+    default_initial_guess: dict[str, float]
     timings: DSGETimings
     steady_state_names: tuple[str, ...]
     steady_state_reference_names: tuple[str, ...]
@@ -294,7 +295,13 @@ class MacroModel:
     ) -> np.ndarray:
         n = len(self.steady_state_names)
         if initial_guess is None:
-            return np.ones(n, dtype=np.float64)
+            if not self.default_initial_guess:
+                return np.ones(n, dtype=np.float64)
+            guess = np.ones(n, dtype=np.float64)
+            for idx, name in enumerate(self.steady_state_names):
+                if name in self.default_initial_guess:
+                    guess[idx] = float(self.default_initial_guess[name])
+            return guess
         if isinstance(initial_guess, Mapping):
             guess = np.ones(n, dtype=np.float64)
             for idx, name in enumerate(self.steady_state_names):
@@ -545,6 +552,10 @@ class MacroModel:
 
         if len(self.parameter_names) == 0:
             return jnp.asarray(parameters, dtype=jnp.float64)
+        parameters = self._apply_default_calibrated_parameter_guess(
+            parameters,
+            parameter_values_provided=parameter_values is not None,
+        )
 
         if steady_state is None:
             if self._parameter_equations_depend_on_steady_state:
@@ -630,7 +641,10 @@ class MacroModel:
         line_search_min_step: float = 2.0**-16,
     ) -> SteadyStateResult:
         guess = self._coerce_steady_state_guess(initial_guess)
-        initial_parameters = self._coerce_parameter_values(parameter_values)
+        initial_parameters = self._apply_default_calibrated_parameter_guess(
+            self._coerce_parameter_values(parameter_values),
+            parameter_values_provided=parameter_values is not None,
+        )
 
         if self._parameter_equations_depend_on_steady_state:
             joint_initial = np.concatenate([guess, initial_parameters])
@@ -700,6 +714,21 @@ class MacroModel:
             iterations=iterations,
             residual_norm=residual_norm,
         )
+
+    def _apply_default_calibrated_parameter_guess(
+        self,
+        parameter_values: np.ndarray,
+        *,
+        parameter_values_provided: bool,
+    ) -> np.ndarray:
+        if parameter_values_provided or not self.default_initial_guess:
+            return parameter_values
+        calibrated = set(self.calibrated_parameter_names)
+        updated = np.asarray(parameter_values, dtype=np.float64).copy()
+        for idx, name in enumerate(self.parameter_names):
+            if name in calibrated and name in self.default_initial_guess:
+                updated[idx] = float(self.default_initial_guess[name])
+        return updated
 
     def _dynamic_evaluation_args(
         self,
@@ -1159,6 +1188,7 @@ def parse_macro_model(source: str) -> MacroModel:
         raise ValueError(
             "The `@parameters` block must target the same model name as `@model`."
         )
+    raw_default_guess = _parse_parameter_block_guess(parameter_block["options"])
 
     equations = tuple(_split_model_body_lines(model_block["body"]))
     if not equations:
@@ -1297,6 +1327,11 @@ def parse_macro_model(source: str) -> MacroModel:
         bool(expr.free_symbols & set(steady_state_symbols))
         for expr in parameter_exprs
     )
+    default_initial_guess = _expand_default_initial_guess(
+        raw_default_guess,
+        steady_state_names=steady_state_names,
+        calibrated_parameter_names=parsed_parameter_block.calibrated_target_names,
+    )
 
     return MacroModel(
         name=model_block["name"],
@@ -1306,6 +1341,7 @@ def parse_macro_model(source: str) -> MacroModel:
         calibrated_parameter_names=tuple(
             sorted(parsed_parameter_block.calibrated_target_names)
         ),
+        default_initial_guess=default_initial_guess,
         timings=timings,
         steady_state_names=steady_state_names,
         steady_state_reference_names=steady_state_reference_names,
@@ -1843,6 +1879,89 @@ def _split_top_level(text: str, delimiter: str) -> list[str]:
         current.append(char)
     parts.append("".join(current).strip())
     return parts
+
+
+def _split_top_level_operator(text: str, operator: str) -> tuple[str, str]:
+    depth = 0
+    idx = 0
+    while idx <= len(text) - len(operator):
+        char = text[idx]
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        if depth == 0 and text.startswith(operator, idx):
+            return text[:idx].strip(), text[idx + len(operator) :].strip()
+        idx += 1
+    raise ValueError(f"Could not find top-level operator `{operator}` in `{text}`.")
+
+
+def _parse_parameter_block_guess(options_text: str) -> dict[str, float]:
+    match = re.search(r"\bguess\s*=\s*Dict\s*\(", options_text)
+    if match is None:
+        return {}
+
+    open_idx = options_text.find("(", match.start())
+    close_idx = _find_matching_delimiter(options_text, open_idx, "(", ")")
+    body = options_text[open_idx + 1 : close_idx].strip()
+    if not body:
+        return {}
+
+    guesses: dict[str, float] = {}
+    for entry in _split_top_level(body, ","):
+        if not entry:
+            continue
+        key_text, value_text = _split_top_level_operator(entry, "=>")
+        guesses[_parse_guess_key(key_text)] = _parse_guess_value(value_text)
+    return guesses
+
+
+def _parse_guess_key(text: str) -> str:
+    token = text.strip()
+    if token.startswith(":") and len(token) > 1:
+        return token[1:]
+    if len(token) >= 2 and token[0] == token[-1] == '"':
+        return token[1:-1]
+    if re.fullmatch(r"(?!\d)\w+(?:\{[^{}\[\]]+\})*", token):
+        return token
+    raise ValueError(f"Unsupported guess key `{text}` in `@parameters` options.")
+
+
+def _parse_guess_value(text: str) -> float:
+    value = parse_expr(
+        text.strip(),
+        local_dict=_function_locals(),
+        transformations=_TRANSFORMATIONS,
+    )
+    numeric_value = float(value)
+    if not np.isfinite(numeric_value):
+        raise ValueError(f"Guess value `{text}` must evaluate to a finite number.")
+    return numeric_value
+
+
+def _expand_default_initial_guess(
+    raw_guess: Mapping[str, float],
+    *,
+    steady_state_names: Sequence[str],
+    calibrated_parameter_names: Sequence[str],
+) -> dict[str, float]:
+    if not raw_guess:
+        return {}
+
+    indexed_targets: dict[str, list[str]] = {}
+    for name in tuple(steady_state_names) + tuple(calibrated_parameter_names):
+        if _is_indexed_identifier(name):
+            indexed_targets.setdefault(_identifier_base_name(name), []).append(name)
+
+    expanded: dict[str, float] = {}
+    for key, value in raw_guess.items():
+        if key in steady_state_names or key in calibrated_parameter_names:
+            expanded[key] = float(value)
+            continue
+        if not _is_indexed_identifier(key) and key in indexed_targets:
+            for name in indexed_targets[key]:
+                expanded[name] = float(value)
+    return expanded
 
 
 def _evaluate_integer_expression(text: str) -> int:
