@@ -290,6 +290,20 @@ Python/JAX status:
 - symbol literals in source-level collections now support Julia-style `:H` syntax before substitution into brace-indexed identifiers
 - tests verify top-level named-collection parity, named-range parity, and explicit failure for undefined collection names rather than silent inference
 
+### 19. Parsed-model observable resolution and first-order state-space bridge
+
+Julia reference:
+
+- `src/MacroModelling.jl` (`get_and_check_observables`)
+- first-order state-space usage around the Kalman layer
+
+Python/JAX status:
+
+- parsed models now resolve observable names like `(\"y\", \"c\")` into first-order solution row indices without exposing integer indexing in user code
+- parsed models now build `LinearGaussianStateSpace` objects directly from a parsed first-order solution, preserving the existing low-level transition, shock, and observation construction
+- custom measurement-error covariance matrices can now be injected at the parsed-model layer instead of only the low-level index-based helper
+- tests verify observable-order preservation, explicit failure for unknown names, parity with the low-level state-space helper, and JAX JIT/device accessibility for the resulting state-space objects
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.

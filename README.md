@@ -18,6 +18,7 @@ Implemented:
 - JAX-native dense direct solver fallback
 - discrete Sylvester solver for `A X B + C = X`
 - linear Gaussian state-space simulation, Kalman likelihood, filtering, and RTS smoothing
+- parsed-model observable-name resolution and first-order state-space construction for Kalman estimation
 - quadratic matrix equation doubling solver
 - MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
 - MacroModelling-style inline time-index `for` loops inside `@model` equations, including additive and `operator = :*` forms

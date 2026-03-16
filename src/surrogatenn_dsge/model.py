@@ -24,6 +24,7 @@ from .dsge import (
     SecondOrderStochasticSteadyStateResult,
     ThirdOrderDSGEResult,
     ThirdOrderStochasticSteadyStateResult,
+    linear_state_space_from_first_order_solution,
     solve_first_order_dsge_solution,
     solve_second_order_dsge_solution,
     solve_second_order_stochastic_steady_state,
@@ -35,6 +36,7 @@ from .sep import (
     SEPSolution,
     solve_stochastic_extended_path_residual_expectation,
 )
+from .statespace import LinearGaussianStateSpace
 
 _TRANSFORMATIONS = standard_transformations + (
     convert_xor,
@@ -729,6 +731,97 @@ class MacroModel:
             converged=converged,
             iterations=iterations,
             residual_norm=residual_norm,
+        )
+
+    def _coerce_observable_names(self, observables: Sequence[str] | str) -> tuple[str, ...]:
+        names = (observables,) if isinstance(observables, str) else tuple(observables)
+        if not names:
+            raise ValueError("observables must contain at least one variable name.")
+        duplicates = tuple(
+            name for idx, name in enumerate(names) if name in names[:idx]
+        )
+        if duplicates:
+            raise ValueError(
+                "observables must not contain duplicates, got "
+                + ", ".join(duplicates)
+                + "."
+            )
+        return tuple(str(name) for name in names)
+
+    def resolve_observable_indices(
+        self,
+        observables: Sequence[str] | str,
+    ) -> tuple[int, ...]:
+        names = self._coerce_observable_names(observables)
+        available = set(self.steady_state_names)
+        unknown = tuple(name for name in names if name not in available)
+        if unknown:
+            raise ValueError(
+                "Unknown observable names: "
+                + ", ".join(unknown)
+                + ". Available observables: "
+                + ", ".join(self.steady_state_names)
+                + "."
+            )
+        index_lookup = {name: idx for idx, name in enumerate(self.timings.var)}
+        return tuple(index_lookup[name] for name in names)
+
+    def build_linear_state_space(
+        self,
+        observables: Sequence[str] | str,
+        *,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        initial_covariance_strategy: str = "theoretical",
+        measurement_error_scale: float = 1e-9,
+        measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    ) -> LinearGaussianStateSpace:
+        observable_indices = self.resolve_observable_indices(observables)
+        resolved_first_order = first_order_result
+        if resolved_first_order is None:
+            resolved_first_order = self.solve_first_order(
+                parameter_values=parameter_values,
+                steady_state=steady_state,
+                steady_state_initial_guess=steady_state_initial_guess,
+                steady_state_tol=steady_state_tol,
+                steady_state_max_iter=steady_state_max_iter,
+            )
+
+        state_space = linear_state_space_from_first_order_solution(
+            resolved_first_order.solution.solution_matrix,
+            self.timings,
+            observable_indices=observable_indices,
+            initial_covariance_strategy=initial_covariance_strategy,
+            measurement_error_scale=(
+                0.0 if measurement_error_covariance is not None else measurement_error_scale
+            ),
+        )
+        if measurement_error_covariance is None:
+            return state_space
+
+        observation_covariance = np.asarray(
+            measurement_error_covariance,
+            dtype=np.float64,
+        )
+        expected_shape = (len(observable_indices), len(observable_indices))
+        if observation_covariance.shape != expected_shape:
+            raise ValueError(
+                "measurement_error_covariance must have shape "
+                f"{expected_shape}, got {observation_covariance.shape}."
+            )
+        if not np.isfinite(observation_covariance).all():
+            raise ValueError(
+                "measurement_error_covariance must contain only finite values."
+            )
+        return state_space._replace(
+            observation_noise_covariance=jnp.asarray(
+                observation_covariance,
+                dtype=state_space.transition_matrix.dtype,
+            )
         )
 
     def _apply_default_calibrated_parameter_guess(
@@ -1480,6 +1573,41 @@ def evaluate_dynamic_residual(
         shock=shock,
         parameter_values=parameter_values,
         steady_state=steady_state,
+    )
+
+
+def resolve_observable_indices(
+    model: MacroModel,
+    observables: Sequence[str] | str,
+) -> tuple[int, ...]:
+    return model.resolve_observable_indices(observables)
+
+
+def build_linear_state_space_from_model(
+    model: MacroModel,
+    observables: Sequence[str] | str,
+    *,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+) -> LinearGaussianStateSpace:
+    return model.build_linear_state_space(
+        observables,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_covariance_strategy=initial_covariance_strategy,
+        measurement_error_scale=measurement_error_scale,
+        measurement_error_covariance=measurement_error_covariance,
     )
 
 
