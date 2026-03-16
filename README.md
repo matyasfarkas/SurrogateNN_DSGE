@@ -21,6 +21,8 @@ Implemented:
 - quadratic matrix equation doubling solver
 - MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
 - MacroModelling-style inline time-index `for` loops inside `@model` equations, including additive and `operator = :*` forms
+- explicit curly-brace indexed identifiers such as `y{H}[0]` and `rho{H}{F}` across parsed model and parameter blocks
+- top-level `for`-block expansion in `@model` for explicit identifier lists like `[H, F]` and integer ranges
 - order-independent parameter definitions in `@parameters` blocks
 - calibration equations in `@parameters` blocks, including both `par | lhs = rhs` and `lhs = rhs | par` forms
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
@@ -40,7 +42,8 @@ Implemented:
 Not implemented yet:
 
 - perturbation orders above third
-- top-level symbolic/indexed `for`-loop model generation from the Julia macro layer
+- implicit symbolic collection loops such as `for co in countries` from the Julia macro layer
+- general parameter-family broadcasting like `alpha = 0.3` applying to all indexed `alpha{...}` instances
 - parameter bounds and other non-equation `@parameters` directives from the Julia macro layer
 - occasionally binding constraint parsing from the Julia macro layer
 - Julia sparse-tree / HMC SEP variants and OBC-specific SEP machinery

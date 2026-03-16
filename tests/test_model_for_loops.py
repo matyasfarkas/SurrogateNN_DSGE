@@ -174,16 +174,16 @@ def test_multiline_time_for_loops_match_explicit_model() -> None:
 def test_top_level_model_for_loop_blocks_remain_explicitly_unsupported() -> None:
     source = """
     @model unsupported_loop_block begin
-        for lag in -1:0
-            y[lag] = rho * y[lag - 1]
+        for co in countries
+            y{co}[0] = rho{co} * y{co}[-1]
         end
-        y[1] = rho * y[0] + eps[x]
     end
 
     @parameters unsupported_loop_block begin
-        rho = 0.9
+        rho{H} = 0.9
+        rho{F} = 0.8
     end
     """
 
-    with pytest.raises(NotImplementedError, match="not ported yet"):
+    with pytest.raises(NotImplementedError, match="explicit identifier lists"):
         parse_macro_model(source)

@@ -191,6 +191,21 @@ Python/JAX status:
 - deterministic shocks can be passed either as a matrix in model exogenous order or as a mapping from shock names to time series
 - tests verify low-level residual-expectation equivalence, direct dynamic-residual evaluation, and parsed-model SEP parity against the same nonlinear equation written as a manual conditional residual callback
 
+### 12. Explicit indexed identifiers and top-level symbolic `for` expansion
+
+Julia reference:
+
+- `src/MacroModelling.jl` (`replace_indices_inside_for_loop`, `replace_indices`, `parse_for_loops`)
+- `test/models/Backus_Kehoe_Kydland_1992.jl`
+
+Python/JAX status:
+
+- parsed `@model` and `@parameters` blocks now accept explicit curly-brace indexed identifiers such as `y{H}[0]`, `u{F}[x]`, and `rho{H}{F}`
+- brace-indexed parameter names are sanitized only for symbolic parsing, while the public `parameter_names` and timing metadata preserve the original Julia-style syntax
+- top-level `for` blocks in `@model` now expand into multiple equations for explicit identifier lists like `[H, F]` and integer ranges
+- inline symbolic sums such as `for co in [H, F] y{co}[0] end` now expand inside equations alongside the previously ported time-index loops
+- tests verify top-level indexed-loop parity, inline indexed-sum parity, and nested brace-index parameter resolution
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -198,7 +213,8 @@ Python/JAX status:
 - The Julia QME `:schur` variant is not ported yet; the Python port currently uses the doubling solver.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
-- The current parsed front end only supports inline time-index `for` loops inside equations; programmatic symbolic/indexed `for`-loop model generation is not ported yet.
+- The current parsed front end supports explicit identifier-list/range `for` expansion in `@model`, but not implicit symbolic collections such as `for co in countries`.
+- The Julia macro behavior that broadcasts unindexed parameter definitions across indexed parameter families is not ported yet.
 - The current parsed front end does not yet port parameter bounds and other non-equation `@parameters` directives from the Julia macro layer.
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.

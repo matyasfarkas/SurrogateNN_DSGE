@@ -51,10 +51,11 @@ _PARAMETERS_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 _REFERENCE_RE = re.compile(
-    r"(?P<name>(?!\d)\w+(?:\{[^{}\[\]]+\})?)\s*\[\s*(?P<index>[^\]]+)\s*\]",
+    r"(?P<name>(?!\d)\w+(?:\{[^{}\[\]]+\})*)\s*\[\s*(?P<index>[^\]]+)\s*\]",
     re.UNICODE,
 )
-_IDENTIFIER_RE = re.compile(r"\b(?!\d)\w+\b", re.UNICODE)
+_IDENTIFIER_RE = re.compile(r"(?!\d)\w+(?:\{[^{}\[\]]+\})*", re.UNICODE)
+_INDEXED_IDENTIFIER_RE = re.compile(r"(?!\d)\w+(?:\{[^{}\[\]]+\})+", re.UNICODE)
 
 
 class SteadyStateResult(NamedTuple):
@@ -1089,20 +1090,38 @@ def parse_macro_model(source: str) -> MacroModel:
         dtype=jnp.float64,
     )
 
-    parameter_symbols = tuple(sp.Symbol(name, real=True) for name in parameter_names)
-    parameter_symbol_map = dict(zip(parameter_names, parameter_symbols))
+    parameter_parse_names = tuple(
+        _parameter_parse_name(name) for name in parameter_names
+    )
+    parameter_name_map = dict(zip(parameter_names, parameter_parse_names))
+    parameter_symbols = tuple(
+        sp.Symbol(name, real=True) for name in parameter_parse_names
+    )
+    parameter_symbol_map = dict(zip(parameter_parse_names, parameter_symbols))
     parse_locals = {**timed_symbols, **parameter_symbol_map, **_function_locals()}
 
     dynamic_exprs = tuple(
-        parse_expr(text, local_dict=parse_locals, transformations=_TRANSFORMATIONS)
+        parse_expr(
+            _sanitize_indexed_identifiers(text, parameter_name_map),
+            local_dict=parse_locals,
+            transformations=_TRANSFORMATIONS,
+        )
         for text in dynamic_texts
     )
     steady_state_exprs = tuple(
-        parse_expr(text, local_dict=parse_locals, transformations=_TRANSFORMATIONS)
+        parse_expr(
+            _sanitize_indexed_identifiers(text, parameter_name_map),
+            local_dict=parse_locals,
+            transformations=_TRANSFORMATIONS,
+        )
         for text in steady_state_texts
     )
     parameter_exprs = tuple(
-        parse_expr(text, local_dict=parse_locals, transformations=_TRANSFORMATIONS)
+        parse_expr(
+            _sanitize_indexed_identifiers(text, parameter_name_map),
+            local_dict=parse_locals,
+            transformations=_TRANSFORMATIONS,
+        )
         for text in parsed_parameter_block.equation_texts
     )
 
@@ -1517,23 +1536,19 @@ def _split_model_body_lines(body: str) -> list[str]:
             raise ValueError("Encountered `end` without a matching `for` in `@model`.")
 
         if loop_depth == 0 and not _model_line_requires_continuation(stripped):
-            if _is_unsupported_block_for_statement(current):
-                raise NotImplementedError(
-                    "Top-level symbolic/indexed `for`-loop blocks in `@model` are not "
-                    "ported yet. Time-index expression loops are supported."
-                )
-            statements.append(_expand_inline_for_loops(" ".join(current)))
+            if _is_model_for_block_statement(current):
+                statements.extend(_expand_model_for_block(current))
+            else:
+                statements.append(_expand_inline_for_loops(" ".join(current)))
             current = []
 
     if loop_depth != 0:
         raise ValueError("Unbalanced `for` / `end` blocks in `@model`.")
     if current:
-        if _is_unsupported_block_for_statement(current):
-            raise NotImplementedError(
-                "Top-level symbolic/indexed `for`-loop blocks in `@model` are not "
-                "ported yet. Time-index expression loops are supported."
-            )
-        statements.append(_expand_inline_for_loops(" ".join(current)))
+        if _is_model_for_block_statement(current):
+            statements.extend(_expand_model_for_block(current))
+        else:
+            statements.append(_expand_inline_for_loops(" ".join(current)))
     return statements
 
 
@@ -1547,13 +1562,37 @@ def _block_line_delta(line: str) -> int:
     return len(re.findall(r"\bfor\b", line)) - len(re.findall(r"\bend\b", line))
 
 
-def _is_unsupported_block_for_statement(lines: Sequence[str]) -> bool:
+def _is_model_for_block_statement(lines: Sequence[str]) -> bool:
     return (
         bool(lines)
         and lines[0].startswith("for ")
         and lines[-1] == "end"
         and len(lines) > 1
     )
+
+
+def _expand_model_for_block(lines: Sequence[str]) -> list[str]:
+    if not _is_model_for_block_statement(lines):
+        raise ValueError("Expected a top-level `for` block in `@model`.")
+    _, loop_var, indices_text, inline_body = _parse_for_loop_header(
+        lines[0][len("for") :].strip(),
+        lines[0],
+        allow_empty_body=True,
+    )
+    body_lines = list(lines[1:-1])
+    if inline_body:
+        body_lines.insert(0, inline_body)
+    if not body_lines:
+        return []
+
+    expanded: list[str] = []
+    for idx in _parse_for_loop_indices(indices_text):
+        substituted_lines = [
+            _substitute_loop_variable(line, loop_var, idx)
+            for line in body_lines
+        ]
+        expanded.extend(_split_model_body_lines("\n".join(substituted_lines)))
+    return expanded
 
 
 def _expand_inline_for_loops(statement: str) -> str:
@@ -1584,28 +1623,11 @@ def _expand_single_inline_for_loop(segment: str) -> str:
     if not re.search(r"\bend\s*$", segment_text):
         raise ValueError(f"Could not find closing `end` in `for` loop `{segment}`.")
     loop_text = re.sub(r"\s*\bend\s*$", "", segment_text)
-    rest = loop_text[len("for") :].strip()
-    operator = "+"
-    if rest.startswith("operator"):
-        operator_match = re.match(
-            r"operator\s*=\s*:(?P<op>[+*])\s*,\s*(?P<rest>.*)",
-            rest,
-        )
-        if operator_match is None:
-            raise ValueError(f"Could not parse `for`-loop operator in `{segment}`.")
-        operator = operator_match.group("op")
-        rest = operator_match.group("rest").strip()
-
-    header_match = re.match(r"(?P<var>(?!\d)\w+)\s+in\s+(?P<rest>.*)", rest)
-    if header_match is None:
-        raise ValueError(f"Could not parse `for`-loop header in `{segment}`.")
-    loop_var = header_match.group("var")
-    indices_text, body = _consume_loop_indices(header_match.group("rest"))
-    if not body:
-        raise NotImplementedError(
-            "Top-level symbolic/indexed `for`-loop blocks in `@model` are not "
-            "ported yet. Time-index expression loops are supported."
-        )
+    operator, loop_var, indices_text, body = _parse_for_loop_header(
+        loop_text[len("for") :].strip(),
+        segment,
+        allow_empty_body=False,
+    )
 
     indices = _parse_for_loop_indices(indices_text)
     terms = [
@@ -1614,6 +1636,34 @@ def _expand_single_inline_for_loop(segment: str) -> str:
     ]
     joiner = f" {operator} "
     return "(" + joiner.join(f"({term})" for term in terms) + ")"
+
+
+def _parse_for_loop_header(
+    rest: str,
+    segment: str,
+    *,
+    allow_empty_body: bool,
+) -> tuple[str, str, str, str]:
+    operator = "+"
+    header_rest = rest
+    if header_rest.startswith("operator"):
+        operator_match = re.match(
+            r"operator\s*=\s*:(?P<op>[+*])\s*,\s*(?P<rest>.*)",
+            header_rest,
+        )
+        if operator_match is None:
+            raise ValueError(f"Could not parse `for`-loop operator in `{segment}`.")
+        operator = operator_match.group("op")
+        header_rest = operator_match.group("rest").strip()
+
+    header_match = re.match(r"(?P<var>(?!\d)\w+)\s+in\s+(?P<rest>.*)", header_rest)
+    if header_match is None:
+        raise ValueError(f"Could not parse `for`-loop header in `{segment}`.")
+    loop_var = header_match.group("var")
+    indices_text, body = _consume_loop_indices(header_match.group("rest"))
+    if not allow_empty_body and not body:
+        raise ValueError(f"Missing `for`-loop body in `{segment}`.")
+    return operator, loop_var, indices_text, body
 
 
 def _consume_loop_indices(rest: str) -> tuple[str, str]:
@@ -1653,16 +1703,15 @@ def _find_matching_delimiter(
     raise ValueError(f"Could not find matching `{closing}` in `{text}`.")
 
 
-def _parse_for_loop_indices(indices_text: str) -> list[int]:
+def _parse_for_loop_indices(indices_text: str) -> list[int | str]:
     token = indices_text.strip()
     if token.startswith("[") and token.endswith("]"):
         entries = _split_top_level(token[1:-1], ",")
-        try:
-            return [_evaluate_integer_expression(entry) for entry in entries if entry.strip()]
-        except ValueError as exc:
-            raise NotImplementedError(
-                "Symbolic/indexed `for` loops in `@model` are not ported yet."
-            ) from exc
+        return [
+            _parse_for_loop_index_token(entry)
+            for entry in entries
+            if entry.strip()
+        ]
 
     range_parts = _split_top_level(token, ":")
     if len(range_parts) == 2:
@@ -1673,10 +1722,24 @@ def _parse_for_loop_indices(indices_text: str) -> list[int]:
 
     try:
         return [_evaluate_integer_expression(token)]
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise NotImplementedError(
-            "Symbolic/indexed `for` loops in `@model` are not ported yet."
+            "Symbolic/indexed `for` loops in `@model` are only supported for "
+            "explicit identifier lists like `[H, F]` and integer ranges."
         ) from exc
+
+
+def _parse_for_loop_index_token(token: str) -> int | str:
+    stripped = token.strip()
+    try:
+        return _evaluate_integer_expression(stripped)
+    except (TypeError, ValueError):
+        if re.fullmatch(r"(?!\d)\w+(?:\{[^{}\[\]]+\})*", stripped):
+            return stripped
+    raise NotImplementedError(
+        "Symbolic/indexed `for` loops in `@model` are only supported for "
+        "explicit identifier lists like `[H, F]` and integer ranges."
+    )
 
 
 def _split_top_level(text: str, delimiter: str) -> list[str]:
@@ -1710,7 +1773,7 @@ def _evaluate_integer_expression(text: str) -> int:
     return rounded
 
 
-def _substitute_loop_variable(statement: str, loop_var: str, value: int) -> str:
+def _substitute_loop_variable(statement: str, loop_var: str, value: int | str) -> str:
     return re.sub(rf"\b{re.escape(loop_var)}\b", str(value), statement)
 
 
@@ -1802,8 +1865,10 @@ def _parse_reference_index(index_text: str) -> tuple[str, int]:
             normalized[len(prefix) :],
         ):
             return "exo", int(normalized[len(prefix) :])
-    if re.fullmatch(r"[+-]?\d+", normalized):
-        return "time", int(normalized)
+    try:
+        return "time", _evaluate_integer_expression(normalized)
+    except ValueError:
+        pass
     raise ValueError(f"Unsupported time index `{index_text}`.")
 
 
@@ -2154,9 +2219,10 @@ def _parse_parameter_line(
 
 
 def _validate_parameter_target(target_text: str) -> str:
-    if not re.fullmatch(r"(?!\d)\w+", target_text):
+    if not re.fullmatch(r"(?!\d)\w+(?:\{[^{}\[\]]+\})*", target_text):
         raise ValueError(
-            "Parameter targets in `@parameters` must be plain identifiers, "
+            "Parameter targets in `@parameters` must be identifiers with optional "
+            "curly-brace indices, "
             f"got `{target_text}`."
         )
     return target_text
@@ -2190,15 +2256,24 @@ def _initial_parameter_guesses(
 ) -> dict[str, float]:
     environment: dict[str, float] = {}
     unresolved = dict(direct_definition_texts)
+    parse_name_map = {
+        name: _parameter_parse_name(name)
+        for name in target_names
+        if _is_indexed_identifier(name)
+    }
 
     progress = True
     while progress and unresolved:
         progress = False
         for name in list(unresolved):
             try:
+                local_env = {
+                    parse_name_map.get(key, key): value
+                    for key, value in environment.items()
+                }
                 value = parse_expr(
-                    unresolved[name],
-                    local_dict={**environment, **_function_locals()},
+                    _sanitize_indexed_identifiers(unresolved[name], parse_name_map),
+                    local_dict={**local_env, **_function_locals()},
                     transformations=_TRANSFORMATIONS,
                 )
                 numeric_value = float(value)
@@ -2241,6 +2316,26 @@ def _function_locals() -> dict[str, object]:
         "qnorm": norminv,
         "sqrt": sp.sqrt,
     }
+
+
+def _is_indexed_identifier(name: str) -> bool:
+    return "{" in name and "}" in name
+
+
+def _parameter_parse_name(name: str) -> str:
+    return f"par__{_encode_name(name)}" if _is_indexed_identifier(name) else name
+
+
+def _sanitize_indexed_identifiers(
+    expression: str,
+    replacements: Mapping[str, str],
+) -> str:
+    if not replacements:
+        return expression
+    return _INDEXED_IDENTIFIER_RE.sub(
+        lambda match: replacements.get(match.group(0), match.group(0)),
+        expression,
+    )
 
 
 def _encode_name(name: str) -> str:
