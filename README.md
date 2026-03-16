@@ -25,6 +25,7 @@ Implemented:
 - top-level `for`-block expansion in `@model` for explicit identifier lists like `[H, F]` and integer ranges
 - order-independent parameter definitions in `@parameters` blocks
 - calibration equations in `@parameters` blocks, including both `par | lhs = rhs` and `lhs = rhs | par` forms
+- indexed parameter-family broadcasting in `@parameters`, including `alpha = 0.3` style direct definitions and one-family calibration equations like `y[ss] = target | beta`
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
 - damped Newton non-stochastic steady-state solver
 - calibrated-parameter resolution from either the joint steady-state solve or a supplied steady state
@@ -43,7 +44,7 @@ Not implemented yet:
 
 - perturbation orders above third
 - implicit symbolic collection loops such as `for co in countries` from the Julia macro layer
-- general parameter-family broadcasting like `alpha = 0.3` applying to all indexed `alpha{...}` instances
+- ambiguous multi-family calibration-equation broadcasting remains guarded rather than inferred
 - parameter bounds and other non-equation `@parameters` directives from the Julia macro layer
 - occasionally binding constraint parsing from the Julia macro layer
 - Julia sparse-tree / HMC SEP variants and OBC-specific SEP machinery

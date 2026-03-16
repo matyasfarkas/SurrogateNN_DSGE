@@ -1059,11 +1059,17 @@ def parse_macro_model(source: str) -> MacroModel:
             )
         )
 
+    available_indexed_names = _available_indexed_parameter_names(
+        dynamic_texts + steady_state_texts,
+        timed_symbols,
+        timed_metadata,
+    )
     parsed_parameter_block = _parse_parameter_block(
         parameter_block["body"],
         timed_symbols,
         timed_metadata,
         exogenous_names,
+        available_indexed_names,
     )
     timings = _build_timings(timed_metadata)
     parameter_names = tuple(
@@ -2114,6 +2120,7 @@ def _parse_parameter_block(
     timed_symbols: dict[str, sp.Symbol],
     timed_metadata: dict[str, tuple[str, str, int]],
     exogenous_names: set[str],
+    available_indexed_names: Mapping[str, tuple[str, ...]],
 ) -> ParsedParameterBlock:
     target_names: list[str] = []
     calibrated_target_names: list[str] = []
@@ -2124,26 +2131,27 @@ def _parse_parameter_block(
     for line in _split_body_lines(body):
         if "=" not in line:
             continue
-        (
+        for (
             target_name,
             calibrated_target_name,
             equation_text,
             direct_definition_text,
-        ) = _parse_parameter_line(
+        ) in _parse_parameter_line(
             line,
             timed_symbols,
             timed_metadata,
             exogenous_names,
-        )
-        if target_name in seen_targets:
-            raise ValueError(f"Parameter `{target_name}` is defined more than once.")
-        seen_targets.add(target_name)
-        target_names.append(target_name)
-        equation_texts.append(equation_text)
-        if calibrated_target_name is not None:
-            calibrated_target_names.append(calibrated_target_name)
-        if direct_definition_text is not None:
-            direct_definition_texts[target_name] = direct_definition_text
+            available_indexed_names,
+        ):
+            if target_name in seen_targets:
+                raise ValueError(f"Parameter `{target_name}` is defined more than once.")
+            seen_targets.add(target_name)
+            target_names.append(target_name)
+            equation_texts.append(equation_text)
+            if calibrated_target_name is not None:
+                calibrated_target_names.append(calibrated_target_name)
+            if direct_definition_text is not None:
+                direct_definition_texts[target_name] = direct_definition_text
 
     return ParsedParameterBlock(
         target_names=tuple(target_names),
@@ -2158,64 +2166,68 @@ def _parse_parameter_line(
     timed_symbols: dict[str, sp.Symbol],
     timed_metadata: dict[str, tuple[str, str, int]],
     exogenous_names: set[str],
-) -> tuple[str, Optional[str], str, Optional[str]]:
+    available_indexed_names: Mapping[str, tuple[str, ...]],
+) -> list[tuple[str, Optional[str], str, Optional[str]]]:
     lhs_text, rhs_text = (part.strip() for part in line.split("=", 1))
     if "|" in lhs_text:
         target_text, equation_lhs = (part.strip() for part in lhs_text.split("|", 1))
-        target_name = _validate_parameter_target(target_text)
-        transformed_lhs = _transform_parameter_expression(
-            equation_lhs,
-            timed_symbols,
-            timed_metadata,
-            exogenous_names,
-        )
-        transformed_rhs = _transform_parameter_expression(
-            rhs_text,
-            timed_symbols,
-            timed_metadata,
-            exogenous_names,
-        )
-        return (
-            target_name,
-            target_name,
-            f"({transformed_lhs}) - ({transformed_rhs})",
-            None,
-        )
+        return [
+            (
+                target_name,
+                target_name,
+                f"({transformed_lhs}) - ({transformed_rhs})",
+                None,
+            )
+            for target_name, transformed_lhs, transformed_rhs in _expand_calibration_parameter_line(
+                target_text,
+                equation_lhs,
+                rhs_text,
+                timed_symbols,
+                timed_metadata,
+                exogenous_names,
+                available_indexed_names,
+            )
+        ]
     if "|" in rhs_text:
         equation_rhs, target_text = (part.strip() for part in rhs_text.rsplit("|", 1))
-        target_name = _validate_parameter_target(target_text)
-        transformed_lhs = _transform_parameter_expression(
-            lhs_text,
-            timed_symbols,
-            timed_metadata,
-            exogenous_names,
-        )
-        transformed_rhs = _transform_parameter_expression(
-            equation_rhs,
-            timed_symbols,
-            timed_metadata,
-            exogenous_names,
-        )
-        return (
-            target_name,
-            target_name,
-            f"({transformed_lhs}) - ({transformed_rhs})",
-            None,
-        )
+        return [
+            (
+                target_name,
+                target_name,
+                f"({transformed_lhs}) - ({transformed_rhs})",
+                None,
+            )
+            for target_name, transformed_lhs, transformed_rhs in _expand_calibration_parameter_line(
+                target_text,
+                lhs_text,
+                equation_rhs,
+                timed_symbols,
+                timed_metadata,
+                exogenous_names,
+                available_indexed_names,
+            )
+        ]
 
     target_name = _validate_parameter_target(lhs_text)
+    expanded_target_names = _expand_direct_parameter_targets(
+        target_name,
+        available_indexed_names,
+    )
     transformed_rhs = _transform_parameter_expression(
         rhs_text,
         timed_symbols,
         timed_metadata,
         exogenous_names,
     )
-    return (
-        target_name,
-        None,
-        f"({target_name}) - ({transformed_rhs})",
-        rhs_text,
-    )
+    return [
+        (
+            expanded_target_name,
+            None,
+            f"({expanded_target_name}) - ({transformed_rhs})",
+            rhs_text,
+        )
+        for expanded_target_name in expanded_target_names
+    ]
 
 
 def _validate_parameter_target(target_text: str) -> str:
@@ -2285,6 +2297,191 @@ def _initial_parameter_guesses(
                 progress = True
 
     return {name: environment.get(name, 1.0) for name in target_names}
+
+
+def _available_indexed_parameter_names(
+    expressions: Sequence[str],
+    timed_symbols: Mapping[str, sp.Symbol],
+    timed_metadata: Mapping[str, tuple[str, str, int]],
+) -> dict[str, tuple[str, ...]]:
+    function_names = set(_function_locals()) | {"E", "pi"}
+    ordered_names: list[str] = []
+    seen: set[str] = set()
+
+    for name, kind, _ in timed_metadata.values():
+        if kind not in {"time", "steady"}:
+            continue
+        base_name = _strip_auxiliary_suffix(name)
+        if _is_indexed_identifier(base_name) and base_name not in seen:
+            seen.add(base_name)
+            ordered_names.append(base_name)
+
+    for expression in expressions:
+        for name in _IDENTIFIER_RE.findall(expression):
+            if name in timed_symbols or name in function_names:
+                continue
+            if _is_indexed_identifier(name) and name not in seen:
+                seen.add(name)
+                ordered_names.append(name)
+
+    grouped: dict[str, list[str]] = {}
+    for name in ordered_names:
+        grouped.setdefault(_identifier_base_name(name), []).append(name)
+    return {base_name: tuple(names) for base_name, names in grouped.items()}
+
+
+def _expand_direct_parameter_targets(
+    target_name: str,
+    available_indexed_names: Mapping[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    if _is_indexed_identifier(target_name):
+        return (target_name,)
+    return available_indexed_names.get(target_name, (target_name,))
+
+
+def _expand_calibration_parameter_line(
+    target_text: str,
+    equation_lhs_text: str,
+    equation_rhs_text: str,
+    timed_symbols: Mapping[str, sp.Symbol],
+    timed_metadata: Mapping[str, tuple[str, str, int]],
+    exogenous_names: set[str],
+    available_indexed_names: Mapping[str, tuple[str, ...]],
+) -> list[tuple[str, str, str]]:
+    target_name = _validate_parameter_target(target_text)
+    generic_bases = _generic_indexed_identifier_bases(
+        (equation_lhs_text, equation_rhs_text),
+        available_indexed_names,
+    )
+    suffix_groups: list[tuple[str, ...]] = []
+
+    if not _is_indexed_identifier(target_name) and target_name in available_indexed_names:
+        suffix_groups.append(_indexed_name_suffixes(available_indexed_names[target_name]))
+    for base_name in generic_bases:
+        suffixes = _indexed_name_suffixes(available_indexed_names[base_name])
+        if suffixes not in suffix_groups:
+            suffix_groups.append(suffixes)
+
+    if len(suffix_groups) > 1:
+        raise ValueError(
+            "Calibration equations cannot have more than one indexed family in the "
+            "equation or parameter target."
+        )
+
+    if _is_indexed_identifier(target_name):
+        if not generic_bases:
+            suffixes = (None,)
+        else:
+            target_suffix = _identifier_suffix(target_name)
+            if suffix_groups and target_suffix not in suffix_groups[0]:
+                raise ValueError(
+                    "Explicitly indexed calibration targets must match the indexed "
+                    "family used in the calibration equation."
+                )
+            suffixes = (target_suffix,)
+    elif target_name in available_indexed_names:
+        suffixes = suffix_groups[0] if suffix_groups else _indexed_name_suffixes(
+            available_indexed_names[target_name]
+        )
+    elif suffix_groups:
+        raise ValueError(
+            "Calibration equations with indexed references require an indexed "
+            "parameter target."
+        )
+    else:
+        suffixes = (None,)
+
+    expanded: list[tuple[str, str, str]] = []
+    for suffix in suffixes:
+        replacements = (
+            {}
+            if suffix is None
+            else {
+                base_name: _indexed_name_for_suffix(
+                    base_name,
+                    suffix,
+                    available_indexed_names,
+                )
+                for base_name in generic_bases
+            }
+        )
+        expanded_target_name = (
+            target_name
+            if suffix is None or _is_indexed_identifier(target_name)
+            else _indexed_name_for_suffix(
+                target_name,
+                suffix,
+                available_indexed_names,
+            )
+        )
+        transformed_lhs = _transform_parameter_expression(
+            _substitute_parameter_identifiers(equation_lhs_text, replacements),
+            timed_symbols,
+            timed_metadata,
+            exogenous_names,
+        )
+        transformed_rhs = _transform_parameter_expression(
+            _substitute_parameter_identifiers(equation_rhs_text, replacements),
+            timed_symbols,
+            timed_metadata,
+            exogenous_names,
+        )
+        expanded.append((expanded_target_name, transformed_lhs, transformed_rhs))
+    return expanded
+
+
+def _generic_indexed_identifier_bases(
+    expressions: Sequence[str],
+    available_indexed_names: Mapping[str, tuple[str, ...]],
+) -> tuple[str, ...]:
+    ordered_bases: list[str] = []
+    seen: set[str] = set()
+    for expression in expressions:
+        for name in _IDENTIFIER_RE.findall(expression):
+            if _is_indexed_identifier(name):
+                continue
+            if name not in available_indexed_names or name in seen:
+                continue
+            seen.add(name)
+            ordered_bases.append(name)
+    return tuple(ordered_bases)
+
+
+def _indexed_name_suffixes(names: Sequence[str]) -> tuple[str, ...]:
+    return tuple(_identifier_suffix(name) for name in names)
+
+
+def _identifier_base_name(name: str) -> str:
+    return name.split("{", 1)[0]
+
+
+def _identifier_suffix(name: str) -> str:
+    return name[len(_identifier_base_name(name)) :]
+
+
+def _indexed_name_for_suffix(
+    base_name: str,
+    suffix: str,
+    available_indexed_names: Mapping[str, tuple[str, ...]],
+) -> str:
+    for name in available_indexed_names.get(base_name, ()):
+        if _identifier_suffix(name) == suffix:
+            return name
+    raise ValueError(
+        f"Could not expand indexed name for `{base_name}` with suffix `{suffix}`."
+    )
+
+
+def _substitute_parameter_identifiers(
+    expression: str,
+    replacements: Mapping[str, str],
+) -> str:
+    if not replacements:
+        return expression
+    return _IDENTIFIER_RE.sub(
+        lambda match: replacements.get(match.group(0), match.group(0)),
+        expression,
+    )
 
 
 def _flatten_hessian(expr: sp.Expr, symbols: Sequence[sp.Symbol]) -> list[sp.Expr]:

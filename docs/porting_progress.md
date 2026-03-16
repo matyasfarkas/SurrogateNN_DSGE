@@ -206,6 +206,21 @@ Python/JAX status:
 - inline symbolic sums such as `for co in [H, F] y{co}[0] end` now expand inside equations alongside the previously ported time-index loops
 - tests verify top-level indexed-loop parity, inline indexed-sum parity, and nested brace-index parameter resolution
 
+### 13. Indexed parameter-family broadcasting in `@parameters`
+
+Julia reference:
+
+- `src/macros.jl`
+- `src/MacroModelling.jl` (`expand_indices`, `expand_calibration_equations`)
+- `models/Backus_Kehoe_Kydland_1992.jl`
+
+Python/JAX status:
+
+- direct `@parameters` definitions now broadcast unindexed parameter targets such as `alpha = 0.3` across indexed families already referenced by the parsed model
+- one-family calibration equations now expand generic indexed names consistently, so expressions like `y[ss] = target | beta` become indexed calibration conditions for `y{...}` and `beta{...}`
+- generic steady-state references inside those one-family calibration equations are rewritten before symbolic parsing, preserving JAX-native steady-state and first-order solution paths
+- tests verify direct-definition family broadcasting, calibration-equation family broadcasting, resolved parameter values, steady states, Jacobians, and first-order solutions against explicit fully indexed equivalents
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -214,7 +229,7 @@ Python/JAX status:
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
 - The current parsed front end supports explicit identifier-list/range `for` expansion in `@model`, but not implicit symbolic collections such as `for co in countries`.
-- The Julia macro behavior that broadcasts unindexed parameter definitions across indexed parameter families is not ported yet.
+- Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
 - The current parsed front end does not yet port parameter bounds and other non-equation `@parameters` directives from the Julia macro layer.
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
