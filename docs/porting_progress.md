@@ -172,7 +172,7 @@ Python/JAX status:
 - parsed `@model` blocks now support inline time-index `for ... end` expressions inside equations
 - additive loop expansion and `operator = :*` product expansion are both implemented
 - multiline equations containing multiple inline time loops are normalized and expanded before symbolic differentiation
-- top-level symbolic/indexed `for`-loop blocks remain explicitly unported and raise `NotImplementedError`
+- that slice did not yet cover top-level symbolic/indexed `for`-loop blocks; later sections cover the broader top-level expansion work
 - tests verify additive-loop parity, product-loop parity through Hessians and first-order solutions, multiline loop parity, and the explicit unsupported-block boundary
 
 ### 11. Parsed-model stochastic extended path wiring
@@ -277,6 +277,19 @@ Python/JAX status:
 - custom lambdify modules now provide a numeric implementation for `erfcinv`, so steady-state and derivative evaluation do not fail at runtime when those functions appear in parsed symbolic expressions
 - tests verify parsed-model steady-state evaluation for the special-function aliases, and the upstream `RBC_CME_calibration_equations_and_parameter_definitions_and_specfuns.jl` fixture now parses successfully as a smoke check
 
+### 18. Named source-level loop collections
+
+Julia reference:
+
+- `src/MacroModelling.jl` (`replace_indices_inside_for_loop`, `parse_for_loops`)
+
+Python/JAX status:
+
+- the parsed front end now reads simple source-level collection definitions outside `@model` and `@parameters`, such as `countries = [:H, :F]` and `lags = -2:0`
+- top-level and inline `for` expansion in `@model` now resolve those named collections in addition to explicit identifier lists and explicit integer ranges
+- symbol literals in source-level collections now support Julia-style `:H` syntax before substitution into brace-indexed identifiers
+- tests verify top-level named-collection parity, named-range parity, and explicit failure for undefined collection names rather than silent inference
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -284,7 +297,6 @@ Python/JAX status:
 - The Julia QME `:schur` variant is not ported yet; the Python port currently uses the doubling solver.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
-- The current parsed front end supports explicit identifier-list/range `for` expansion in `@model`, but not implicit symbolic collections such as `for co in countries`.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
 - The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.

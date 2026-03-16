@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cached_property
 import re
-from typing import Mapping, NamedTuple, Optional, Sequence
+from typing import Mapping, NamedTuple, Optional, Sequence, Union
 
 import jax
 import jax.numpy as jnp
@@ -58,6 +58,9 @@ _REFERENCE_RE = re.compile(
 )
 _IDENTIFIER_RE = re.compile(r"(?!\d)\w+(?:\{[^{}\[\]]+\})*", re.UNICODE)
 _INDEXED_IDENTIFIER_RE = re.compile(r"(?!\d)\w+(?:\{[^{}\[\]]+\})+", re.UNICODE)
+
+LoopIndex = Union[int, str]
+LoopCollections = Mapping[str, tuple[LoopIndex, ...]]
 
 
 class SteadyStateResult(NamedTuple):
@@ -1211,8 +1214,20 @@ def parse_macro_model(source: str) -> MacroModel:
             "The `@parameters` block must target the same model name as `@model`."
         )
     raw_default_guess = _parse_parameter_block_guess(parameter_block["options"])
+    loop_collections = _parse_source_loop_collections(
+        source,
+        (
+            (model_block["start"], model_block["end"]),
+            (parameter_block["start"], parameter_block["end"]),
+        ),
+    )
 
-    equations = tuple(_split_model_body_lines(model_block["body"]))
+    equations = tuple(
+        _split_model_body_lines(
+            model_block["body"],
+            loop_collections=loop_collections,
+        )
+    )
     if not equations:
         raise ValueError("Model block does not contain any equations.")
 
@@ -1658,19 +1673,23 @@ def _extract_block(
     pattern: re.Pattern[str],
     source: str,
     label: str,
-) -> dict[str, str]:
+) -> dict[str, str | int]:
     match = pattern.search(source)
     if match is None:
         raise ValueError(f"Could not find `@{label}` block in source.")
     block = match.groupdict()
     body_lines: list[str] = []
     nested_depth = 0
-    for raw_line in source[match.end() :].splitlines():
+    cursor = match.end()
+    for raw_line in source[match.end() :].splitlines(keepends=True):
         visible = _strip_comment(raw_line).strip()
         if visible == "end" and nested_depth == 0:
-            block["body"] = "\n".join(body_lines)
+            block["body"] = "".join(body_lines).rstrip("\n")
+            block["start"] = match.start()
+            block["end"] = cursor + len(raw_line)
             return block
         body_lines.append(raw_line)
+        cursor += len(raw_line)
         nested_depth += _block_line_delta(visible)
         if nested_depth < 0:
             raise ValueError(f"Encountered unmatched `end` while parsing `@{label}`.")
@@ -1686,11 +1705,65 @@ def _split_body_lines(body: str) -> list[str]:
     return lines
 
 
-def _split_model_body_lines(body: str) -> list[str]:
+def _parse_source_loop_collections(
+    source: str,
+    block_spans: Sequence[tuple[int, int]],
+) -> dict[str, tuple[LoopIndex, ...]]:
+    spans = sorted((int(start), int(end)) for start, end in block_spans)
+    cursor = 0
+    outside_parts: list[str] = []
+    for start, end in spans:
+        if cursor < start:
+            outside_parts.append(source[cursor:start])
+        cursor = max(cursor, end)
+    if cursor < len(source):
+        outside_parts.append(source[cursor:])
+
+    collections: dict[str, tuple[LoopIndex, ...]] = {}
+    for raw_line in "\n".join(outside_parts).splitlines():
+        line = _strip_comment(raw_line).strip()
+        if not line:
+            continue
+        match = re.fullmatch(r"(?P<name>(?!\d)\w+)\s*=\s*(?P<value>.+)", line)
+        if match is None:
+            continue
+        parsed = _parse_loop_collection_value(match.group("value"))
+        if parsed is not None:
+            collections[match.group("name")] = parsed
+    return collections
+
+
+def _parse_loop_collection_value(value_text: str) -> tuple[LoopIndex, ...] | None:
+    token = value_text.strip()
+    if not token:
+        return None
+    if token.startswith("[") and token.endswith("]"):
+        entries = _split_top_level(token[1:-1], ",")
+        return tuple(
+            _parse_for_loop_index_token(entry)
+            for entry in entries
+            if entry.strip()
+        )
+
+    range_parts = _split_top_level(token, ":")
+    if len(range_parts) == 2:
+        start = _evaluate_integer_expression(range_parts[0])
+        stop = _evaluate_integer_expression(range_parts[1])
+        step = 1 if stop >= start else -1
+        return tuple(range(start, stop + step, step))
+    return None
+
+
+def _split_model_body_lines(
+    body: str,
+    *,
+    loop_collections: Optional[LoopCollections] = None,
+) -> list[str]:
     lines = _split_body_lines(body)
     statements: list[str] = []
     current: list[str] = []
     loop_depth = 0
+    resolved_loop_collections = loop_collections or {}
 
     for line in lines:
         stripped = line.strip()
@@ -1701,18 +1774,38 @@ def _split_model_body_lines(body: str) -> list[str]:
 
         if loop_depth == 0 and not _model_line_requires_continuation(stripped):
             if _is_model_for_block_statement(current):
-                statements.extend(_expand_model_for_block(current))
+                statements.extend(
+                    _expand_model_for_block(
+                        current,
+                        loop_collections=resolved_loop_collections,
+                    )
+                )
             else:
-                statements.append(_expand_inline_for_loops(" ".join(current)))
+                statements.append(
+                    _expand_inline_for_loops(
+                        " ".join(current),
+                        loop_collections=resolved_loop_collections,
+                    )
+                )
             current = []
 
     if loop_depth != 0:
         raise ValueError("Unbalanced `for` / `end` blocks in `@model`.")
     if current:
         if _is_model_for_block_statement(current):
-            statements.extend(_expand_model_for_block(current))
+            statements.extend(
+                _expand_model_for_block(
+                    current,
+                    loop_collections=resolved_loop_collections,
+                )
+            )
         else:
-            statements.append(_expand_inline_for_loops(" ".join(current)))
+            statements.append(
+                _expand_inline_for_loops(
+                    " ".join(current),
+                    loop_collections=resolved_loop_collections,
+                )
+            )
     return statements
 
 
@@ -1735,7 +1828,11 @@ def _is_model_for_block_statement(lines: Sequence[str]) -> bool:
     )
 
 
-def _expand_model_for_block(lines: Sequence[str]) -> list[str]:
+def _expand_model_for_block(
+    lines: Sequence[str],
+    *,
+    loop_collections: Optional[LoopCollections] = None,
+) -> list[str]:
     if not _is_model_for_block_statement(lines):
         raise ValueError("Expected a top-level `for` block in `@model`.")
     _, loop_var, indices_text, inline_body = _parse_for_loop_header(
@@ -1750,20 +1847,35 @@ def _expand_model_for_block(lines: Sequence[str]) -> list[str]:
         return []
 
     expanded: list[str] = []
-    for idx in _parse_for_loop_indices(indices_text):
+    for idx in _parse_for_loop_indices(
+        indices_text,
+        loop_collections=loop_collections,
+    ):
         substituted_lines = [
             _substitute_loop_variable(line, loop_var, idx)
             for line in body_lines
         ]
-        expanded.extend(_split_model_body_lines("\n".join(substituted_lines)))
+        expanded.extend(
+            _split_model_body_lines(
+                "\n".join(substituted_lines),
+                loop_collections=loop_collections,
+            )
+        )
     return expanded
 
 
-def _expand_inline_for_loops(statement: str) -> str:
+def _expand_inline_for_loops(
+    statement: str,
+    *,
+    loop_collections: Optional[LoopCollections] = None,
+) -> str:
     expanded = statement
     while re.search(r"\bfor\b", expanded):
         start, end = _find_innermost_for_segment(expanded)
-        replacement = _expand_single_inline_for_loop(expanded[start:end])
+        replacement = _expand_single_inline_for_loop(
+            expanded[start:end],
+            loop_collections=loop_collections,
+        )
         expanded = expanded[:start] + replacement + expanded[end:]
     return expanded
 
@@ -1782,7 +1894,11 @@ def _find_innermost_for_segment(statement: str) -> tuple[int, int]:
     raise ValueError("Encountered `for` without a matching `end` in equation.")
 
 
-def _expand_single_inline_for_loop(segment: str) -> str:
+def _expand_single_inline_for_loop(
+    segment: str,
+    *,
+    loop_collections: Optional[LoopCollections] = None,
+) -> str:
     segment_text = segment.strip()
     if not re.search(r"\bend\s*$", segment_text):
         raise ValueError(f"Could not find closing `end` in `for` loop `{segment}`.")
@@ -1793,9 +1909,15 @@ def _expand_single_inline_for_loop(segment: str) -> str:
         allow_empty_body=False,
     )
 
-    indices = _parse_for_loop_indices(indices_text)
+    indices = _parse_for_loop_indices(
+        indices_text,
+        loop_collections=loop_collections,
+    )
     terms = [
-        _expand_inline_for_loops(_substitute_loop_variable(body, loop_var, idx))
+        _expand_inline_for_loops(
+            _substitute_loop_variable(body, loop_var, idx),
+            loop_collections=loop_collections,
+        )
         for idx in indices
     ]
     joiner = f" {operator} "
@@ -1867,8 +1989,15 @@ def _find_matching_delimiter(
     raise ValueError(f"Could not find matching `{closing}` in `{text}`.")
 
 
-def _parse_for_loop_indices(indices_text: str) -> list[int | str]:
+def _parse_for_loop_indices(
+    indices_text: str,
+    *,
+    loop_collections: Optional[LoopCollections] = None,
+) -> list[LoopIndex]:
     token = indices_text.strip()
+    resolved_loop_collections = loop_collections or {}
+    if token in resolved_loop_collections:
+        return list(resolved_loop_collections[token])
     if token.startswith("[") and token.endswith("]"):
         entries = _split_top_level(token[1:-1], ",")
         return [
@@ -1889,12 +2018,15 @@ def _parse_for_loop_indices(indices_text: str) -> list[int | str]:
     except (TypeError, ValueError) as exc:
         raise NotImplementedError(
             "Symbolic/indexed `for` loops in `@model` are only supported for "
-            "explicit identifier lists like `[H, F]` and integer ranges."
+            "explicit identifier lists like `[H, F]`, named collections, and "
+            "integer ranges."
         ) from exc
 
 
-def _parse_for_loop_index_token(token: str) -> int | str:
+def _parse_for_loop_index_token(token: str) -> LoopIndex:
     stripped = token.strip()
+    if stripped.startswith(":"):
+        stripped = stripped[1:].strip()
     try:
         return _evaluate_integer_expression(stripped)
     except (TypeError, ValueError):
@@ -1902,7 +2034,8 @@ def _parse_for_loop_index_token(token: str) -> int | str:
             return stripped
     raise NotImplementedError(
         "Symbolic/indexed `for` loops in `@model` are only supported for "
-        "explicit identifier lists like `[H, F]` and integer ranges."
+        "explicit identifier lists like `[H, F]`, named collections, and "
+        "integer ranges."
     )
 
 

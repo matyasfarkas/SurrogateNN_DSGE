@@ -22,7 +22,7 @@ Implemented:
 - MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
 - MacroModelling-style inline time-index `for` loops inside `@model` equations, including additive and `operator = :*` forms
 - explicit curly-brace indexed identifiers such as `y{H}[0]` and `rho{H}{F}` across parsed model and parameter blocks
-- top-level `for`-block expansion in `@model` for explicit identifier lists like `[H, F]` and integer ranges
+- top-level `for`-block expansion in `@model` for explicit identifier lists like `[H, F]`, named source-level collections like `countries = [:H, :F]`, and integer ranges
 - order-independent parameter definitions in `@parameters` blocks
 - calibration equations in `@parameters` blocks, including both `par | lhs = rhs` and `lhs = rhs | par` forms
 - indexed parameter-family broadcasting in `@parameters`, including `alpha = 0.3` style direct definitions and one-family calibration equations like `y[ss] = target | beta`
@@ -47,7 +47,6 @@ Implemented:
 Not implemented yet:
 
 - perturbation orders above third
-- implicit symbolic collection loops such as `for co in countries` from the Julia macro layer
 - ambiguous multi-family calibration-equation broadcasting remains guarded rather than inferred
 - the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds
 - occasionally binding constraint parsing from the Julia macro layer

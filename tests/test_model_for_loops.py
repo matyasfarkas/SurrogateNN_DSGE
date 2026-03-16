@@ -88,6 +88,49 @@ end
 """
 
 
+NAMED_COLLECTION_LOOP_SOURCE = """
+countries = [:H, :F]
+
+@model named_collection_loop begin
+    for co in countries
+        y{co}[0] = rho{co} * y{co}[-1]
+    end
+end
+
+@parameters named_collection_loop begin
+    rho{H} = 0.9
+    rho{F} = 0.8
+end
+"""
+
+
+NAMED_COLLECTION_EXPLICIT_SOURCE = """
+@model named_collection_explicit begin
+    y{H}[0] = rho{H} * y{H}[-1]
+    y{F}[0] = rho{F} * y{F}[-1]
+end
+
+@parameters named_collection_explicit begin
+    rho{H} = 0.9
+    rho{F} = 0.8
+end
+"""
+
+
+NAMED_RANGE_LOOP_SOURCE = """
+lags = -2:0
+
+@model named_range_loop begin
+    y_sum[0] = for lag in lags y[lag] end
+    y[0] = rho * y[-1] + eps[x]
+end
+
+@parameters named_range_loop begin
+    rho = 0.9
+end
+"""
+
+
 def _assert_loop_model_matches_explicit(
     loop_source: str,
     explicit_source: str,
@@ -171,19 +214,35 @@ def test_multiline_time_for_loops_match_explicit_model() -> None:
     )
 
 
-def test_top_level_model_for_loop_blocks_remain_explicitly_unsupported() -> None:
+def test_named_collection_top_level_for_loop_matches_explicit_model() -> None:
+    _assert_loop_model_matches_explicit(
+        NAMED_COLLECTION_LOOP_SOURCE,
+        NAMED_COLLECTION_EXPLICIT_SOURCE,
+        initial_guess={"y{H}": 0.1, "y{F}": 0.1},
+    )
+
+
+def test_named_range_for_loop_matches_explicit_model() -> None:
+    _assert_loop_model_matches_explicit(
+        NAMED_RANGE_LOOP_SOURCE,
+        ADDITIVE_EXPLICIT_SOURCE,
+        initial_guess={"y": 0.1, "y_sum": 0.0},
+    )
+
+
+def test_undefined_named_collection_remains_explicitly_unsupported() -> None:
     source = """
-    @model unsupported_loop_block begin
+    @model undefined_loop_collection begin
         for co in countries
             y{co}[0] = rho{co} * y{co}[-1]
         end
     end
 
-    @parameters unsupported_loop_block begin
+    @parameters undefined_loop_collection begin
         rho{H} = 0.9
         rho{F} = 0.8
     end
     """
 
-    with pytest.raises(NotImplementedError, match="explicit identifier lists"):
+    with pytest.raises(NotImplementedError, match="named collections"):
         parse_macro_model(source)
