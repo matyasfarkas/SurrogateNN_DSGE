@@ -479,6 +479,21 @@ Python/JAX status:
 - upstream compile smoke now also covers explicit Schur/QZ first-order solves plus JAX-compiled Kalman likelihoods on `RBC_CME`, `RBC_Dynare`, `FS2000`, and `Backus_Kehoe_Kydland_1992`
 - tests verify high-level Schur parity for parsed-model state-space construction, Kalman likelihoods, first-order filter helpers, concrete NumPyro log-density evaluation, the new multi-model Schur compile smoke, and explicit default-equals-Schur behavior for low-level first-order solves plus compiled Kalman likelihoods
 
+### 31. Posterior-chain convenience helpers for switching workflows
+
+Julia reference:
+
+- `scripts/hlt_sep_surrogate_synthetic_estimation.jl` (`theta_draws`, `epsilon_means_from_chain`, `chunk_stats`)
+
+Python/JAX status:
+
+- the switching helper module now ports `theta_draws`, `epsilon_means_from_chain`, and `chunk_stats`
+- the chain coercion layer accepts NumPyro `MCMC` objects, raw sample mappings, and checkpoint-like payloads containing `chain` or `samples`
+- `theta_draws` now returns Julia-style dense draw matrices in user-specified parameter order, with explicit guards for missing names and non-scalar sample sites
+- `epsilon_means_from_chain` now parses Greek epsilon site names such as `ε[1,3]` and `ϵ[2,5]`, averages them across posterior draws, and returns the same shock-by-time mean matrix shape expected by the existing `build_shocks_from_eps` helper
+- `chunk_stats` now extracts acceptance, divergence, and step-size diagnostics from finished NumPyro runs when those diagnostics are available, while also honoring lightweight synthetic/checkpoint payloads for downstream summaries
+- tests cover raw sample-mapping parity, epsilon-site parsing and mismatch warnings, and real NumPyro `MCMC` extraction for both draw matrices and chunk statistics
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -494,7 +509,6 @@ Python/JAX status:
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; the current SEP inversion bridge accepts `sep_sparse_tree` for API compatibility but still runs the full-tree solver underneath because Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
-- Posterior-chain convenience helpers from the Julia switching diagnostics layer, notably `chunk_stats`, `theta_draws`, and `epsilon_means_from_chain`, are still unported because the Python-side posterior-chain representation is not fixed yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed full-tree SEP path.
 

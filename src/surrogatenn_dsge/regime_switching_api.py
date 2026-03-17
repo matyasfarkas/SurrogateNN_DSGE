@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import re
 from time import time
 from typing import Any, Callable, Mapping, Optional, Sequence
+import warnings
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+
+_EPSILON_SITE_RE = re.compile(r"^[εϵ]\[(\d+),(\d+)\]$")
 
 
 def _as_float_vector(
@@ -799,6 +804,199 @@ def build_shocks_from_eps(
             + eps_matrix[row, :] * shock_sigma_vec[shock_index]
         )
     return shocks
+
+
+def _unwrap_chain_payload(chain: Any) -> Any:
+    if isinstance(chain, Mapping):
+        if "chain" in chain:
+            return chain["chain"]
+        if "samples" in chain and isinstance(chain["samples"], Mapping):
+            return chain["samples"]
+    return chain
+
+
+def _chain_samples_mapping(chain: Any) -> Mapping[str, Any]:
+    payload = _unwrap_chain_payload(chain)
+    if isinstance(payload, Mapping):
+        return payload
+    if hasattr(payload, "get_samples"):
+        try:
+            samples = payload.get_samples(group_by_chain=False)
+        except TypeError:
+            samples = payload.get_samples()
+        if not isinstance(samples, Mapping):
+            raise ValueError("chain.get_samples() must return a mapping of sample sites.")
+        return samples
+    raise TypeError(
+        "chain must be a mapping of site arrays, a checkpoint-like payload containing "
+        "`chain`/`samples`, or an object exposing `get_samples()`."
+    )
+
+
+def _flatten_chain_scalar_site(values: Any, *, label: str) -> np.ndarray:
+    array = np.asarray(values)
+    if array.ndim == 0:
+        return array.reshape(1).astype(np.float64)
+    if array.ndim == 1:
+        return array.astype(np.float64, copy=False)
+    if array.ndim == 2:
+        return array.reshape(-1).astype(np.float64, copy=False)
+    raise ValueError(
+        f"{label} must be scalar-valued per draw, got array shape {array.shape}."
+    )
+
+
+def _mean_optional(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float64)
+    if array.size == 0:
+        return None
+    return float(np.mean(array))
+
+
+def _count_optional(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    array = np.asarray(value)
+    if array.size == 0:
+        return None
+    return int(np.sum(array))
+
+
+def _scalar_optional(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float64)
+    if array.size == 0:
+        return None
+    return float(array.reshape(-1)[-1])
+
+
+def theta_draws(
+    chain: Any,
+    theta_names: Sequence[str],
+) -> np.ndarray:
+    samples = _chain_samples_mapping(chain)
+    names = tuple(str(name) for name in theta_names)
+    if not names:
+        if not samples:
+            return np.zeros((0, 0), dtype=np.float64)
+        first = next(iter(samples.values()))
+        n_draws = _flatten_chain_scalar_site(first, label="chain sample").shape[0]
+        return np.zeros((n_draws, 0), dtype=np.float64)
+
+    missing = tuple(name for name in names if name not in samples)
+    if missing:
+        raise ValueError("Theta names not found in chain samples: " + ", ".join(missing) + ".")
+
+    columns: list[np.ndarray] = []
+    n_draws: Optional[int] = None
+    for name in names:
+        values = _flatten_chain_scalar_site(samples[name], label=f"chain sample `{name}`")
+        if n_draws is None:
+            n_draws = int(values.shape[0])
+        elif values.shape[0] != n_draws:
+            raise ValueError(
+                f"Chain sample length mismatch for `{name}`: got {values.shape[0]}, expected {n_draws}."
+            )
+        columns.append(values)
+    return np.column_stack(columns)
+
+
+def epsilon_means_from_chain(
+    chain: Any,
+    sample_idx: Optional[Sequence[int]] = None,
+) -> Optional[np.ndarray]:
+    samples = _chain_samples_mapping(chain)
+    eps_meta: list[tuple[str, int, int, np.ndarray]] = []
+    for sym, values in samples.items():
+        name = str(sym).replace(" ", "")
+        match = _EPSILON_SITE_RE.match(name)
+        if match is None:
+            continue
+        i = int(match.group(1))
+        t = int(match.group(2))
+        flattened = _flatten_chain_scalar_site(values, label=f"chain sample `{sym}`")
+        eps_meta.append((str(sym), i, t, flattened))
+    if not eps_meta:
+        return None
+
+    max_i = max(item[1] for item in eps_meta)
+    max_t = max(item[2] for item in eps_meta)
+    if sample_idx is None:
+        sample_len = max_t
+    else:
+        sample_len = len(tuple(sample_idx))
+        if max_t != sample_len:
+            warnings.warn(
+                "epsilon index max_t does not match sample_idx length; truncating to the "
+                "requested number of periods.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    eps_mean = np.full((max_i, sample_len), np.nan, dtype=np.float64)
+    for _, i, t, values in eps_meta:
+        if t <= sample_len:
+            eps_mean[i - 1, t - 1] = float(np.mean(values))
+    return eps_mean
+
+
+def chunk_stats(chain: Any) -> tuple[Optional[float], Optional[int], Optional[float]]:
+    payload = _unwrap_chain_payload(chain)
+
+    if isinstance(payload, Mapping):
+        info = payload.get("info")
+        if isinstance(info, Mapping):
+            internals = info.get("internals")
+            if isinstance(internals, Mapping):
+                acc = _mean_optional(internals.get("avg_acceptance_rate"))
+                div = _count_optional(internals.get("count_divergences"))
+                step = _scalar_optional(internals.get("step_size"))
+                if acc is not None or div is not None or step is not None:
+                    return acc, div, step
+        extra_fields = payload.get("extra_fields")
+        last_state = payload.get("last_state")
+    else:
+        extra_fields = (
+            payload.get_extra_fields()
+            if hasattr(payload, "get_extra_fields")
+            else None
+        )
+        last_state = getattr(payload, "last_state", None)
+
+    accept = None
+    divergences = None
+    step_size = None
+
+    if isinstance(extra_fields, Mapping):
+        accept = _mean_optional(
+            extra_fields.get("accept_prob", extra_fields.get("avg_acceptance_rate"))
+        )
+        divergences = _count_optional(
+            extra_fields.get("diverging", extra_fields.get("count_divergences"))
+        )
+        step_size = _scalar_optional(extra_fields.get("step_size"))
+
+    if last_state is not None:
+        if accept is None:
+            accept = _mean_optional(
+                getattr(
+                    last_state,
+                    "mean_accept_prob",
+                    getattr(last_state, "accept_prob", None),
+                )
+            )
+        if divergences is None:
+            divergences = _count_optional(getattr(last_state, "diverging", None))
+        if step_size is None:
+            adapt_state = getattr(last_state, "adapt_state", None)
+            step_size = _scalar_optional(
+                getattr(adapt_state, "step_size", getattr(last_state, "step_size", None))
+            )
+
+    return accept, divergences, step_size
 
 
 def run_chunked_sampling(

@@ -28,6 +28,7 @@ Implemented:
 - Julia-style first-order observed-shock / observed-variable estimation helpers, linear filter state extractors, and filter-based linear gate-stat workflows for both Kalman and inversion filters
 - switching diagnostics and comparison helpers for gated episodes, loglikelihood decompositions, and runtime summaries
 - callback-based switching likelihood helpers including named-parameter selection/override, conditional and additive-residual loglikelihood utilities, generic inversion-step helpers, linear-reference likelihood comparison helpers, Julia-style shock reconstruction from epsilon means, and chunked-sampling orchestration
+- posterior-chain convenience helpers for switching workflows, including `theta_draws`, `epsilon_means_from_chain`, and `chunk_stats`, with support for NumPyro `MCMC` objects plus raw/checkpoint-style sample mappings
 - optional NumPyro inference helpers for subset priors, parameter-vector assembly, and concrete log-density evaluation on top of the parsed-model Kalman likelihood
 - JAX first-order structural likelihood and NumPyro wrappers that can run compiled kernels like `NUTS` on the parsed-model first-order path with either an explicit steady state or automatic JAX steady-state and calibration-equation solves
 - quadratic matrix equation doubling solver plus a generalized Schur / ordered-QZ solver for the Julia `:schur` path
@@ -70,6 +71,5 @@ Not implemented yet:
 - the new determinacy diagnostics are currently tied to the Schur/QZ path; the doubling path still solves the QME but does not provide a comparable stable-root decomposition report
 - fully JAX-traceable parsed-model structural likelihoods beyond the first-order path, including higher-order estimation edges for compiled NumPyro kernels like `NUTS` and `HMC`
 - the broader regime-switching estimation harness beyond the currently ported likelihood mixer and gate/regime utilities
-- posterior-chain convenience helpers from the Julia switching diagnostics layer such as `chunk_stats`, `theta_draws`, and `epsilon_means_from_chain`
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).
