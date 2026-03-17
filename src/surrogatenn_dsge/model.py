@@ -20,7 +20,9 @@ from sympy.parsing.sympy_parser import (
 )
 
 from .dsge import (
+    analyze_first_order_dsge_determinacy,
     DSGETimings,
+    FirstOrderDeterminacyResult,
     FirstOrderDSGEResult,
     SecondOrderDSGEResult,
     SecondOrderStochasticSteadyStateResult,
@@ -103,6 +105,13 @@ class ParsedModelFirstOrderResult(NamedTuple):
     parameter_values: jax.Array
     jacobian: jax.Array
     solution: FirstOrderDSGEResult
+
+
+class ParsedModelFirstOrderDeterminacyResult(NamedTuple):
+    steady_state: jax.Array
+    parameter_values: jax.Array
+    jacobian: jax.Array
+    determinacy: FirstOrderDeterminacyResult
 
 
 class ParsedModelSecondOrderResult(NamedTuple):
@@ -2824,6 +2833,60 @@ class MacroModel:
             solution=solution,
         )
 
+    def analyze_first_order_determinacy(
+        self,
+        *,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        qme_acceptance_tol: float = 1e-8,
+    ) -> ParsedModelFirstOrderDeterminacyResult:
+        if len(self._dynamic_expressions) != self.timings.nVars:
+            raise ValueError(
+                "First-order determinacy analysis requires as many dynamic equations as "
+                f"present variables. Got {len(self._dynamic_expressions)} equations and "
+                f"{self.timings.nVars} variables."
+            )
+        if steady_state is None:
+            steady_state_result = self.solve_steady_state(
+                parameter_values=parameter_values,
+                initial_guess=steady_state_initial_guess,
+                tol=steady_state_tol,
+                max_iter=steady_state_max_iter,
+            )
+            full_steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
+        else:
+            full_steady_state = self._coerce_full_steady_state(steady_state)
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
+            )
+        jacobian = self.calculate_jacobian(
+            parameter_values=resolved_parameters,
+            steady_state=full_steady_state,
+        )
+        determinacy = analyze_first_order_dsge_determinacy(
+            jacobian,
+            self.timings,
+            qme_acceptance_tol=qme_acceptance_tol,
+        )
+        return ParsedModelFirstOrderDeterminacyResult(
+            steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+            parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
+            jacobian=jacobian,
+            determinacy=determinacy,
+        )
+
     def solve_second_order(
         self,
         *,
@@ -3947,6 +4010,26 @@ def solve_first_order_model(
         steady_state_tol=steady_state_tol,
         steady_state_max_iter=steady_state_max_iter,
         qme_algorithm=qme_algorithm,
+    )
+
+
+def analyze_first_order_model_determinacy(
+    model: MacroModel,
+    *,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    qme_acceptance_tol: float = 1e-8,
+) -> ParsedModelFirstOrderDeterminacyResult:
+    return model.analyze_first_order_determinacy(
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        qme_acceptance_tol=qme_acceptance_tol,
     )
 
 

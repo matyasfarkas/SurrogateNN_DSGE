@@ -45,9 +45,14 @@ from .regime_switching_api import (
     split_observation_state,
 )
 from .dsge import (
+    analyze_first_order_dsge_determinacy,
+    analyze_quadratic_matrix_equation_schur,
     DSGETimings,
+    FirstOrderDeterminacyResult,
     FirstOrderDSGEResult,
     QuadraticMatrixEquationResult,
+    SchurQZDeterminacyDiagnostics,
+    SchurQZDeterminacyResult,
     SecondOrderAuxiliaryMatrices,
     SecondOrderDSGEResult,
     SecondOrderStochasticSteadyStateResult,
@@ -84,7 +89,9 @@ from .inversion import (
     sep_inversion_loglikelihood_per_period,
 )
 from .model import (
+    analyze_first_order_model_determinacy,
     MacroModel,
+    ParsedModelFirstOrderDeterminacyResult,
     ParsedModelFirstOrderResult,
     ParsedModelSEPResult,
     ParsedModelSecondOrderResult,
@@ -169,6 +176,7 @@ from .switching import (
 
 __all__ = [
     "DSGETimings",
+    "FirstOrderDeterminacyResult",
     "FirstOrderDSGEResult",
     "GateCalibrationConfig",
     "GateCalibrationResult",
@@ -180,6 +188,7 @@ __all__ = [
     "LyapunovResult",
     "MacroModel",
     "ParsedModelFirstOrderResult",
+    "ParsedModelFirstOrderDeterminacyResult",
     "ParsedModelSEPResult",
     "ParsedModelSecondOrderResult",
     "ParsedModelThirdOrderResult",
@@ -194,9 +203,14 @@ __all__ = [
     "StateSpaceSimulation",
     "SwitchingLikelihoodConfig",
     "SwitchingLikelihoodResult",
+    "SchurQZDeterminacyDiagnostics",
+    "SchurQZDeterminacyResult",
     "ThirdOrderAuxiliaryMatrices",
     "ThirdOrderDSGEResult",
     "ThirdOrderStochasticSteadyStateResult",
+    "analyze_first_order_dsge_determinacy",
+    "analyze_first_order_model_determinacy",
+    "analyze_quadratic_matrix_equation_schur",
     "assemble_parameter_vector",
     "additive_residual_loglik_per_period",
     "advance_state",

@@ -73,10 +73,11 @@ Python/JAX status:
 - `solve_quadratic_matrix_equation_doubling` implemented
 - `solve_quadratic_matrix_equation_schur` implemented with the same companion-pencil generalized Schur / ordered-QZ construction as the Julia `:schur` path
 - `solve_quadratic_matrix_equation_schur_jax` implemented with an implicit reverse-mode pullback, so JAX can differentiate the Schur-selected solution even though the primal ordered-QZ solve currently runs through SciPy
+- explicit Schur / ordered-QZ determinacy diagnostics are implemented via `analyze_quadratic_matrix_equation_schur`, `analyze_first_order_dsge_determinacy`, and `analyze_first_order_model_determinacy`, including stable-root counts and `unique_stable_solution` / `indeterminate` / `no_stable_solution` classification
 - `DSGETimings` implemented for low-level timing metadata
 - `solve_first_order_dsge_solution` implemented with `qme_algorithm="doubling"` and `qme_algorithm="schur"` options, and the default now matches Julia's `:schur` path
 - `linear_state_space_from_first_order_solution` implemented to connect first-order solutions to the Kalman layer
-- tests include the Julia `RBC_CME` Jacobian/timing fixture and verify the resulting solution matrix against upstream reference values, Schur-vs-doubling parity, JIT coverage for the Schur first-order path, and reverse-mode autodiff through the Schur QME solution
+- tests include the Julia `RBC_CME` Jacobian/timing fixture and verify the resulting solution matrix against upstream reference values, Schur-vs-doubling parity, JIT coverage for the Schur first-order path, reverse-mode autodiff through the Schur QME solution, and toy-model determinacy classification for unique, indeterminate, and no-stable regimes
 
 ### 5. Generic stochastic extended path core
 

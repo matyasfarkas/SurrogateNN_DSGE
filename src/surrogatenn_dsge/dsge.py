@@ -23,6 +23,24 @@ class QuadraticMatrixEquationResult(NamedTuple):
     relative_residual: float
 
 
+class SchurQZDeterminacyDiagnostics(NamedTuple):
+    companion_roots: jax.Array
+    stable_mask: jax.Array
+    stable_count: int
+    expected_stable_count: int
+    decomposition_succeeded: bool
+    invariant_subspace_invertible: bool
+    solution_extracted: bool
+    relative_residual: float
+    classification: str
+    unique_stable_solution: bool
+
+
+class SchurQZDeterminacyResult(NamedTuple):
+    solution: jax.Array
+    diagnostics: SchurQZDeterminacyDiagnostics
+
+
 class _QuadraticMatrixEquationDoublingState(NamedTuple):
     e_matrix: jax.Array
     f_matrix: jax.Array
@@ -39,6 +57,13 @@ class FirstOrderDSGEResult(NamedTuple):
     converged: bool
     state_transition: jax.Array
     shock_impact: jax.Array
+
+
+class FirstOrderDeterminacyResult(NamedTuple):
+    solution: FirstOrderDSGEResult
+    qme_diagnostics: SchurQZDeterminacyDiagnostics
+    classification: str
+    unique_stable_solution: bool
 
 
 class SecondOrderAuxiliaryMatrices(NamedTuple):
@@ -504,15 +529,42 @@ def _schur_stable_selection(alpha: np.ndarray, beta: np.ndarray) -> np.ndarray:
     return np.isfinite(ratio) & (ratio < 1.0)
 
 
-def _solve_quadratic_matrix_equation_schur_numpy(
+def _classify_schur_determinacy(
+    *,
+    expected_stable_count: int,
+    stable_count: int,
+    decomposition_succeeded: bool,
+    invariant_subspace_invertible: bool,
+    solution_extracted: bool,
+    relative_residual: float,
+    acceptance_tol: float,
+) -> str:
+    if not decomposition_succeeded:
+        return "decomposition_failed"
+    if stable_count < expected_stable_count:
+        return "no_stable_solution"
+    if stable_count > expected_stable_count:
+        return "indeterminate"
+    if not invariant_subspace_invertible:
+        return "singular_invariant_subspace"
+    if not solution_extracted:
+        return "complex_solution"
+    if relative_residual >= acceptance_tol:
+        return "residual_too_large"
+    return "unique_stable_solution"
+
+
+def _analyze_quadratic_matrix_equation_schur_numpy(
     a: np.ndarray,
     b: np.ndarray,
     c: np.ndarray,
     timings: DSGETimings,
-) -> tuple[np.ndarray, bool]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool, bool, bool]:
     a_arr = np.asarray(a, dtype=np.float64)
     b_arr = np.asarray(b, dtype=np.float64)
     c_arr = np.asarray(c, dtype=np.float64)
+    empty_roots = np.asarray([], dtype=np.complex128)
+    empty_mask = np.asarray([], dtype=bool)
     with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
         comb = tuple(
             sorted(
@@ -574,11 +626,20 @@ def _solve_quadratic_matrix_equation_schur_numpy(
                 check_finite=False,
             )
         except Exception:
-            return np.array(a_arr, copy=True), False
+            return np.array(a_arr, copy=True), empty_roots, empty_mask, False, False, False
 
+        with np.errstate(divide="ignore", invalid="ignore"):
+            companion_roots = beta / alpha
         stable_mask = _schur_stable_selection(alpha, beta)
         if int(np.count_nonzero(stable_mask)) != timings.nPast_not_future_and_mixed:
-            return np.array(a_arr, copy=True), False
+            return (
+                np.array(a_arr, copy=True),
+                np.asarray(companion_roots, dtype=np.complex128),
+                np.asarray(stable_mask, dtype=bool),
+                True,
+                False,
+                False,
+            )
 
         n_past = timings.nPast_not_future_and_mixed
         z21 = z_matrix[n_past:, :n_past]
@@ -595,7 +656,14 @@ def _solve_quadratic_matrix_equation_schur_numpy(
                 check_finite=False,
             ).T
         except Exception:
-            return np.array(a_arr, copy=True), False
+            return (
+                np.array(a_arr, copy=True),
+                np.asarray(companion_roots, dtype=np.complex128),
+                np.asarray(stable_mask, dtype=bool),
+                True,
+                False,
+                False,
+            )
 
         sol = np.vstack([l_block[list(timings.not_mixed_in_past_idx), :], d_block])
         selection = np.eye(len(comb), dtype=a_arr.dtype)[
@@ -604,8 +672,97 @@ def _solve_quadratic_matrix_equation_schur_numpy(
         ]
         x_matrix = sol[list(timings.dynamic_order), :] @ selection
         if np.max(np.abs(np.imag(x_matrix))) > 1e-9:
-            return np.array(a_arr, copy=True), False
-        return np.asarray(np.real(x_matrix), dtype=np.float64), True
+            return (
+                np.array(a_arr, copy=True),
+                np.asarray(companion_roots, dtype=np.complex128),
+                np.asarray(stable_mask, dtype=bool),
+                True,
+                True,
+                False,
+            )
+        return (
+            np.asarray(np.real(x_matrix), dtype=np.float64),
+            np.asarray(companion_roots, dtype=np.complex128),
+            np.asarray(stable_mask, dtype=bool),
+            True,
+            True,
+            True,
+        )
+
+
+def _solve_quadratic_matrix_equation_schur_numpy(
+    a: np.ndarray,
+    b: np.ndarray,
+    c: np.ndarray,
+    timings: DSGETimings,
+) -> tuple[np.ndarray, bool]:
+    solution, _, _, decomposition_succeeded, _, solution_extracted = (
+        _analyze_quadratic_matrix_equation_schur_numpy(
+            a,
+            b,
+            c,
+            timings,
+        )
+    )
+    return solution, decomposition_succeeded and solution_extracted
+
+
+def analyze_quadratic_matrix_equation_schur(
+    a: Union[jax.Array, np.ndarray],
+    b: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+    timings: DSGETimings,
+    *,
+    acceptance_tol: float = 1e-8,
+) -> SchurQZDeterminacyResult:
+    a_arr, b_arr, c_arr = _cast_quadratic_matrix_equation_inputs(a, b, c)
+    (
+        solution_np,
+        companion_roots_np,
+        stable_mask_np,
+        decomposition_succeeded,
+        invariant_subspace_invertible,
+        solution_extracted,
+    ) = _analyze_quadratic_matrix_equation_schur_numpy(
+        np.asarray(a_arr),
+        np.asarray(b_arr),
+        np.asarray(c_arr),
+        timings,
+    )
+    solution = jnp.asarray(solution_np, dtype=a_arr.dtype)
+    if solution_extracted:
+        relative_residual = float(
+            np.asarray(quadratic_matrix_equation_residual(a_arr, solution, b_arr, c_arr))
+        )
+    else:
+        relative_residual = float("inf")
+    stable_count = int(np.count_nonzero(stable_mask_np))
+    expected_stable_count = int(timings.nPast_not_future_and_mixed)
+    classification = _classify_schur_determinacy(
+        expected_stable_count=expected_stable_count,
+        stable_count=stable_count,
+        decomposition_succeeded=decomposition_succeeded,
+        invariant_subspace_invertible=invariant_subspace_invertible,
+        solution_extracted=solution_extracted,
+        relative_residual=relative_residual,
+        acceptance_tol=acceptance_tol,
+    )
+    diagnostics = SchurQZDeterminacyDiagnostics(
+        companion_roots=jnp.asarray(companion_roots_np, dtype=jnp.complex128),
+        stable_mask=jnp.asarray(stable_mask_np, dtype=bool),
+        stable_count=stable_count,
+        expected_stable_count=expected_stable_count,
+        decomposition_succeeded=decomposition_succeeded,
+        invariant_subspace_invertible=invariant_subspace_invertible,
+        solution_extracted=solution_extracted,
+        relative_residual=relative_residual,
+        classification=classification,
+        unique_stable_solution=(classification == "unique_stable_solution"),
+    )
+    return SchurQZDeterminacyResult(
+        solution=solution,
+        diagnostics=diagnostics,
+    )
 
 
 def _solve_quadratic_matrix_equation_schur_callback(
@@ -936,23 +1093,18 @@ def solve_quadratic_matrix_equation_schur(
                 relative_residual=guess_residual,
             )
 
-    solution_np, success = _solve_quadratic_matrix_equation_schur_numpy(
-        np.asarray(a_arr),
-        np.asarray(b_arr),
-        np.asarray(c_arr),
+    analysis = analyze_quadratic_matrix_equation_schur(
+        a_arr,
+        b_arr,
+        c_arr,
         timings,
-    )
-    solution = jnp.asarray(solution_np, dtype=a_arr.dtype)
-    relative_residual = (
-        float(np.asarray(quadratic_matrix_equation_residual(a_arr, solution, b_arr, c_arr)))
-        if success
-        else 1.0
+        acceptance_tol=acceptance_tol,
     )
     return QuadraticMatrixEquationResult(
-        solution=solution,
-        converged=success and relative_residual < acceptance_tol,
+        solution=analysis.solution,
+        converged=analysis.diagnostics.unique_stable_solution,
         iterations=0,
-        relative_residual=relative_residual,
+        relative_residual=analysis.diagnostics.relative_residual,
     )
 
 
@@ -991,6 +1143,49 @@ def solve_quadratic_matrix_equation_schur_jax(
     )
 
 
+def _prepare_first_order_qme_system(
+    jacobian: Union[jax.Array, np.ndarray],
+    timings: DSGETimings,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    grad = jnp.asarray(jacobian, dtype=jnp.float64)
+    if grad.ndim != 2:
+        raise ValueError(f"jacobian must be rank-2, got shape {grad.shape}.")
+
+    dyn_index = np.arange(timings.nPresent_only, timings.nVars)
+    comb = tuple(
+        sorted(
+            set(timings.future_not_past_and_mixed_idx)
+            | set(timings.past_not_future_idx)
+        )
+    )
+    future_in_comb = _indexin(timings.future_not_past_and_mixed_idx, comb)
+    past_in_comb = _indexin(timings.past_not_future_and_mixed_idx, comb)
+    selector = jnp.eye(len(comb), dtype=grad.dtype)
+
+    n_future = timings.nFuture_not_past_and_mixed
+    n_vars = timings.nVars
+    n_past = timings.nPast_not_future_and_mixed
+
+    grad_plus = grad[:, :n_future]
+    grad_zero = grad[:, n_future : n_future + n_vars]
+    grad_minus = grad[:, n_future + n_vars : n_future + n_vars + n_past]
+
+    q_complete = jnp.linalg.qr(
+        grad_zero[:, timings.present_only_idx],
+        mode="complete",
+    )[0]
+    a_plus = q_complete.T @ grad_plus
+    a_zero = q_complete.T @ grad_zero
+    a_minus = q_complete.T @ grad_minus
+
+    return (
+        grad,
+        a_plus[dyn_index] @ selector[list(future_in_comb), :],
+        a_zero[dyn_index][:, comb],
+        a_minus[dyn_index] @ selector[list(past_in_comb), :],
+    )
+
+
 def solve_first_order_dsge_solution(
     jacobian: Union[jax.Array, np.ndarray],
     timings: DSGETimings,
@@ -1000,9 +1195,10 @@ def solve_first_order_dsge_solution(
     qme_tol: float = 1e-14,
     qme_acceptance_tol: float = 1e-8,
 ) -> FirstOrderDSGEResult:
-    grad = jnp.asarray(jacobian, dtype=jnp.float64)
-    if grad.ndim != 2:
-        raise ValueError(f"jacobian must be rank-2, got shape {grad.shape}.")
+    grad, a_tilde_plus, a_tilde_zero, a_tilde_minus = _prepare_first_order_qme_system(
+        jacobian,
+        timings,
+    )
 
     dyn_index = np.arange(timings.nPresent_only, timings.nVars)
     reverse_dynamic_order = _indexin(
@@ -1027,7 +1223,6 @@ def solve_first_order_dsge_solution(
     grad_zero = grad[:, n_future : n_future + n_vars]
     grad_minus = grad[:, n_future + n_vars : n_future + n_vars + n_past]
     grad_exo = grad[:, n_future + n_vars + n_past :]
-
     q_complete = jnp.linalg.qr(
         grad_zero[:, timings.present_only_idx],
         mode="complete",
@@ -1035,10 +1230,6 @@ def solve_first_order_dsge_solution(
     a_plus = q_complete.T @ grad_plus
     a_zero = q_complete.T @ grad_zero
     a_minus = q_complete.T @ grad_minus
-
-    a_tilde_plus = a_plus[dyn_index] @ selector[list(future_in_comb), :]
-    a_tilde_zero = a_zero[dyn_index][:, comb]
-    a_tilde_minus = a_minus[dyn_index] @ selector[list(past_in_comb), :]
 
     if qme_algorithm == "doubling":
         qme_result = solve_quadratic_matrix_equation_doubling(
@@ -1127,6 +1318,37 @@ def solve_first_order_dsge_solution(
         converged=True,
         state_transition=transition,
         shock_impact=exogenous,
+    )
+
+
+def analyze_first_order_dsge_determinacy(
+    jacobian: Union[jax.Array, np.ndarray],
+    timings: DSGETimings,
+    *,
+    qme_acceptance_tol: float = 1e-8,
+) -> FirstOrderDeterminacyResult:
+    _, a_tilde_plus, a_tilde_zero, a_tilde_minus = _prepare_first_order_qme_system(
+        jacobian,
+        timings,
+    )
+    qme_analysis = analyze_quadratic_matrix_equation_schur(
+        a_tilde_plus,
+        a_tilde_zero,
+        a_tilde_minus,
+        timings,
+        acceptance_tol=qme_acceptance_tol,
+    )
+    solution = solve_first_order_dsge_solution(
+        jacobian,
+        timings,
+        qme_algorithm="schur",
+        qme_acceptance_tol=qme_acceptance_tol,
+    )
+    return FirstOrderDeterminacyResult(
+        solution=solution,
+        qme_diagnostics=qme_analysis.diagnostics,
+        classification=qme_analysis.diagnostics.classification,
+        unique_stable_solution=qme_analysis.diagnostics.unique_stable_solution,
     )
 
 
