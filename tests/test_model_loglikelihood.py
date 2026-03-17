@@ -143,3 +143,32 @@ def test_model_loglikelihood_per_period_matches_total_and_failure_value() -> Non
         rtol=0.0,
         atol=0.0,
     )
+
+
+def test_model_loglikelihood_accepts_schur_qme_algorithm() -> None:
+    model, first_order_result, observables, state_space, simulation, levels = (
+        _loglikelihood_fixture()
+    )
+
+    high_level = kalman_loglikelihood_from_model(
+        model,
+        levels,
+        observables=observables,
+        steady_state_initial_guess={"a": 1.5, "y": 2.0},
+        qme_algorithm="schur",
+    )
+    explicit_first_order = solve_first_order_model(
+        model,
+        steady_state_initial_guess={"a": 1.5, "y": 2.0},
+        qme_algorithm="schur",
+    )
+    explicit = kalman_loglikelihood_from_model(
+        model,
+        levels,
+        observables=observables,
+        first_order_result=explicit_first_order,
+    )
+    low_level = kalman_loglikelihood(state_space, simulation.observations)
+
+    np.testing.assert_allclose(high_level, explicit, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(high_level, low_level, rtol=1e-10, atol=1e-10)

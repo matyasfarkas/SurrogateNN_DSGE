@@ -513,99 +513,99 @@ def _solve_quadratic_matrix_equation_schur_numpy(
     a_arr = np.asarray(a, dtype=np.float64)
     b_arr = np.asarray(b, dtype=np.float64)
     c_arr = np.asarray(c, dtype=np.float64)
-
-    comb = tuple(
-        sorted(
-            set(timings.future_not_past_and_mixed_idx)
-            | set(timings.past_not_future_idx)
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore", under="ignore"):
+        comb = tuple(
+            sorted(
+                set(timings.future_not_past_and_mixed_idx)
+                | set(timings.past_not_future_idx)
+            )
         )
-    )
-    future_in_comb = _indexin(timings.future_not_past_and_mixed_idx, comb)
-    past_not_future_and_mixed_in_comb = _indexin(
-        timings.past_not_future_and_mixed_idx,
-        comb,
-    )
-    past_not_future_in_comb = _indexin(timings.past_not_future_idx, comb)
-
-    a_tilde_plus = a_arr[:, list(future_in_comb)]
-    a_tilde_minus = c_arr[:, list(past_not_future_and_mixed_in_comb)]
-    a_tilde_zero_plus = b_arr[:, list(future_in_comb)]
-    a_tilde_zero_minus = b_arr[:, list(past_not_future_in_comb)] @ np.eye(
-        timings.nPast_not_future_and_mixed,
-        dtype=a_arr.dtype,
-    )[list(timings.not_mixed_in_past_idx), :]
-
-    z_plus = np.zeros(
-        (timings.nMixed, timings.nFuture_not_past_and_mixed),
-        dtype=a_arr.dtype,
-    )
-    i_plus = np.eye(
-        timings.nFuture_not_past_and_mixed,
-        dtype=a_arr.dtype,
-    )[list(timings.mixed_in_future_idx), :]
-    z_minus = np.zeros(
-        (timings.nMixed, timings.nPast_not_future_and_mixed),
-        dtype=a_arr.dtype,
-    )
-    i_minus = np.eye(
-        timings.nPast_not_future_and_mixed,
-        dtype=a_arr.dtype,
-    )[list(timings.mixed_in_past_idx), :]
-
-    d_pencil = np.block(
-        [
-            [a_tilde_zero_minus, a_tilde_plus],
-            [i_minus, z_plus],
-        ]
-    )
-    e_pencil = np.block(
-        [
-            [-a_tilde_minus, -a_tilde_zero_plus],
-            [z_minus, i_plus],
-        ]
-    )
-
-    try:
-        s_matrix, t_matrix, alpha, beta, _, z_matrix = scipy_linalg.ordqz(
-            d_pencil,
-            e_pencil,
-            sort=_schur_stable_selection,
-            output="complex",
-            check_finite=False,
+        future_in_comb = _indexin(timings.future_not_past_and_mixed_idx, comb)
+        past_not_future_and_mixed_in_comb = _indexin(
+            timings.past_not_future_and_mixed_idx,
+            comb,
         )
-    except Exception:
-        return np.array(a_arr, copy=True), False
+        past_not_future_in_comb = _indexin(timings.past_not_future_idx, comb)
 
-    stable_mask = _schur_stable_selection(alpha, beta)
-    if int(np.count_nonzero(stable_mask)) != timings.nPast_not_future_and_mixed:
-        return np.array(a_arr, copy=True), False
+        a_tilde_plus = a_arr[:, list(future_in_comb)]
+        a_tilde_minus = c_arr[:, list(past_not_future_and_mixed_in_comb)]
+        a_tilde_zero_plus = b_arr[:, list(future_in_comb)]
+        a_tilde_zero_minus = b_arr[:, list(past_not_future_in_comb)] @ np.eye(
+            timings.nPast_not_future_and_mixed,
+            dtype=a_arr.dtype,
+        )[list(timings.not_mixed_in_past_idx), :]
 
-    n_past = timings.nPast_not_future_and_mixed
-    z21 = z_matrix[n_past:, :n_past]
-    z11 = z_matrix[:n_past, :n_past]
-    s11 = s_matrix[:n_past, :n_past]
-    t11 = t_matrix[:n_past, :n_past]
+        z_plus = np.zeros(
+            (timings.nMixed, timings.nFuture_not_past_and_mixed),
+            dtype=a_arr.dtype,
+        )
+        i_plus = np.eye(
+            timings.nFuture_not_past_and_mixed,
+            dtype=a_arr.dtype,
+        )[list(timings.mixed_in_future_idx), :]
+        z_minus = np.zeros(
+            (timings.nMixed, timings.nPast_not_future_and_mixed),
+            dtype=a_arr.dtype,
+        )
+        i_minus = np.eye(
+            timings.nPast_not_future_and_mixed,
+            dtype=a_arr.dtype,
+        )[list(timings.mixed_in_past_idx), :]
 
-    try:
-        d_block = scipy_linalg.solve(z11.T, z21.T, check_finite=False).T
-        l_core = scipy_linalg.solve(s11, t11, check_finite=False)
-        l_block = scipy_linalg.solve(
-            z11.T,
-            (z11 @ l_core).T,
-            check_finite=False,
-        ).T
-    except Exception:
-        return np.array(a_arr, copy=True), False
+        d_pencil = np.block(
+            [
+                [a_tilde_zero_minus, a_tilde_plus],
+                [i_minus, z_plus],
+            ]
+        )
+        e_pencil = np.block(
+            [
+                [-a_tilde_minus, -a_tilde_zero_plus],
+                [z_minus, i_plus],
+            ]
+        )
 
-    sol = np.vstack([l_block[list(timings.not_mixed_in_past_idx), :], d_block])
-    selection = np.eye(len(comb), dtype=a_arr.dtype)[
-        list(past_not_future_and_mixed_in_comb),
-        :,
-    ]
-    x_matrix = sol[list(timings.dynamic_order), :] @ selection
-    if np.max(np.abs(np.imag(x_matrix))) > 1e-9:
-        return np.array(a_arr, copy=True), False
-    return np.asarray(np.real(x_matrix), dtype=np.float64), True
+        try:
+            s_matrix, t_matrix, alpha, beta, _, z_matrix = scipy_linalg.ordqz(
+                d_pencil,
+                e_pencil,
+                sort=_schur_stable_selection,
+                output="complex",
+                check_finite=False,
+            )
+        except Exception:
+            return np.array(a_arr, copy=True), False
+
+        stable_mask = _schur_stable_selection(alpha, beta)
+        if int(np.count_nonzero(stable_mask)) != timings.nPast_not_future_and_mixed:
+            return np.array(a_arr, copy=True), False
+
+        n_past = timings.nPast_not_future_and_mixed
+        z21 = z_matrix[n_past:, :n_past]
+        z11 = z_matrix[:n_past, :n_past]
+        s11 = s_matrix[:n_past, :n_past]
+        t11 = t_matrix[:n_past, :n_past]
+
+        try:
+            d_block = scipy_linalg.solve(z11.T, z21.T, check_finite=False).T
+            l_core = scipy_linalg.solve(s11, t11, check_finite=False)
+            l_block = scipy_linalg.solve(
+                z11.T,
+                (z11 @ l_core).T,
+                check_finite=False,
+            ).T
+        except Exception:
+            return np.array(a_arr, copy=True), False
+
+        sol = np.vstack([l_block[list(timings.not_mixed_in_past_idx), :], d_block])
+        selection = np.eye(len(comb), dtype=a_arr.dtype)[
+            list(past_not_future_and_mixed_in_comb),
+            :,
+        ]
+        x_matrix = sol[list(timings.dynamic_order), :] @ selection
+        if np.max(np.abs(np.imag(x_matrix))) > 1e-9:
+            return np.array(a_arr, copy=True), False
+        return np.asarray(np.real(x_matrix), dtype=np.float64), True
 
 
 def _solve_quadratic_matrix_equation_schur_callback(

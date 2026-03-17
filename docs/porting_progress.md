@@ -460,11 +460,29 @@ Python/JAX status:
 - for robustness, the inversion-step helper first attempts a JAX Jacobian and falls back to finite-difference Jacobians when the callback is not JAX-traceable
 - tests mirror the upstream Julia toy cases for parameter overrides, conditional and additive-residual likelihoods, rollout/state helpers, inversion helpers, linear-reference dispatch, shock reconstruction, and chunked sampling
 
+### 30. Schur/QZ selection through parsed-model first-order APIs
+
+Julia reference:
+
+- `src/get_functions.jl`
+- `src/filter/kalman.jl`
+- `src/filter/inversion.jl`
+- `src/regime_switching/gating.jl`
+- `src/regime_switching/likelihood.jl`
+
+Python/JAX status:
+
+- parsed-model first-order callers that build solutions internally now expose `qme_algorithm`, including state-space construction, Kalman likelihoods, inversion likelihoods, switching likelihoods, observed-shock / observed-variable helpers, filter-state extractors, and linear gate-stat helpers
+- the concrete NumPyro bridge now forwards the same `qme_algorithm` choice, so both the concrete log-density path and the compiled JAX likelihood bridge can use the Schur/QZ branch consistently
+- upstream compile smoke now also covers explicit Schur/QZ first-order solves plus JAX-compiled Kalman likelihoods on `RBC_CME`, `RBC_Dynare`, `FS2000`, and `Backus_Kehoe_Kydland_1992`
+- tests verify high-level Schur parity for parsed-model state-space construction, Kalman likelihoods, first-order filter helpers, concrete NumPyro log-density evaluation, and the new multi-model Schur compile smoke
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
 - The Julia `:bartels_stewart`, `:bicgstab`, `:dqgmres`, and `:gmres` Sylvester variants are not ported yet.
 - The Julia QME `:schur` variant is now ported, but the JAX-facing primal solve is not fully GPU-native yet; until JAX exposes generalized `qz` / `ordqz`, the ordered-QZ step runs through SciPy on the host and only the reverse-mode derivative is native JAX.
+- Julia defaults the QME path to `:schur`; the Python port still defaults public first-order workflows to `doubling` unless `qme_algorithm="schur"` is requested explicitly.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.

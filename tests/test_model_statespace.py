@@ -103,6 +103,41 @@ def test_build_linear_state_space_from_model_matches_low_level_helper() -> None:
     )
 
 
+def test_build_linear_state_space_from_model_accepts_schur_qme_algorithm() -> None:
+    model, _ = _parsed_statespace_fixture()
+    observables = ("y", "c")
+
+    parsed_state_space = build_linear_state_space_from_model(
+        model,
+        observables,
+        steady_state_initial_guess={"c": 0.0, "y": 0.0},
+        qme_algorithm="schur",
+    )
+    explicit_first_order = solve_first_order_model(
+        model,
+        steady_state_initial_guess={"c": 0.0, "y": 0.0},
+        qme_algorithm="schur",
+    )
+    explicit_state_space = build_linear_state_space_from_model(
+        model,
+        observables,
+        first_order_result=explicit_first_order,
+    )
+
+    np.testing.assert_allclose(
+        parsed_state_space.transition_matrix,
+        explicit_state_space.transition_matrix,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        parsed_state_space.process_noise_covariance,
+        explicit_state_space.process_noise_covariance,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
 def test_parsed_model_state_space_is_jittable_and_device_accessible() -> None:
     model, first_order_result = _parsed_statespace_fixture()
     state_space = build_linear_state_space_from_model(

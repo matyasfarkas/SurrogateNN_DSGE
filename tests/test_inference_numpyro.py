@@ -165,6 +165,44 @@ def test_numpyro_log_density_matches_manual_prior_plus_likelihood() -> None:
     )
 
 
+def test_numpyro_log_density_accepts_schur_qme_algorithm() -> None:
+    model, _, observables, levels, priors = _numpyro_fixture()
+    parameter_samples = {
+        "rho_a": jnp.asarray(0.8, dtype=jnp.float64),
+        "rho_y": jnp.asarray(0.6, dtype=jnp.float64),
+    }
+
+    log_density = evaluate_numpyro_kalman_log_density(
+        model,
+        levels,
+        priors,
+        parameter_samples,
+        observables=observables,
+        steady_state_initial_guess={"a": 1.5, "y": 2.0},
+        qme_algorithm="schur",
+    )
+    parameter_vector = assemble_parameter_vector(model, parameter_samples)
+    manual_log_density = (
+        priors["rho_a"].log_prob(parameter_samples["rho_a"])
+        + priors["rho_y"].log_prob(parameter_samples["rho_y"])
+        + kalman_loglikelihood_from_model(
+            model,
+            levels,
+            observables=observables,
+            parameter_values=parameter_vector,
+            steady_state_initial_guess={"a": 1.5, "y": 2.0},
+            qme_algorithm="schur",
+        )
+    )
+
+    np.testing.assert_allclose(
+        log_density,
+        manual_log_density,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
 def test_jax_fixed_steady_state_loglikelihood_matches_high_level_path() -> None:
     model, first_order_result, observables, levels, _ = _numpyro_fixture()
     parameter_vector = assemble_parameter_vector(

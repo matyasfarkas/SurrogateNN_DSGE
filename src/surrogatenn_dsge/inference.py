@@ -344,6 +344,7 @@ def build_numpyro_kalman_model(
     presample_periods: int = 0,
     jitter: float = 1e-9,
     on_failure_loglikelihood: float = -np.inf,
+    qme_algorithm: str = "doubling",
 ):
     numpyro, _, _ = _require_numpyro()
 
@@ -393,6 +394,7 @@ def build_numpyro_kalman_model(
             presample_periods=presample_periods,
             jitter=jitter,
             on_failure_loglikelihood=on_failure_loglikelihood,
+            qme_algorithm=qme_algorithm,
         )
         numpyro.deterministic("parameter_vector", parameter_vector)
         numpyro.deterministic("loglikelihood", loglikelihood)
@@ -486,6 +488,7 @@ def evaluate_numpyro_kalman_log_density(
     presample_periods: int = 0,
     jitter: float = 1e-9,
     on_failure_loglikelihood: float = -np.inf,
+    qme_algorithm: str = "doubling",
 ) -> jax.Array:
     _, _, log_density = _require_numpyro()
     numpyro_model = build_numpyro_kalman_model(
@@ -504,6 +507,7 @@ def evaluate_numpyro_kalman_log_density(
         presample_periods=presample_periods,
         jitter=jitter,
         on_failure_loglikelihood=on_failure_loglikelihood,
+        qme_algorithm=qme_algorithm,
     )
     log_joint, _ = log_density(numpyro_model, (), {}, parameter_samples)
     return jnp.asarray(log_joint, dtype=jnp.float64)

@@ -264,6 +264,43 @@ def test_first_order_filter_helpers_match_exact_linear_kalman_recovery() -> None
     assert variable_names == ("y",)
 
 
+def test_filter_helpers_accept_schur_qme_algorithm_without_explicit_first_order_result() -> None:
+    model, _, shock_name, shocks, levels = _linear_filter_fixture()
+
+    estimated_shocks = estimate_observed_shocks_matrix(
+        model,
+        levels,
+        observables=("y",),
+        steady_state_initial_guess={"y": 0.0},
+        qme_algorithm="schur",
+        filter="inversion",
+    )
+    estimated_variables, variable_names = estimate_observed_variables_matrix(
+        model,
+        levels,
+        observables=("y",),
+        steady_state_initial_guess={"y": 0.0},
+        qme_algorithm="schur",
+        filter="inversion",
+    )
+    gate_stats = compute_linear_gate_stats_from_filter(
+        model,
+        levels,
+        {"y": 0.1},
+        {shock_name: 0.5},
+        ("y",),
+        observables=("y",),
+        steady_state_initial_guess={"y": 0.0},
+        qme_algorithm="schur",
+        filter="inversion",
+    )
+
+    np.testing.assert_allclose(estimated_shocks, shocks, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(estimated_variables, levels, rtol=1e-12, atol=1e-12)
+    assert variable_names == ("y",)
+    np.testing.assert_allclose(gate_stats.shocks, shocks, rtol=1e-12, atol=1e-12)
+
+
 @pytest.mark.parametrize(
     ("model_path", "steady_state_initial_guess"),
     _FILTER_SMOKE_MODELS,

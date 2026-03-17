@@ -151,6 +151,13 @@ _COMPILE_SMOKE_MODELS = (
     ),
 )
 
+_SCHUR_COMPILE_SMOKE_MODELS = (
+    _COMPILE_SMOKE_MODELS[0],
+    _COMPILE_SMOKE_MODELS[4],
+    _COMPILE_SMOKE_MODELS[5],
+    _COMPILE_SMOKE_MODELS[7],
+)
+
 
 @pytest.mark.parametrize(
     ("model_path", "steady_state_initial_guess"),
@@ -185,6 +192,48 @@ def test_upstream_fixture_solves_first_order_and_compiled_kalman(
             steady_state=first_order_result.steady_state,
             measurement_error_scale=1e-8,
             on_failure_loglikelihood=-1e12,
+        )
+    )
+
+    value = compiled(np.asarray(first_order_result.parameter_values, dtype=np.float64))
+    assert np.isfinite(value)
+
+
+@pytest.mark.parametrize(
+    ("model_path", "steady_state_initial_guess"),
+    _SCHUR_COMPILE_SMOKE_MODELS,
+)
+def test_upstream_fixture_solves_first_order_and_compiled_kalman_with_schur(
+    model_path: Path,
+    steady_state_initial_guess: dict[str, float] | None,
+) -> None:
+    model = parse_macro_model(model_path.read_text())
+    first_order_result = solve_first_order_model(
+        model,
+        steady_state_initial_guess=steady_state_initial_guess,
+        qme_algorithm="schur",
+    )
+
+    assert first_order_result.solution.converged
+
+    observable = model.steady_state_names[0]
+    steady_lookup = dict(
+        zip(
+            model.timings.var,
+            np.asarray(first_order_result.steady_state, dtype=np.float64).tolist(),
+        )
+    )
+    levels = np.asarray([[steady_lookup[observable]] * 4], dtype=np.float64)
+    compiled = jax.jit(
+        lambda theta: kalman_loglikelihood_from_model_jax(
+            model,
+            levels,
+            observables=(observable,),
+            parameter_values=theta,
+            steady_state=first_order_result.steady_state,
+            measurement_error_scale=1e-8,
+            on_failure_loglikelihood=-1e12,
+            qme_algorithm="schur",
         )
     )
 
