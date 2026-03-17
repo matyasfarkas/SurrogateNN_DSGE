@@ -369,6 +369,24 @@ Python/JAX status:
 - the compiled first-order Kalman likelihood and NumPyro wrapper now cover calibrated parsed models as well, using the JAX steady-state/calibration solve inside the trace
 - tests verify JAX parity for direct calibrated-parameter resolution, joint calibrated steady states on both a minimal target-calibration model and the existing `RBC_CME` fixture, calibrated auto-steady-state likelihood parity, and a compiled `NUTS` run on a calibrated model
 
+### 25. Inversion filters and switching-likelihood bridge
+
+Julia reference:
+
+- `src/filter/inversion.jl`
+- `src/regime_switching/likelihood.jl`
+- `test/test_inversion_filter.jl`
+- `test/test_sep_inversion_filter_likelihood.jl`
+- `test/test_sw07_hlt_estimation_switching.jl`
+
+Python/JAX status:
+
+- a new inversion module now ports the first-order inversion filter with total and per-period likelihood helpers, square and rectangular shock Jacobian handling, and Julia-style warmup support
+- parsed models now expose named-observable inversion likelihood entry points for both `first_order` and `stochastic_extended_path`, returning configurable failure values just like the existing Kalman helpers
+- the SEP path now includes the missing inversion-filter layer on top of the parsed full-tree SEP solver, together with `reset_sep_inversion_last_diagnostics` / `get_sep_inversion_last_diagnostics` and Julia-style runtime overrides such as `sep_periods`, `sep_order`, `sep_nnodes`, `sep_accept_tol`, and the SEP inversion LM tolerances
+- a switching module now ports the regime-switching likelihood combiner `compute_switching_loglikelihood` / `mix_loglikelihood`, and parsed models can mix ROM Kalman and FOM inversion per-period likelihoods directly when supplied with gate probabilities or a hard mask
+- tests verify low-level vs parsed first-order inversion parity, JIT coverage for the first-order inversion kernel, failure fallbacks, SEP inversion diagnostics and determinism, runtime override acceptance, and parsed-model switching parity against manual ROM/FOM mixtures
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -381,9 +399,10 @@ Python/JAX status:
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
-- The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.
+- The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; the current SEP inversion bridge accepts `sep_sparse_tree` for API compatibility but still runs the full-tree solver underneath because Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.
+- Regime-switching likelihood mixing is now ported when gate probabilities or hard masks are supplied, but Julia gate-stat computation, gate calibration, automatic regime assignment, and the broader switching-estimation harness are not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
-- No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, and the parsed full-tree SEP path.
+- No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed full-tree SEP path.
 
 ## Environment note
 

@@ -32,6 +32,12 @@ from .dsge import (
     solve_third_order_dsge_solution,
     solve_third_order_stochastic_steady_state,
 )
+from .inversion import (
+    first_order_inversion_loglikelihood,
+    first_order_inversion_loglikelihood_per_period,
+    sep_inversion_loglikelihood,
+    sep_inversion_loglikelihood_per_period,
+)
 from .sep import (
     SEPConfig,
     SEPSolution,
@@ -41,6 +47,11 @@ from .statespace import (
     LinearGaussianStateSpace,
     kalman_loglikelihood as _statespace_kalman_loglikelihood,
     kalman_loglikelihood_per_period as _statespace_kalman_loglikelihood_per_period,
+)
+from .switching import (
+    SwitchingLikelihoodConfig,
+    SwitchingLikelihoodResult,
+    compute_switching_loglikelihood,
 )
 
 _TRANSFORMATIONS = standard_transformations + (
@@ -1237,36 +1248,15 @@ class MacroModel:
             np.logical_and(parameter_values >= lower, parameter_values <= upper).all()
         )
 
-    def _prepare_first_order_state_space_for_likelihood(
+    def _prepare_steady_state_and_parameters_for_runtime(
         self,
-        observables: Sequence[str] | str,
         *,
-        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
         parameter_values: Optional[Sequence[float]] = None,
         steady_state: Optional[Sequence[float]] = None,
         steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
         steady_state_tol: float = 1e-12,
         steady_state_max_iter: int = 100,
-        initial_covariance_strategy: str = "theoretical",
-        measurement_error_scale: float = 1e-9,
-        measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
-    ) -> tuple[Optional[LinearGaussianStateSpace], Optional[np.ndarray]]:
-        observable_names = self._coerce_observable_names(observables)
-
-        if first_order_result is not None:
-            if not first_order_result.solution.converged:
-                return None, np.asarray(first_order_result.steady_state, dtype=np.float64)
-            return (
-                self.build_linear_state_space(
-                    observable_names,
-                    first_order_result=first_order_result,
-                    initial_covariance_strategy=initial_covariance_strategy,
-                    measurement_error_scale=measurement_error_scale,
-                    measurement_error_covariance=measurement_error_covariance,
-                ),
-                np.asarray(first_order_result.steady_state, dtype=np.float64),
-            )
-
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         provided_parameters = None
         if parameter_values is not None:
             provided_parameters = self._coerce_parameter_values(parameter_values)
@@ -1282,29 +1272,54 @@ class MacroModel:
             )
             if not steady_state_result.converged:
                 return None, None
-            full_steady_state = np.asarray(
-                steady_state_result.steady_state,
+            return (
+                np.asarray(steady_state_result.steady_state, dtype=np.float64),
+                np.asarray(steady_state_result.parameter_values, dtype=np.float64),
+            )
+
+        full_steady_state = self._coerce_full_steady_state(
+            steady_state,
+            parameter_values=parameter_values,
+        )
+        resolved_parameters = (
+            provided_parameters
+            if provided_parameters is not None
+            else np.asarray(
+                self.resolve_parameter_values(steady_state=full_steady_state),
                 dtype=np.float64,
             )
-            resolved_parameters = np.asarray(
-                steady_state_result.parameter_values,
-                dtype=np.float64,
-            )
-        else:
-            full_steady_state = self._coerce_full_steady_state(
-                steady_state,
-                parameter_values=parameter_values,
-            )
-            resolved_parameters = (
-                provided_parameters
-                if provided_parameters is not None
-                else np.asarray(
-                    self.resolve_parameter_values(steady_state=full_steady_state),
-                    dtype=np.float64,
-                )
-            )
-            if not self._parameter_values_within_bounds(resolved_parameters):
+        )
+        if not self._parameter_values_within_bounds(resolved_parameters):
+            return full_steady_state, None
+        return full_steady_state, resolved_parameters
+
+    def _prepare_first_order_solution_for_likelihood(
+        self,
+        *,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+    ) -> tuple[Optional[ParsedModelFirstOrderResult], Optional[np.ndarray]]:
+        if first_order_result is not None:
+            full_steady_state = np.asarray(first_order_result.steady_state, dtype=np.float64)
+            if not first_order_result.solution.converged:
                 return None, full_steady_state
+            return first_order_result, full_steady_state
+
+        full_steady_state, resolved_parameters = (
+            self._prepare_steady_state_and_parameters_for_runtime(
+                parameter_values=parameter_values,
+                steady_state=steady_state,
+                steady_state_initial_guess=steady_state_initial_guess,
+                steady_state_tol=steady_state_tol,
+                steady_state_max_iter=steady_state_max_iter,
+            )
+        )
+        if full_steady_state is None or resolved_parameters is None:
+            return None, full_steady_state
 
         jacobian = self.calculate_jacobian(
             parameter_values=resolved_parameters,
@@ -1314,12 +1329,41 @@ class MacroModel:
         if not solution.converged:
             return None, full_steady_state
 
-        parsed_result = ParsedModelFirstOrderResult(
-            steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
-            parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
-            jacobian=jacobian,
-            solution=solution,
+        return (
+            ParsedModelFirstOrderResult(
+                steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+                parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
+                jacobian=jacobian,
+                solution=solution,
+            ),
+            full_steady_state,
         )
+
+    def _prepare_first_order_state_space_for_likelihood(
+        self,
+        observables: Sequence[str] | str,
+        *,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        initial_covariance_strategy: str = "theoretical",
+        measurement_error_scale: float = 1e-9,
+        measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    ) -> tuple[Optional[LinearGaussianStateSpace], Optional[np.ndarray]]:
+        observable_names = self._coerce_observable_names(observables)
+        parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+        )
+        if parsed_result is None or full_steady_state is None:
+            return None, full_steady_state
         return (
             self.build_linear_state_space(
                 observable_names,
@@ -1429,6 +1473,385 @@ class MacroModel:
             demeaned_observations,
             presample_periods=presample_periods,
             jitter=jitter,
+        )
+
+    def inversion_loglikelihood(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        algorithm: str = "first_order",
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        initial_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+        config: SEPConfig = SEPConfig(),
+        sep_periods: Optional[int] = None,
+        sep_order: Optional[int] = None,
+        sep_nnodes: Optional[int] = None,
+        sep_sparse_tree: bool = False,
+        sep_maxit: Optional[int] = None,
+        sep_tol: Optional[float] = None,
+        sep_accept_tol: float = 1e-3,
+        sep_shock_scale: Optional[float] = None,
+        sep_inv_maxit: int = 8,
+        sep_inv_step_tol: float = 1e-6,
+        sep_inv_resid_tol: float = 1e-6,
+        sep_inv_lambda: float = 1e-4,
+        warmup_iterations: int = 0,
+        presample_periods: int = 0,
+        on_failure_loglikelihood: float = -np.inf,
+    ) -> jax.Array:
+        observable_names, observation_data = self._coerce_observations(
+            observations,
+            observables=observables,
+        )
+        observable_indices = self.resolve_observable_indices(observable_names)
+        if algorithm == "first_order":
+            parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
+                first_order_result=first_order_result,
+                parameter_values=parameter_values,
+                steady_state=steady_state,
+                steady_state_initial_guess=steady_state_initial_guess,
+                steady_state_tol=steady_state_tol,
+                steady_state_max_iter=steady_state_max_iter,
+            )
+            if parsed_result is None or full_steady_state is None:
+                return jnp.asarray(on_failure_loglikelihood, dtype=jnp.float64)
+            initial_state_values = (
+                np.asarray(full_steady_state, dtype=np.float64)
+                if initial_state is None
+                else np.asarray(
+                    self._coerce_dynamic_state_vector(
+                        initial_state,
+                        label="initial_state",
+                    ),
+                    dtype=np.float64,
+                )
+            )
+            demeaned_observations = observation_data - self._observable_steady_state_values(
+                observable_names,
+                full_steady_state,
+            )[:, None]
+            return first_order_inversion_loglikelihood(
+                parsed_result.solution.solution_matrix,
+                self.timings,
+                demeaned_observations,
+                observable_indices,
+                initial_state=initial_state_values - full_steady_state,
+                warmup_iterations=warmup_iterations,
+                presample_periods=presample_periods,
+                on_failure_loglikelihood=on_failure_loglikelihood,
+            )
+
+        if algorithm in {"stochastic_extended_path", "sep"}:
+            full_steady_state, resolved_parameters = (
+                self._prepare_steady_state_and_parameters_for_runtime(
+                    parameter_values=parameter_values,
+                    steady_state=steady_state,
+                    steady_state_initial_guess=steady_state_initial_guess,
+                    steady_state_tol=steady_state_tol,
+                    steady_state_max_iter=steady_state_max_iter,
+                )
+            )
+            if full_steady_state is None or resolved_parameters is None:
+                return jnp.asarray(on_failure_loglikelihood, dtype=jnp.float64)
+            initial_state_values = (
+                np.asarray(full_steady_state, dtype=np.float64)
+                if initial_state is None
+                else np.asarray(
+                    self._coerce_dynamic_state_vector(
+                        initial_state,
+                        label="initial_state",
+                    ),
+                    dtype=np.float64,
+                )
+            )
+            terminal_state_values = (
+                np.asarray(full_steady_state, dtype=np.float64)
+                if terminal_state is None
+                else np.asarray(
+                    self._coerce_dynamic_state_vector(
+                        terminal_state,
+                        label="terminal_state",
+                    ),
+                    dtype=np.float64,
+                )
+            )
+            demeaned_observations = observation_data - self._observable_steady_state_values(
+                observable_names,
+                full_steady_state,
+            )[:, None]
+            return sep_inversion_loglikelihood(
+                self,
+                demeaned_observations,
+                observable_indices,
+                parameter_values=resolved_parameters,
+                steady_state=full_steady_state,
+                initial_state=initial_state_values,
+                terminal_state=terminal_state_values,
+                config=config,
+                sep_periods=sep_periods,
+                sep_order=sep_order,
+                sep_nnodes=sep_nnodes,
+                sep_sparse_tree=sep_sparse_tree,
+                sep_maxit=sep_maxit,
+                sep_tol=sep_tol,
+                sep_accept_tol=sep_accept_tol,
+                sep_shock_scale=sep_shock_scale,
+                sep_inv_maxit=sep_inv_maxit,
+                sep_inv_step_tol=sep_inv_step_tol,
+                sep_inv_resid_tol=sep_inv_resid_tol,
+                sep_inv_lambda=sep_inv_lambda,
+                presample_periods=presample_periods,
+                on_failure_loglikelihood=on_failure_loglikelihood,
+            )
+
+        raise ValueError(
+            f"Unknown inversion algorithm {algorithm!r}. "
+            "Use 'first_order' or 'stochastic_extended_path'."
+        )
+
+    def inversion_loglikelihood_per_period(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        algorithm: str = "first_order",
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        initial_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+        config: SEPConfig = SEPConfig(),
+        sep_periods: Optional[int] = None,
+        sep_order: Optional[int] = None,
+        sep_nnodes: Optional[int] = None,
+        sep_sparse_tree: bool = False,
+        sep_maxit: Optional[int] = None,
+        sep_tol: Optional[float] = None,
+        sep_accept_tol: float = 1e-3,
+        sep_shock_scale: Optional[float] = None,
+        sep_inv_maxit: int = 8,
+        sep_inv_step_tol: float = 1e-6,
+        sep_inv_resid_tol: float = 1e-6,
+        sep_inv_lambda: float = 1e-4,
+        warmup_iterations: int = 0,
+        presample_periods: int = 0,
+        on_failure_loglikelihood: float = -np.inf,
+    ) -> jax.Array:
+        observable_names, observation_data = self._coerce_observations(
+            observations,
+            observables=observables,
+        )
+        observable_indices = self.resolve_observable_indices(observable_names)
+        if algorithm == "first_order":
+            parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
+                first_order_result=first_order_result,
+                parameter_values=parameter_values,
+                steady_state=steady_state,
+                steady_state_initial_guess=steady_state_initial_guess,
+                steady_state_tol=steady_state_tol,
+                steady_state_max_iter=steady_state_max_iter,
+            )
+            if parsed_result is None or full_steady_state is None:
+                return jnp.full(
+                    (observation_data.shape[1],),
+                    on_failure_loglikelihood,
+                    dtype=jnp.float64,
+                )
+            initial_state_values = (
+                np.asarray(full_steady_state, dtype=np.float64)
+                if initial_state is None
+                else np.asarray(
+                    self._coerce_dynamic_state_vector(
+                        initial_state,
+                        label="initial_state",
+                    ),
+                    dtype=np.float64,
+                )
+            )
+            demeaned_observations = observation_data - self._observable_steady_state_values(
+                observable_names,
+                full_steady_state,
+            )[:, None]
+            return first_order_inversion_loglikelihood_per_period(
+                parsed_result.solution.solution_matrix,
+                self.timings,
+                demeaned_observations,
+                observable_indices,
+                initial_state=initial_state_values - full_steady_state,
+                warmup_iterations=warmup_iterations,
+                presample_periods=presample_periods,
+                on_failure_loglikelihood=on_failure_loglikelihood,
+            )
+
+        if algorithm in {"stochastic_extended_path", "sep"}:
+            full_steady_state, resolved_parameters = (
+                self._prepare_steady_state_and_parameters_for_runtime(
+                    parameter_values=parameter_values,
+                    steady_state=steady_state,
+                    steady_state_initial_guess=steady_state_initial_guess,
+                    steady_state_tol=steady_state_tol,
+                    steady_state_max_iter=steady_state_max_iter,
+                )
+            )
+            if full_steady_state is None or resolved_parameters is None:
+                return jnp.full(
+                    (observation_data.shape[1],),
+                    on_failure_loglikelihood,
+                    dtype=jnp.float64,
+                )
+            initial_state_values = (
+                np.asarray(full_steady_state, dtype=np.float64)
+                if initial_state is None
+                else np.asarray(
+                    self._coerce_dynamic_state_vector(
+                        initial_state,
+                        label="initial_state",
+                    ),
+                    dtype=np.float64,
+                )
+            )
+            terminal_state_values = (
+                np.asarray(full_steady_state, dtype=np.float64)
+                if terminal_state is None
+                else np.asarray(
+                    self._coerce_dynamic_state_vector(
+                        terminal_state,
+                        label="terminal_state",
+                    ),
+                    dtype=np.float64,
+                )
+            )
+            demeaned_observations = observation_data - self._observable_steady_state_values(
+                observable_names,
+                full_steady_state,
+            )[:, None]
+            return sep_inversion_loglikelihood_per_period(
+                self,
+                demeaned_observations,
+                observable_indices,
+                parameter_values=resolved_parameters,
+                steady_state=full_steady_state,
+                initial_state=initial_state_values,
+                terminal_state=terminal_state_values,
+                config=config,
+                sep_periods=sep_periods,
+                sep_order=sep_order,
+                sep_nnodes=sep_nnodes,
+                sep_sparse_tree=sep_sparse_tree,
+                sep_maxit=sep_maxit,
+                sep_tol=sep_tol,
+                sep_accept_tol=sep_accept_tol,
+                sep_shock_scale=sep_shock_scale,
+                sep_inv_maxit=sep_inv_maxit,
+                sep_inv_step_tol=sep_inv_step_tol,
+                sep_inv_resid_tol=sep_inv_resid_tol,
+                sep_inv_lambda=sep_inv_lambda,
+                presample_periods=presample_periods,
+                on_failure_loglikelihood=on_failure_loglikelihood,
+            )
+
+        raise ValueError(
+            f"Unknown inversion algorithm {algorithm!r}. "
+            "Use 'first_order' or 'stochastic_extended_path'."
+        )
+
+    def switching_loglikelihood(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        gate_probs: Optional[Sequence[float]] = None,
+        hard_mask: Optional[Sequence[bool]] = None,
+        fom_algorithm: str = "stochastic_extended_path",
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        initial_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+        initial_covariance_strategy: str = "theoretical",
+        measurement_error_scale: float = 1e-9,
+        measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+        presample_periods: int = 0,
+        jitter: float = 1e-9,
+        on_failure_loglikelihood: float = -np.inf,
+        config: SEPConfig = SEPConfig(),
+        sep_periods: Optional[int] = None,
+        sep_order: Optional[int] = None,
+        sep_nnodes: Optional[int] = None,
+        sep_sparse_tree: bool = False,
+        sep_maxit: Optional[int] = None,
+        sep_tol: Optional[float] = None,
+        sep_accept_tol: float = 1e-3,
+        sep_shock_scale: Optional[float] = None,
+        sep_inv_maxit: int = 8,
+        sep_inv_step_tol: float = 1e-6,
+        sep_inv_resid_tol: float = 1e-6,
+        sep_inv_lambda: float = 1e-4,
+        switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+    ) -> SwitchingLikelihoodResult:
+        rom = self.kalman_loglikelihood_per_period(
+            observations,
+            observables=observables,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            initial_covariance_strategy=initial_covariance_strategy,
+            measurement_error_scale=measurement_error_scale,
+            measurement_error_covariance=measurement_error_covariance,
+            presample_periods=presample_periods,
+            jitter=jitter,
+            on_failure_loglikelihood=on_failure_loglikelihood,
+        )
+        fom = self.inversion_loglikelihood_per_period(
+            observations,
+            observables=observables,
+            algorithm=fom_algorithm,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            initial_state=initial_state,
+            terminal_state=terminal_state,
+            config=config,
+            sep_periods=sep_periods,
+            sep_order=sep_order,
+            sep_nnodes=sep_nnodes,
+            sep_sparse_tree=sep_sparse_tree,
+            sep_maxit=sep_maxit,
+            sep_tol=sep_tol,
+            sep_accept_tol=sep_accept_tol,
+            sep_shock_scale=sep_shock_scale,
+            sep_inv_maxit=sep_inv_maxit,
+            sep_inv_step_tol=sep_inv_step_tol,
+            sep_inv_resid_tol=sep_inv_resid_tol,
+            sep_inv_lambda=sep_inv_lambda,
+            presample_periods=presample_periods,
+            on_failure_loglikelihood=on_failure_loglikelihood,
+        )
+        return compute_switching_loglikelihood(
+            rom,
+            fom,
+            hard_mask=hard_mask,
+            gate_probs=gate_probs,
+            config=switching_config,
         )
 
     def _apply_default_calibrated_parameter_guess(
@@ -2323,6 +2746,204 @@ def kalman_loglikelihood_per_period_from_model(
         presample_periods=presample_periods,
         jitter=jitter,
         on_failure_loglikelihood=on_failure_loglikelihood,
+    )
+
+
+def inversion_loglikelihood_from_model(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    algorithm: str = "first_order",
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+    config: SEPConfig = SEPConfig(),
+    sep_periods: Optional[int] = None,
+    sep_order: Optional[int] = None,
+    sep_nnodes: Optional[int] = None,
+    sep_sparse_tree: bool = False,
+    sep_maxit: Optional[int] = None,
+    sep_tol: Optional[float] = None,
+    sep_accept_tol: float = 1e-3,
+    sep_shock_scale: Optional[float] = None,
+    sep_inv_maxit: int = 8,
+    sep_inv_step_tol: float = 1e-6,
+    sep_inv_resid_tol: float = 1e-6,
+    sep_inv_lambda: float = 1e-4,
+    warmup_iterations: int = 0,
+    presample_periods: int = 0,
+    on_failure_loglikelihood: float = -np.inf,
+) -> jax.Array:
+    return model.inversion_loglikelihood(
+        observations,
+        observables=observables,
+        algorithm=algorithm,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        config=config,
+        sep_periods=sep_periods,
+        sep_order=sep_order,
+        sep_nnodes=sep_nnodes,
+        sep_sparse_tree=sep_sparse_tree,
+        sep_maxit=sep_maxit,
+        sep_tol=sep_tol,
+        sep_accept_tol=sep_accept_tol,
+        sep_shock_scale=sep_shock_scale,
+        sep_inv_maxit=sep_inv_maxit,
+        sep_inv_step_tol=sep_inv_step_tol,
+        sep_inv_resid_tol=sep_inv_resid_tol,
+        sep_inv_lambda=sep_inv_lambda,
+        warmup_iterations=warmup_iterations,
+        presample_periods=presample_periods,
+        on_failure_loglikelihood=on_failure_loglikelihood,
+    )
+
+
+def inversion_loglikelihood_per_period_from_model(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    algorithm: str = "first_order",
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+    config: SEPConfig = SEPConfig(),
+    sep_periods: Optional[int] = None,
+    sep_order: Optional[int] = None,
+    sep_nnodes: Optional[int] = None,
+    sep_sparse_tree: bool = False,
+    sep_maxit: Optional[int] = None,
+    sep_tol: Optional[float] = None,
+    sep_accept_tol: float = 1e-3,
+    sep_shock_scale: Optional[float] = None,
+    sep_inv_maxit: int = 8,
+    sep_inv_step_tol: float = 1e-6,
+    sep_inv_resid_tol: float = 1e-6,
+    sep_inv_lambda: float = 1e-4,
+    warmup_iterations: int = 0,
+    presample_periods: int = 0,
+    on_failure_loglikelihood: float = -np.inf,
+) -> jax.Array:
+    return model.inversion_loglikelihood_per_period(
+        observations,
+        observables=observables,
+        algorithm=algorithm,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        config=config,
+        sep_periods=sep_periods,
+        sep_order=sep_order,
+        sep_nnodes=sep_nnodes,
+        sep_sparse_tree=sep_sparse_tree,
+        sep_maxit=sep_maxit,
+        sep_tol=sep_tol,
+        sep_accept_tol=sep_accept_tol,
+        sep_shock_scale=sep_shock_scale,
+        sep_inv_maxit=sep_inv_maxit,
+        sep_inv_step_tol=sep_inv_step_tol,
+        sep_inv_resid_tol=sep_inv_resid_tol,
+        sep_inv_lambda=sep_inv_lambda,
+        warmup_iterations=warmup_iterations,
+        presample_periods=presample_periods,
+        on_failure_loglikelihood=on_failure_loglikelihood,
+    )
+
+
+def switching_loglikelihood_from_model(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    gate_probs: Optional[Sequence[float]] = None,
+    hard_mask: Optional[Sequence[bool]] = None,
+    fom_algorithm: str = "stochastic_extended_path",
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    presample_periods: int = 0,
+    jitter: float = 1e-9,
+    on_failure_loglikelihood: float = -np.inf,
+    config: SEPConfig = SEPConfig(),
+    sep_periods: Optional[int] = None,
+    sep_order: Optional[int] = None,
+    sep_nnodes: Optional[int] = None,
+    sep_sparse_tree: bool = False,
+    sep_maxit: Optional[int] = None,
+    sep_tol: Optional[float] = None,
+    sep_accept_tol: float = 1e-3,
+    sep_shock_scale: Optional[float] = None,
+    sep_inv_maxit: int = 8,
+    sep_inv_step_tol: float = 1e-6,
+    sep_inv_resid_tol: float = 1e-6,
+    sep_inv_lambda: float = 1e-4,
+    switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+) -> SwitchingLikelihoodResult:
+    return model.switching_loglikelihood(
+        observations,
+        observables=observables,
+        gate_probs=gate_probs,
+        hard_mask=hard_mask,
+        fom_algorithm=fom_algorithm,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        initial_covariance_strategy=initial_covariance_strategy,
+        measurement_error_scale=measurement_error_scale,
+        measurement_error_covariance=measurement_error_covariance,
+        presample_periods=presample_periods,
+        jitter=jitter,
+        on_failure_loglikelihood=on_failure_loglikelihood,
+        config=config,
+        sep_periods=sep_periods,
+        sep_order=sep_order,
+        sep_nnodes=sep_nnodes,
+        sep_sparse_tree=sep_sparse_tree,
+        sep_maxit=sep_maxit,
+        sep_tol=sep_tol,
+        sep_accept_tol=sep_accept_tol,
+        sep_shock_scale=sep_shock_scale,
+        sep_inv_maxit=sep_inv_maxit,
+        sep_inv_step_tol=sep_inv_step_tol,
+        sep_inv_resid_tol=sep_inv_resid_tol,
+        sep_inv_lambda=sep_inv_lambda,
+        switching_config=switching_config,
     )
 
 

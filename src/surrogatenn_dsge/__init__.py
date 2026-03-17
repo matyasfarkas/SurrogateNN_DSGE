@@ -53,6 +53,14 @@ from .dsge import (
     solve_third_order_dsge_solution,
     solve_third_order_stochastic_steady_state,
 )
+from .inversion import (
+    first_order_inversion_loglikelihood,
+    first_order_inversion_loglikelihood_per_period,
+    get_sep_inversion_last_diagnostics,
+    reset_sep_inversion_last_diagnostics,
+    sep_inversion_loglikelihood,
+    sep_inversion_loglikelihood_per_period,
+)
 from .model import (
     MacroModel,
     ParsedModelFirstOrderResult,
@@ -63,6 +71,9 @@ from .model import (
     build_linear_state_space_from_model,
     kalman_loglikelihood_from_model,
     kalman_loglikelihood_per_period_from_model,
+    inversion_loglikelihood_from_model,
+    inversion_loglikelihood_per_period_from_model,
+    switching_loglikelihood_from_model,
     calculate_hessian,
     calculate_jacobian,
     calculate_third_order_derivatives,
@@ -97,6 +108,12 @@ from .statespace import (
     kalman_smoother,
     simulate_linear_gaussian_state_space,
 )
+from .switching import (
+    SwitchingLikelihoodConfig,
+    SwitchingLikelihoodResult,
+    compute_switching_loglikelihood,
+    mix_loglikelihood,
+)
 
 __all__ = [
     "DSGETimings",
@@ -119,6 +136,8 @@ __all__ = [
     "SecondOrderStochasticSteadyStateResult",
     "SteadyStateResult",
     "StateSpaceSimulation",
+    "SwitchingLikelihoodConfig",
+    "SwitchingLikelihoodResult",
     "ThirdOrderAuxiliaryMatrices",
     "ThirdOrderDSGEResult",
     "ThirdOrderStochasticSteadyStateResult",
@@ -136,10 +155,16 @@ __all__ = [
     "evaluate_numpyro_kalman_log_density_jax",
     "create_second_order_auxiliary_matrices",
     "create_third_order_auxiliary_matrices",
+    "compute_switching_loglikelihood",
     "discrete_lyapunov_residual",
     "discrete_sylvester_residual",
     "evaluate_numpyro_kalman_log_density",
     "gauss_hermite_rule",
+    "get_sep_inversion_last_diagnostics",
+    "first_order_inversion_loglikelihood",
+    "first_order_inversion_loglikelihood_per_period",
+    "inversion_loglikelihood_from_model",
+    "inversion_loglikelihood_per_period_from_model",
     "kalman_filter",
     "kalman_loglikelihood",
     "kalman_loglikelihood_from_model",
@@ -152,9 +177,14 @@ __all__ = [
     "pruned_second_order_state_update",
     "pruned_third_order_state_update",
     "quadratic_matrix_equation_residual",
+    "reset_sep_inversion_last_diagnostics",
     "resolve_observable_indices",
     "second_order_state_update",
+    "sep_inversion_loglikelihood",
+    "sep_inversion_loglikelihood_per_period",
     "simulate_linear_gaussian_state_space",
+    "switching_loglikelihood_from_model",
+    "mix_loglikelihood",
     "resolve_parameter_values",
     "resolve_parameter_values_jax",
     "solve_first_order_dsge_solution",

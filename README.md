@@ -18,8 +18,11 @@ Implemented:
 - JAX-native dense direct solver fallback
 - discrete Sylvester solver for `A X B + C = X`
 - linear Gaussian state-space simulation, Kalman likelihood, filtering, and RTS smoothing
+- first-order inversion-filter likelihoods with per-period contributions and warmup support
 - parsed-model observable-name resolution and first-order state-space construction for Kalman estimation
 - parsed-model Kalman loglikelihood helpers for named observable data in levels, including per-period likelihood contributions and failure fallbacks
+- parsed-model inversion loglikelihood helpers for both first-order and stochastic extended path likelihoods, including SEP inversion diagnostics and Julia-style runtime override keywords
+- regime-switching likelihood mixing with supplied hard masks or gate probabilities, plus a parsed-model bridge that mixes ROM Kalman and FOM inversion per-period likelihoods
 - optional NumPyro inference helpers for subset priors, parameter-vector assembly, and concrete log-density evaluation on top of the parsed-model Kalman likelihood
 - JAX first-order structural likelihood and NumPyro wrappers that can run compiled kernels like `NUTS` on the parsed-model first-order path with either an explicit steady state or automatic JAX steady-state and calibration-equation solves
 - quadratic matrix equation doubling solver
@@ -46,7 +49,7 @@ Implemented:
 - parsed-model third-order solve path from MacroModelling-style source through symbolic third derivatives to the perturbation solution
 - generic callback-based stochastic extended path solver with Gauss-Hermite branching
 - parsed-model stochastic extended path solve path with JAX dynamic residual evaluation and residual-expectation averaging over future branches
-- focused tests for residuals, symmetry, fallback behavior, JIT, autodiff, parser parity, and JAX device accessibility
+- focused tests for residuals, symmetry, fallback behavior, JIT, autodiff, parser parity, inversion filtering, switching likelihoods, and JAX device accessibility
 
 Not implemented yet:
 
@@ -56,6 +59,6 @@ Not implemented yet:
 - occasionally binding constraint parsing from the Julia macro layer
 - Julia sparse-tree / HMC SEP variants and OBC-specific SEP machinery
 - fully JAX-traceable parsed-model structural likelihoods beyond the first-order path, including the remaining special-function and higher-order estimation edges for compiled NumPyro kernels like `NUTS` and `HMC`
-- regime switching
+- automatic regime assignment, gate-stat calibration, and the broader regime-switching estimation harness beyond the currently ported likelihood mixer
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).
