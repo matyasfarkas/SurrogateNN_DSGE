@@ -20,6 +20,7 @@ Implemented:
 - linear Gaussian state-space simulation, Kalman likelihood, filtering, and RTS smoothing
 - parsed-model observable-name resolution and first-order state-space construction for Kalman estimation
 - parsed-model Kalman loglikelihood helpers for named observable data in levels, including per-period likelihood contributions and failure fallbacks
+- optional NumPyro inference helpers for subset priors, parameter-vector assembly, and concrete log-density evaluation on top of the parsed-model Kalman likelihood
 - quadratic matrix equation doubling solver
 - MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
 - MacroModelling-style inline time-index `for` loops inside `@model` equations, including additive and `operator = :*` forms
@@ -53,6 +54,7 @@ Not implemented yet:
 - the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds
 - occasionally binding constraint parsing from the Julia macro layer
 - Julia sparse-tree / HMC SEP variants and OBC-specific SEP machinery
+- fully JAX-traceable parsed-model structural likelihoods for compiled NumPyro kernels like `NUTS` and `HMC`
 - regime switching
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).

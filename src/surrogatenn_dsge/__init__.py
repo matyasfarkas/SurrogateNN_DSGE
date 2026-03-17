@@ -18,6 +18,11 @@ from .linalg import (
     solve_lyapunov_equation,
     solve_sylvester_equation,
 )
+from .inference import (
+    assemble_parameter_vector,
+    build_numpyro_kalman_model,
+    evaluate_numpyro_kalman_log_density,
+)
 from .dsge import (
     DSGETimings,
     FirstOrderDSGEResult,
@@ -110,8 +115,10 @@ __all__ = [
     "ThirdOrderAuxiliaryMatrices",
     "ThirdOrderDSGEResult",
     "ThirdOrderStochasticSteadyStateResult",
+    "assemble_parameter_vector",
     "build_linear_state_space_from_model",
     "build_linear_gaussian_state_space",
+    "build_numpyro_kalman_model",
     "SylvesterOutcome",
     "SylvesterResult",
     "calculate_hessian",
@@ -122,6 +129,7 @@ __all__ = [
     "create_third_order_auxiliary_matrices",
     "discrete_lyapunov_residual",
     "discrete_sylvester_residual",
+    "evaluate_numpyro_kalman_log_density",
     "gauss_hermite_rule",
     "kalman_filter",
     "kalman_loglikelihood",
