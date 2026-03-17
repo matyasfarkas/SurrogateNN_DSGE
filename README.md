@@ -27,6 +27,7 @@ Implemented:
 - first-order rollout helpers and parsed-model linear gate-stat computation from supplied shock paths, including named observable/shock sigma inputs
 - Julia-style first-order observed-shock / observed-variable estimation helpers, linear filter state extractors, and filter-based linear gate-stat workflows for both Kalman and inversion filters
 - switching diagnostics and comparison helpers for gated episodes, loglikelihood decompositions, and runtime summaries
+- callback-based switching likelihood helpers including named-parameter selection/override, conditional and additive-residual loglikelihood utilities, generic inversion-step helpers, linear-reference likelihood comparison helpers, Julia-style shock reconstruction from epsilon means, and chunked-sampling orchestration
 - optional NumPyro inference helpers for subset priors, parameter-vector assembly, and concrete log-density evaluation on top of the parsed-model Kalman likelihood
 - JAX first-order structural likelihood and NumPyro wrappers that can run compiled kernels like `NUTS` on the parsed-model first-order path with either an explicit steady state or automatic JAX steady-state and calibration-equation solves
 - quadratic matrix equation doubling solver
@@ -64,5 +65,6 @@ Not implemented yet:
 - Julia sparse-tree / HMC SEP variants and OBC-specific SEP machinery
 - fully JAX-traceable parsed-model structural likelihoods beyond the first-order path, including higher-order estimation edges for compiled NumPyro kernels like `NUTS` and `HMC`
 - the broader regime-switching estimation harness beyond the currently ported likelihood mixer and gate/regime utilities
+- posterior-chain convenience helpers from the Julia switching diagnostics layer such as `chunk_stats`, `theta_draws`, and `epsilon_means_from_chain`
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).

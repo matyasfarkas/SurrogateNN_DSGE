@@ -440,6 +440,24 @@ Python/JAX status:
 - the helper layer now short-circuits exact steady-state data to zero shocks and steady-state variables, which materially improves robustness on large upstream fixture models used only as compile smoke
 - tests verify exact one-shock recovery for both inversion and Kalman helpers, manual parity for the filter-based gate-stat composition, shape/error guards, and multi-model smoke coverage on `RBC_CME`, `RBC_Dynare`, `FS2000`, `RBC_baseline`, and `Backus_Kehoe_Kydland_1992`
 
+### 29. Callback-based switching likelihood utilities and named-parameter helpers
+
+Julia reference:
+
+- `src/regime_switching/gating.jl` (`extract_named_parameters`, `override_named_parameters`, `parameters_with_theta_mode`)
+- `src/regime_switching/likelihood.jl` (`linear_model_loglik_per_period`, `conditional_loglik_per_period`, `split_observation_state`, `predict_from_full`, `predict_additive_residual`, `additive_residual_loglik_per_period`, `rollout_observations`, `advance_state`, `linear_reference_loglik_per_period`, `inversion_step`, `inversion_loglik_per_period`, `build_shocks_from_eps`)
+- `src/regime_switching/diagnostics.jl` (`run_chunked_sampling`)
+- `test/test_regime_switching_api.jl`
+
+Python/JAX status:
+
+- the port now includes the missing named-parameter helpers `extract_named_parameters`, `override_named_parameters`, `parameters_with_theta_mode`, and the indexed override path used by `linear_model_loglik_per_period`
+- a new callback-oriented regime-switching helper module now ports the Julia toy-API layer for conditional likelihoods, additive residuals, observation rollout, state advancement, Levenberg-Marquardt inversion steps, inversion-filter likelihood construction, linear-reference comparison likelihoods, and epsilon-to-shock reconstruction
+- `linear_model_loglik_per_period` now bridges these helpers back to parsed models, using the existing parsed-model Kalman and inversion per-period likelihood paths with explicit parameter overrides
+- `run_chunked_sampling` is now ported as a generic orchestration helper for chunk-wise posterior or likelihood workflows
+- for robustness, the inversion-step helper first attempts a JAX Jacobian and falls back to finite-difference Jacobians when the callback is not JAX-traceable
+- tests mirror the upstream Julia toy cases for parameter overrides, conditional and additive-residual likelihoods, rollout/state helpers, inversion helpers, linear-reference dispatch, shock reconstruction, and chunked sampling
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -454,6 +472,7 @@ Python/JAX status:
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; the current SEP inversion bridge accepts `sep_sparse_tree` for API compatibility but still runs the full-tree solver underneath because Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
+- Posterior-chain convenience helpers from the Julia switching diagnostics layer, notably `chunk_stats`, `theta_draws`, and `epsilon_means_from_chain`, are still unported because the Python-side posterior-chain representation is not fixed yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed full-tree SEP path.
 
