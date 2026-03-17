@@ -23,6 +23,7 @@ Implemented:
 - parsed-model Kalman loglikelihood helpers for named observable data in levels, including per-period likelihood contributions and failure fallbacks
 - parsed-model inversion loglikelihood helpers for both first-order and stochastic extended path likelihoods, including SEP inversion diagnostics and Julia-style runtime override keywords
 - regime-switching likelihood mixing with supplied hard masks or gate probabilities, plus a parsed-model bridge that mixes ROM Kalman and FOM inversion per-period likelihoods
+- gate-stat computation, threshold calibration, probability mapping, padding, and automatic hard-regime assignment utilities for the switching layer
 - optional NumPyro inference helpers for subset priors, parameter-vector assembly, and concrete log-density evaluation on top of the parsed-model Kalman likelihood
 - JAX first-order structural likelihood and NumPyro wrappers that can run compiled kernels like `NUTS` on the parsed-model first-order path with either an explicit steady state or automatic JAX steady-state and calibration-equation solves
 - quadratic matrix equation doubling solver
@@ -35,7 +36,7 @@ Implemented:
 - indexed parameter-family broadcasting in `@parameters`, including `alpha = 0.3` style direct definitions and one-family calibration equations like `y[ss] = target | beta`
 - `@parameters ... guess = Dict(...)` default steady-state guesses for variables and calibrated parameters
 - inequality bounds in `@parameters` such as `0 < alpha < 1`, `x >= 0`, and `10 >= R`, with bounded Newton projection for steady-state and calibration solves
-- MacroModelling special-function aliases including `normpdf`, `dnorm`, `pnorm`, `normlogpdf`, and `erfcinv`
+- MacroModelling special-function aliases including `normpdf`, `dnorm`, `pnorm`, `normlogpdf`, `erfinv`, and `erfcinv`
 - lazy symbolic matrix construction and cached `sympy.lambdify` compilation for parsed models, so large MacroModelling-style sources parse without eagerly compiling every derivative object
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
 - damped Newton non-stochastic steady-state solver
@@ -49,7 +50,7 @@ Implemented:
 - parsed-model third-order solve path from MacroModelling-style source through symbolic third derivatives to the perturbation solution
 - generic callback-based stochastic extended path solver with Gauss-Hermite branching
 - parsed-model stochastic extended path solve path with JAX dynamic residual evaluation and residual-expectation averaging over future branches
-- focused tests for residuals, symmetry, fallback behavior, JIT, autodiff, parser parity, inversion filtering, switching likelihoods, and JAX device accessibility
+- focused tests for residuals, symmetry, fallback behavior, JIT, autodiff, parser parity, inversion filtering, switching likelihoods, gate calibration, and multi-model JAX compile smoke across upstream model files
 
 Not implemented yet:
 
@@ -58,7 +59,7 @@ Not implemented yet:
 - the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds
 - occasionally binding constraint parsing from the Julia macro layer
 - Julia sparse-tree / HMC SEP variants and OBC-specific SEP machinery
-- fully JAX-traceable parsed-model structural likelihoods beyond the first-order path, including the remaining special-function and higher-order estimation edges for compiled NumPyro kernels like `NUTS` and `HMC`
-- automatic regime assignment, gate-stat calibration, and the broader regime-switching estimation harness beyond the currently ported likelihood mixer
+- fully JAX-traceable parsed-model structural likelihoods beyond the first-order path, including higher-order estimation edges for compiled NumPyro kernels like `NUTS` and `HMC`
+- the broader regime-switching estimation harness beyond the currently ported likelihood mixer and gate/regime utilities
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).

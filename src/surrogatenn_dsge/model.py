@@ -8,6 +8,7 @@ from typing import Mapping, NamedTuple, Optional, Sequence, Union
 import jax
 from jax import lax
 import jax.numpy as jnp
+import jax.scipy.special as jsp_special
 import numpy as np
 import scipy.special as scipy_special
 import sympy as sp
@@ -70,12 +71,14 @@ _PARAMETERS_BLOCK_RE = re.compile(
     r"@parameters\s+(?P<name>[^\s]+)(?P<options>.*?)\bbegin\b",
     re.DOTALL,
 )
+_IDENTIFIER_PATTERN = r"(?!\d)(?:[\w\u0300-\u036f])+(?:\{[^{}\[\]]+\})*"
+_INDEXED_IDENTIFIER_PATTERN = r"(?!\d)(?:[\w\u0300-\u036f])+(?:\{[^{}\[\]]+\})+"
 _REFERENCE_RE = re.compile(
-    r"(?P<name>(?!\d)\w+(?:\{[^{}\[\]]+\})*)\s*\[\s*(?P<index>[^\]]+)\s*\]",
+    rf"(?P<name>{_IDENTIFIER_PATTERN})\s*\[\s*(?P<index>[^\]]+)\s*\]",
     re.UNICODE,
 )
-_IDENTIFIER_RE = re.compile(r"(?!\d)\w+(?:\{[^{}\[\]]+\})*", re.UNICODE)
-_INDEXED_IDENTIFIER_RE = re.compile(r"(?!\d)\w+(?:\{[^{}\[\]]+\})+", re.UNICODE)
+_IDENTIFIER_RE = re.compile(_IDENTIFIER_PATTERN, re.UNICODE)
+_INDEXED_IDENTIFIER_RE = re.compile(_INDEXED_IDENTIFIER_PATTERN, re.UNICODE)
 
 LoopIndex = Union[int, str]
 LoopCollections = Mapping[str, tuple[LoopIndex, ...]]
@@ -2432,7 +2435,7 @@ def parse_macro_model(source: str) -> MacroModel:
 
     dynamic_exprs = tuple(
         parse_expr(
-            _sanitize_indexed_identifiers(text, parameter_name_map),
+            _substitute_parameter_identifiers(text, parameter_name_map),
             local_dict=parse_locals,
             transformations=_TRANSFORMATIONS,
         )
@@ -2440,7 +2443,7 @@ def parse_macro_model(source: str) -> MacroModel:
     )
     steady_state_exprs = tuple(
         parse_expr(
-            _sanitize_indexed_identifiers(text, parameter_name_map),
+            _substitute_parameter_identifiers(text, parameter_name_map),
             local_dict=parse_locals,
             transformations=_TRANSFORMATIONS,
         )
@@ -2448,7 +2451,7 @@ def parse_macro_model(source: str) -> MacroModel:
     )
     parameter_exprs = tuple(
         parse_expr(
-            _sanitize_indexed_identifiers(text, parameter_name_map),
+            _substitute_parameter_identifiers(text, parameter_name_map),
             local_dict=parse_locals,
             transformations=_TRANSFORMATIONS,
         )
@@ -3317,7 +3320,11 @@ def _parse_source_loop_collections(
         line = _strip_comment(raw_line).strip()
         if not line:
             continue
-        match = re.fullmatch(r"(?P<name>(?!\d)\w+)\s*=\s*(?P<value>.+)", line)
+        match = re.fullmatch(
+            rf"(?P<name>{_IDENTIFIER_PATTERN})\s*=\s*(?P<value>.+)",
+            line,
+            re.UNICODE,
+        )
         if match is None:
             continue
         parsed = _parse_loop_collection_value(match.group("value"))
@@ -3535,7 +3542,10 @@ def _parse_for_loop_header(
         operator = operator_match.group("op")
         header_rest = operator_match.group("rest").strip()
 
-    header_match = re.match(r"(?P<var>(?!\d)\w+)\s+in\s+(?P<rest>.*)", header_rest)
+    header_match = re.match(
+        rf"(?P<var>{_IDENTIFIER_PATTERN})\s+in\s+(?P<rest>.*)",
+        header_rest,
+    )
     if header_match is None:
         raise ValueError(f"Could not parse `for`-loop header in `{segment}`.")
     loop_var = header_match.group("var")
@@ -3623,7 +3633,7 @@ def _parse_for_loop_index_token(token: str) -> LoopIndex:
     try:
         return _evaluate_integer_expression(stripped)
     except (TypeError, ValueError):
-        if re.fullmatch(r"(?!\d)\w+(?:\{[^{}\[\]]+\})*", stripped):
+        if re.fullmatch(_IDENTIFIER_PATTERN, stripped, re.UNICODE):
             return stripped
     raise NotImplementedError(
         "Symbolic/indexed `for` loops in `@model` are only supported for "
@@ -3691,7 +3701,7 @@ def _parse_guess_key(text: str) -> str:
         return token[1:]
     if len(token) >= 2 and token[0] == token[-1] == '"':
         return token[1:-1]
-    if re.fullmatch(r"(?!\d)\w+(?:\{[^{}\[\]]+\})*", token):
+    if re.fullmatch(_IDENTIFIER_PATTERN, token, re.UNICODE):
         return token
     raise ValueError(f"Unsupported guess key `{text}` in `@parameters` options.")
 
@@ -3801,7 +3811,7 @@ def _parse_single_parameter_bound(
 
 
 def _is_bound_identifier(text: str) -> bool:
-    return bool(re.fullmatch(r"(?!\d)\w+(?:\{[^{}\[\]]+\})*", text.strip()))
+    return bool(re.fullmatch(_IDENTIFIER_PATTERN, text.strip(), re.UNICODE))
 
 
 def _expand_bound_target_names(
@@ -4355,7 +4365,7 @@ def _parse_parameter_line(
 
 
 def _validate_parameter_target(target_text: str) -> str:
-    if not re.fullmatch(r"(?!\d)\w+(?:\{[^{}\[\]]+\})*", target_text):
+    if not re.fullmatch(_IDENTIFIER_PATTERN, target_text, re.UNICODE):
         raise ValueError(
             "Parameter targets in `@parameters` must be identifiers with optional "
             "curly-brace indices, "
@@ -4630,6 +4640,7 @@ def _function_locals() -> dict[str, object]:
     return {
         "abs": sp.Abs,
         "dnorm": normpdf,
+        "erfinv": sp.erfinv,
         "erfcinv": sp.erfcinv,
         "exp": sp.exp,
         "log": sp.log,
@@ -4647,11 +4658,19 @@ def _function_locals() -> dict[str, object]:
 
 
 def _numpy_lambdify_modules() -> list[object]:
-    return [{"erfcinv": scipy_special.erfcinv}, "numpy"]
+    return [{"erfcinv": scipy_special.erfcinv, "erfinv": scipy_special.erfinv}, "numpy"]
 
 
 def _jax_lambdify_modules() -> list[object]:
-    return [{"erfcinv": scipy_special.erfcinv}, "jax"]
+    return [
+        {
+            "erf": jsp_special.erf,
+            "erfc": jsp_special.erfc,
+            "erfcinv": lambda x: jsp_special.erfinv(1 - x),
+            "erfinv": jsp_special.erfinv,
+        },
+        "jax",
+    ]
 
 
 def _is_indexed_identifier(name: str) -> bool:
@@ -4659,7 +4678,7 @@ def _is_indexed_identifier(name: str) -> bool:
 
 
 def _parameter_parse_name(name: str) -> str:
-    return f"par__{_encode_name(name)}" if _is_indexed_identifier(name) else name
+    return f"par__{_encode_name(name)}"
 
 
 def _sanitize_indexed_identifiers(
@@ -4677,7 +4696,7 @@ def _sanitize_indexed_identifiers(
 def _encode_name(name: str) -> str:
     encoded = []
     for char in name:
-        if char.isalnum() or char == "_":
+        if ("a" <= char <= "z") or ("A" <= char <= "Z") or char.isdigit() or char == "_":
             encoded.append(char)
         else:
             encoded.append(f"_u{ord(char):04x}_")

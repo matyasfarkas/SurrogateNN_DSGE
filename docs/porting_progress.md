@@ -387,6 +387,26 @@ Python/JAX status:
 - a switching module now ports the regime-switching likelihood combiner `compute_switching_loglikelihood` / `mix_loglikelihood`, and parsed models can mix ROM Kalman and FOM inversion per-period likelihoods directly when supplied with gate probabilities or a hard mask
 - tests verify low-level vs parsed first-order inversion parity, JIT coverage for the first-order inversion kernel, failure fallbacks, SEP inversion diagnostics and determinism, runtime override acceptance, and parsed-model switching parity against manual ROM/FOM mixtures
 
+### 26. Switching gate utilities, parser hardening, and multi-model JAX compile smoke
+
+Julia reference:
+
+- `src/regime_switching/gating.jl`
+- `src/regime_switching/types.jl`
+- `test/models/RBC_CME_calibration_equations_and_parameter_definitions_and_specfuns.jl`
+- `test/models/Backus_Kehoe_Kydland_1992.jl`
+- `models/RBC_Dynare.jl`
+- `models/FS2000.jl`
+- `models/RBC_baseline.jl`
+
+Python/JAX status:
+
+- the switching layer now ports the gate-stat and assignment utilities around the existing likelihood mixer: `compute_gate_stat_series`, `gate_share`, `calibrate_gate`, `calibrate_tau_y`, `calibrate_tau_eps`, `apply_gate_padding`, `assign_regimes`, `logistic`, `logit`, `calibrate_gate_bias`, and `gate_probabilities`
+- parsed-model symbolic internals now sanitize all parameter names to ASCII-safe parse tokens, which fixes Python-keyword parameters like `del`, Unicode shock names like `ϵ[x]`, and combining-mark identifiers like `ḡ` without changing the public Julia-style names exposed by parsed models
+- the JAX lambdify path now overrides `erf`, `erfc`, `erfinv`, and `erfcinv` with tracer-safe implementations, so the tested special-function models compile on the JAX first-order likelihood path instead of falling back to SciPy behavior that breaks tracing
+- upstream compile smoke now covers first-order solve plus JAX-compiled Kalman likelihoods on `RBC_CME`, calibrated `RBC_CME`, lead-lag and special-function `RBC_CME` variants, `RBC_Dynare`, `FS2000`, `RBC_baseline`, and `Backus_Kehoe_Kydland_1992`
+- tests verify gate-stat normalization and calibration behavior, hard vs soft gate probabilities, special-function steady-state evaluation with safe seeds, and successful parse/solve/JAX-compile smoke across the multi-model upstream fixture set
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -400,7 +420,7 @@ Python/JAX status:
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; the current SEP inversion bridge accepts `sep_sparse_tree` for API compatibility but still runs the full-tree solver underneath because Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.
-- Regime-switching likelihood mixing is now ported when gate probabilities or hard masks are supplied, but Julia gate-stat computation, gate calibration, automatic regime assignment, and the broader switching-estimation harness are not ported yet.
+- Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, and automatic hard-regime assignment utilities are now ported, but the broader switching-estimation harness and higher-level automatic gate workflows are not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed full-tree SEP path.
 

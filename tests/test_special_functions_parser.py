@@ -14,6 +14,7 @@ SPECIAL_FUNCTION_SOURCE = """
     xpnorm[0] = pnorm(x[0])
     xdnorm[0] = dnorm(x[0])
     xlogpdf[0] = normlogpdf(x[0])
+    xerfinv[0] = erfinv(x[0]) * gamma + eta
     xinv[0] = erfcinv(x[0]) * gamma + eta
     x[0] = level
 end
@@ -28,7 +29,7 @@ end
 
 def test_special_function_aliases_parse_and_evaluate_in_steady_state() -> None:
     model = parse_macro_model(SPECIAL_FUNCTION_SOURCE)
-    result = solve_steady_state(model)
+    result = solve_steady_state(model, initial_guess={"x": 0.25})
     values = dict(
         zip(
             model.steady_state_names,
@@ -56,6 +57,12 @@ def test_special_function_aliases_parse_and_evaluate_in_steady_state() -> None:
     np.testing.assert_allclose(
         values["xlogpdf"],
         -(0.25**2) / 2.0 - np.log(np.sqrt(2.0 * np.pi)),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        values["xerfinv"],
+        float(scipy_special.erfinv(np.asarray(0.25, dtype=np.float64))) * 0.99 + 0.01,
         rtol=1e-12,
         atol=1e-12,
     )
