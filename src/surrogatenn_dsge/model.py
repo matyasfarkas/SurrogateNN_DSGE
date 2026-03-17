@@ -36,7 +36,11 @@ from .sep import (
     SEPSolution,
     solve_stochastic_extended_path_residual_expectation,
 )
-from .statespace import LinearGaussianStateSpace
+from .statespace import (
+    LinearGaussianStateSpace,
+    kalman_loglikelihood as _statespace_kalman_loglikelihood,
+    kalman_loglikelihood_per_period as _statespace_kalman_loglikelihood_per_period,
+)
 
 _TRANSFORMATIONS = standard_transformations + (
     convert_xor,
@@ -824,6 +828,288 @@ class MacroModel:
             )
         )
 
+    def _coerce_observations(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+    ) -> tuple[tuple[str, ...], np.ndarray]:
+        if isinstance(observations, Mapping):
+            series_lookup = {
+                str(name): np.asarray(series, dtype=np.float64)
+                for name, series in observations.items()
+            }
+            observable_names = (
+                tuple(sorted(series_lookup))
+                if observables is None
+                else self._coerce_observable_names(observables)
+            )
+            missing = tuple(name for name in observable_names if name not in series_lookup)
+            if missing:
+                raise ValueError(
+                    "Missing observable series for "
+                    + ", ".join(missing)
+                    + "."
+                )
+            if observables is not None:
+                unexpected = tuple(
+                    sorted(set(series_lookup).difference(observable_names))
+                )
+                if unexpected:
+                    raise ValueError(
+                        "observations contains unexpected observable names: "
+                        + ", ".join(unexpected)
+                        + "."
+                    )
+            stacked: list[np.ndarray] = []
+            periods: Optional[int] = None
+            for name in observable_names:
+                values = series_lookup[name]
+                if values.ndim != 1:
+                    raise ValueError(
+                        f"Observable `{name}` must be one-dimensional, got shape {values.shape}."
+                    )
+                if periods is None:
+                    periods = int(values.shape[0])
+                elif values.shape != (periods,):
+                    raise ValueError(
+                        "All observable series must share the same length, got "
+                        f"{values.shape[0]} for `{name}` and {periods} elsewhere."
+                    )
+                stacked.append(values)
+            data = np.vstack(stacked)
+        else:
+            if observables is None:
+                raise ValueError(
+                    "observables must be provided when observations are array-like."
+                )
+            observable_names = self._coerce_observable_names(observables)
+            data = np.asarray(observations, dtype=np.float64)
+            if data.ndim != 2:
+                raise ValueError(
+                    f"observations must be rank-2, got shape {data.shape}."
+                )
+            if data.shape[0] != len(observable_names):
+                raise ValueError(
+                    "observations must have one row per observable, got "
+                    f"{data.shape[0]} rows for {len(observable_names)} observables."
+                )
+
+        if not np.isfinite(data).all():
+            raise ValueError("observations must contain only finite values.")
+        return observable_names, data
+
+    def _observable_steady_state_values(
+        self,
+        observables: Sequence[str],
+        full_steady_state: np.ndarray,
+    ) -> np.ndarray:
+        lookup = dict(zip(self.timings.var, full_steady_state))
+        return np.asarray([lookup[name] for name in observables], dtype=np.float64)
+
+    def _parameter_values_within_bounds(
+        self,
+        parameter_values: np.ndarray,
+    ) -> bool:
+        lower, upper = self._bounds_vector(self.parameter_names)
+        return bool(
+            np.logical_and(parameter_values >= lower, parameter_values <= upper).all()
+        )
+
+    def _prepare_first_order_state_space_for_likelihood(
+        self,
+        observables: Sequence[str] | str,
+        *,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        initial_covariance_strategy: str = "theoretical",
+        measurement_error_scale: float = 1e-9,
+        measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    ) -> tuple[Optional[LinearGaussianStateSpace], Optional[np.ndarray]]:
+        observable_names = self._coerce_observable_names(observables)
+
+        if first_order_result is not None:
+            if not first_order_result.solution.converged:
+                return None, np.asarray(first_order_result.steady_state, dtype=np.float64)
+            return (
+                self.build_linear_state_space(
+                    observable_names,
+                    first_order_result=first_order_result,
+                    initial_covariance_strategy=initial_covariance_strategy,
+                    measurement_error_scale=measurement_error_scale,
+                    measurement_error_covariance=measurement_error_covariance,
+                ),
+                np.asarray(first_order_result.steady_state, dtype=np.float64),
+            )
+
+        provided_parameters = None
+        if parameter_values is not None:
+            provided_parameters = self._coerce_parameter_values(parameter_values)
+            if not self._parameter_values_within_bounds(provided_parameters):
+                return None, None
+
+        if steady_state is None:
+            steady_state_result = self.solve_steady_state(
+                parameter_values=parameter_values,
+                initial_guess=steady_state_initial_guess,
+                tol=steady_state_tol,
+                max_iter=steady_state_max_iter,
+            )
+            if not steady_state_result.converged:
+                return None, None
+            full_steady_state = np.asarray(
+                steady_state_result.steady_state,
+                dtype=np.float64,
+            )
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
+        else:
+            full_steady_state = self._coerce_full_steady_state(
+                steady_state,
+                parameter_values=parameter_values,
+            )
+            resolved_parameters = (
+                provided_parameters
+                if provided_parameters is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
+            )
+            if not self._parameter_values_within_bounds(resolved_parameters):
+                return None, full_steady_state
+
+        jacobian = self.calculate_jacobian(
+            parameter_values=resolved_parameters,
+            steady_state=full_steady_state,
+        )
+        solution = solve_first_order_dsge_solution(jacobian, self.timings)
+        if not solution.converged:
+            return None, full_steady_state
+
+        parsed_result = ParsedModelFirstOrderResult(
+            steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+            parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
+            jacobian=jacobian,
+            solution=solution,
+        )
+        return (
+            self.build_linear_state_space(
+                observable_names,
+                first_order_result=parsed_result,
+                initial_covariance_strategy=initial_covariance_strategy,
+                measurement_error_scale=measurement_error_scale,
+                measurement_error_covariance=measurement_error_covariance,
+            ),
+            full_steady_state,
+        )
+
+    def kalman_loglikelihood(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        initial_covariance_strategy: str = "theoretical",
+        measurement_error_scale: float = 1e-9,
+        measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+        presample_periods: int = 0,
+        jitter: float = 1e-9,
+        on_failure_loglikelihood: float = -np.inf,
+    ) -> jax.Array:
+        observable_names, observation_data = self._coerce_observations(
+            observations,
+            observables=observables,
+        )
+        state_space, full_steady_state = self._prepare_first_order_state_space_for_likelihood(
+            observable_names,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            initial_covariance_strategy=initial_covariance_strategy,
+            measurement_error_scale=measurement_error_scale,
+            measurement_error_covariance=measurement_error_covariance,
+        )
+        if state_space is None or full_steady_state is None:
+            return jnp.asarray(on_failure_loglikelihood, dtype=jnp.float64)
+
+        demeaned_observations = observation_data - self._observable_steady_state_values(
+            observable_names,
+            full_steady_state,
+        )[:, None]
+        return _statespace_kalman_loglikelihood(
+            state_space,
+            demeaned_observations,
+            presample_periods=presample_periods,
+            jitter=jitter,
+        )
+
+    def kalman_loglikelihood_per_period(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        initial_covariance_strategy: str = "theoretical",
+        measurement_error_scale: float = 1e-9,
+        measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+        presample_periods: int = 0,
+        jitter: float = 1e-9,
+        on_failure_loglikelihood: float = -np.inf,
+    ) -> jax.Array:
+        observable_names, observation_data = self._coerce_observations(
+            observations,
+            observables=observables,
+        )
+        state_space, full_steady_state = self._prepare_first_order_state_space_for_likelihood(
+            observable_names,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            initial_covariance_strategy=initial_covariance_strategy,
+            measurement_error_scale=measurement_error_scale,
+            measurement_error_covariance=measurement_error_covariance,
+        )
+        if state_space is None or full_steady_state is None:
+            return jnp.full(
+                (observation_data.shape[1],),
+                on_failure_loglikelihood,
+                dtype=jnp.float64,
+            )
+
+        demeaned_observations = observation_data - self._observable_steady_state_values(
+            observable_names,
+            full_steady_state,
+        )[:, None]
+        return _statespace_kalman_loglikelihood_per_period(
+            state_space,
+            demeaned_observations,
+            presample_periods=presample_periods,
+            jitter=jitter,
+        )
+
     def _apply_default_calibrated_parameter_guess(
         self,
         parameter_values: np.ndarray,
@@ -1608,6 +1894,78 @@ def build_linear_state_space_from_model(
         initial_covariance_strategy=initial_covariance_strategy,
         measurement_error_scale=measurement_error_scale,
         measurement_error_covariance=measurement_error_covariance,
+    )
+
+
+def kalman_loglikelihood_from_model(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    presample_periods: int = 0,
+    jitter: float = 1e-9,
+    on_failure_loglikelihood: float = -np.inf,
+) -> jax.Array:
+    return model.kalman_loglikelihood(
+        observations,
+        observables=observables,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_covariance_strategy=initial_covariance_strategy,
+        measurement_error_scale=measurement_error_scale,
+        measurement_error_covariance=measurement_error_covariance,
+        presample_periods=presample_periods,
+        jitter=jitter,
+        on_failure_loglikelihood=on_failure_loglikelihood,
+    )
+
+
+def kalman_loglikelihood_per_period_from_model(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    presample_periods: int = 0,
+    jitter: float = 1e-9,
+    on_failure_loglikelihood: float = -np.inf,
+) -> jax.Array:
+    return model.kalman_loglikelihood_per_period(
+        observations,
+        observables=observables,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_covariance_strategy=initial_covariance_strategy,
+        measurement_error_scale=measurement_error_scale,
+        measurement_error_covariance=measurement_error_covariance,
+        presample_periods=presample_periods,
+        jitter=jitter,
+        on_failure_loglikelihood=on_failure_loglikelihood,
     )
 
 

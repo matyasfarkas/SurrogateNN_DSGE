@@ -304,6 +304,20 @@ Python/JAX status:
 - custom measurement-error covariance matrices can now be injected at the parsed-model layer instead of only the low-level index-based helper
 - tests verify observable-order preservation, explicit failure for unknown names, parity with the low-level state-space helper, and JAX JIT/device accessibility for the resulting state-space objects
 
+### 20. Parsed-model Kalman loglikelihood entry points
+
+Julia reference:
+
+- `src/get_functions.jl` (`get_loglikelihood`, `get_loglikelihood_per_period`)
+- `src/MacroModelling.jl` (`get_and_check_observables`)
+
+Python/JAX status:
+
+- parsed models now expose high-level Kalman loglikelihood helpers that accept named observable data either as a matrix plus explicit observable order or as a mapping from observable names to time series
+- the parsed-model likelihood path demeans level data by the solved model steady state before passing deviations into the existing JAX Kalman layer, matching the Julia estimation flow
+- first-order solution failure and parameter-bound violations now return configurable failure values instead of forcing every caller to handle solver internals manually
+- tests verify parity with the low-level deviation-based Kalman path, mapping-input handling, per-period contributions summing to the total likelihood, and Julia-style failure fallbacks on bound violations
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
