@@ -422,6 +422,24 @@ Python/JAX status:
 - switching diagnostics now cover contiguous gated runs, longest/first/last block selection, context-window extraction, gate-mask summary statistics, window overlap summaries, loglikelihood decomposition summaries, runtime summaries, and switching-vs-FOM comparison metrics
 - tests verify the diagnostics against manual episode accounting and verify parsed-model linear gate stats on the upstream `RBC_CME` model against an explicit manual first-order rollout
 
+### 28. First-order observed-shock / observed-variable helpers and filter-based linear gate stats
+
+Julia reference:
+
+- `src/regime_switching/gating.jl` (`estimate_observed_shocks_matrix`, `estimate_observed_variables_matrix`, `linear_filter_initial_state`, `linear_filter_full_state_initial`, `compute_linear_gate_stats_from_filter`)
+- `src/get_functions.jl` (`get_estimated_shocks`, `get_estimated_variables`)
+- `src/filter/kalman.jl`
+- `src/filter/inversion.jl`
+- `test/test_regime_switching_api.jl`
+
+Python/JAX status:
+
+- parsed models now expose Julia-style first-order helper entry points for observed shocks and observed variables, with exact public names: `estimate_observed_shocks_matrix`, `estimate_observed_variables_matrix`, `linear_filter_initial_state`, `linear_filter_full_state_initial`, and `compute_linear_gate_stats_from_filter`
+- the first-order inversion path mirrors the Julia inversion filter recurrence directly, while the Kalman path uses the existing JAX Kalman filter / smoother and reconstructs the matching shock path before rolling the full first-order solution forward
+- the shock coercion layer now accepts both Python-oriented `(periods, n_exo)` arrays and Julia-oriented `(n_exo, periods)` shock matrices, which is needed for parity across the parsed-model SEP and switching helpers
+- the helper layer now short-circuits exact steady-state data to zero shocks and steady-state variables, which materially improves robustness on large upstream fixture models used only as compile smoke
+- tests verify exact one-shock recovery for both inversion and Kalman helpers, manual parity for the filter-based gate-stat composition, shape/error guards, and multi-model smoke coverage on `RBC_CME`, `RBC_Dynare`, `FS2000`, `RBC_baseline`, and `Backus_Kehoe_Kydland_1992`
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -435,8 +453,7 @@ Python/JAX status:
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; the current SEP inversion bridge accepts `sep_sparse_tree` for API compatibility but still runs the full-tree solver underneath because Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.
-- Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, and automatic hard-regime assignment utilities are now ported, but the broader switching-estimation harness and higher-level automatic gate workflows are not ported yet.
-- Filter-based linear gate-stat helpers such as Julia `compute_linear_gate_stats_from_filter`, along with the broader observed-shock / observed-variable estimation helpers they depend on, are not ported yet.
+- Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed full-tree SEP path.
 

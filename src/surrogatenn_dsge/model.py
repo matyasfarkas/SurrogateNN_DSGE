@@ -47,8 +47,10 @@ from .sep import (
 )
 from .statespace import (
     LinearGaussianStateSpace,
+    kalman_filter,
     kalman_loglikelihood as _statespace_kalman_loglikelihood,
     kalman_loglikelihood_per_period as _statespace_kalman_loglikelihood_per_period,
+    kalman_smoother,
 )
 from .switching import (
     LinearGateStatsResult,
@@ -645,10 +647,12 @@ class MacroModel:
                 values[:, idx] = series
             return jnp.asarray(values, dtype=jnp.float64)
         values = np.asarray(deterministic_shocks, dtype=np.float64)
+        if values.shape == (self.timings.nExo, periods):
+            return jnp.asarray(values.T, dtype=jnp.float64)
         if values.shape != (periods, self.timings.nExo):
             raise ValueError(
                 "deterministic_shocks must have shape "
-                f"({periods}, {self.timings.nExo}), got {values.shape}."
+                f"({periods}, {self.timings.nExo}) or ({self.timings.nExo}, {periods}), got {values.shape}."
             )
         return jnp.asarray(values, dtype=jnp.float64)
 
@@ -1893,6 +1897,494 @@ class MacroModel:
             config=switching_config,
         )
 
+    def _normalize_linear_filter_options(
+        self,
+        *,
+        filter: str,
+        algorithm: str,
+    ) -> tuple[str, str]:
+        filter_name = str(filter)
+        if filter_name not in {"kalman", "inversion"}:
+            raise ValueError(
+                f"Unsupported filter {filter!r}. Use 'kalman' or 'inversion'."
+            )
+        algorithm_name = str(algorithm)
+        if algorithm_name != "first_order":
+            raise ValueError(
+                "Only the first-order filter helper path is currently ported. "
+                f"Got algorithm={algorithm!r}."
+            )
+        return filter_name, algorithm_name
+
+    def _estimate_first_order_inversion_filter_paths(
+        self,
+        observation_deviations: np.ndarray,
+        observable_indices: Sequence[int],
+        solution_matrix: Sequence[Sequence[float]] | np.ndarray | jax.Array,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        solution = np.asarray(solution_matrix, dtype=np.float64)
+        state_indices = np.asarray(
+            self.timings.past_not_future_and_mixed_idx,
+            dtype=np.int64,
+        )
+        observable_rows = np.asarray(observable_indices, dtype=np.int64)
+        n_past = self.timings.nPast_not_future_and_mixed
+        periods = int(observation_deviations.shape[1])
+
+        state = np.zeros((self.timings.nVars,), dtype=np.float64)
+        variables = np.zeros((self.timings.nVars, periods), dtype=np.float64)
+        shocks = np.zeros((self.timings.nExo, periods), dtype=np.float64)
+
+        jacobian = solution[observable_rows, n_past:]
+        if self.timings.nExo == len(observable_rows):
+            try:
+                inverse_jacobian = np.linalg.inv(jacobian)
+            except np.linalg.LinAlgError as exc:
+                raise ValueError(
+                    "Inversion filter failed: observable shock Jacobian is singular."
+                ) from exc
+        else:
+            inverse_jacobian = np.linalg.pinv(jacobian)
+        if not np.isfinite(inverse_jacobian).all():
+            raise ValueError(
+                "Inversion filter failed: could not construct a finite shock map."
+            )
+
+        observable_transition = solution[observable_rows, :n_past]
+        for period in range(periods):
+            reduced_state = state[state_indices]
+            residual = (
+                observation_deviations[:, period]
+                - observable_transition @ reduced_state
+            )
+            shock_t = inverse_jacobian @ residual
+            next_state = solution @ np.concatenate([reduced_state, shock_t], axis=0)
+            if not np.isfinite(shock_t).all() or not np.isfinite(next_state).all():
+                raise ValueError(
+                    "Inversion filter produced non-finite shocks or state estimates."
+                )
+            shocks[:, period] = shock_t
+            variables[:, period] = next_state
+            state = next_state
+
+        return shocks, variables
+
+    def _estimate_first_order_kalman_filter_paths(
+        self,
+        observation_deviations: np.ndarray,
+        observable_names: Sequence[str],
+        observable_indices: Sequence[int],
+        parsed_result: ParsedModelFirstOrderResult,
+        *,
+        smooth: bool,
+        initial_covariance_strategy: str = "theoretical",
+        jitter: float = 1e-9,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        state_space = self.build_linear_state_space(
+            observable_names,
+            first_order_result=parsed_result,
+            initial_covariance_strategy=initial_covariance_strategy,
+            measurement_error_scale=0.0,
+        )
+        filter_result = kalman_filter(
+            state_space,
+            observation_deviations,
+            presample_periods=0,
+            jitter=jitter,
+        )
+        if smooth:
+            latent_path = np.asarray(
+                kalman_smoother(
+                    state_space,
+                    filter_result,
+                    jitter=jitter,
+                ).smoothed_means,
+                dtype=np.float64,
+            )
+        else:
+            latent_path = np.asarray(filter_result.filtered_means, dtype=np.float64)
+
+        solution = np.asarray(parsed_result.solution.solution_matrix, dtype=np.float64)
+        state_indices = np.asarray(
+            self.timings.past_not_future_and_mixed_idx,
+            dtype=np.int64,
+        )
+        n_past = self.timings.nPast_not_future_and_mixed
+        latent_indices = tuple(
+            sorted(set(self.timings.past_not_future_and_mixed_idx) | set(observable_indices))
+        )
+        latent_transition = solution[list(latent_indices), :n_past]
+        latent_shock_impact = solution[list(latent_indices), n_past:]
+        if latent_shock_impact.shape[0] == self.timings.nExo:
+            try:
+                shock_map = np.linalg.inv(latent_shock_impact)
+            except np.linalg.LinAlgError:
+                shock_map = np.linalg.pinv(latent_shock_impact)
+        else:
+            shock_map = np.linalg.pinv(latent_shock_impact)
+        if not np.isfinite(shock_map).all():
+            raise ValueError(
+                "Kalman filter helper failed: could not construct a finite shock map."
+            )
+
+        periods = int(observation_deviations.shape[1])
+        reduced_state = np.zeros((n_past,), dtype=np.float64)
+        variables = np.zeros((self.timings.nVars, periods), dtype=np.float64)
+        shocks = np.zeros((self.timings.nExo, periods), dtype=np.float64)
+
+        for period in range(periods):
+            residual = latent_path[:, period] - latent_transition @ reduced_state
+            shock_t = shock_map @ residual
+            next_state = solution @ np.concatenate([reduced_state, shock_t], axis=0)
+            if not np.isfinite(shock_t).all() or not np.isfinite(next_state).all():
+                raise ValueError(
+                    "Kalman filter helper produced non-finite shocks or state estimates."
+                )
+            shocks[:, period] = shock_t
+            variables[:, period] = next_state
+            reduced_state = next_state[state_indices]
+
+        return shocks, variables
+
+    def _estimate_observed_shocks_and_variables_matrix(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        filter: str = "kalman",
+        algorithm: str = "first_order",
+        data_in_levels: bool = True,
+        levels: bool = True,
+        smooth: bool = False,
+        initial_covariance_strategy: str = "theoretical",
+        jitter: float = 1e-9,
+    ) -> tuple[tuple[str, ...], np.ndarray, np.ndarray]:
+        filter_name, _ = self._normalize_linear_filter_options(
+            filter=filter,
+            algorithm=algorithm,
+        )
+        observable_names, observation_data = self._coerce_observations(
+            observations,
+            observables=observables,
+        )
+        observable_indices = self.resolve_observable_indices(observable_names)
+        parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+        )
+        if parsed_result is None or full_steady_state is None:
+            raise ValueError(
+                "Could not prepare a converged first-order solution for linear filtering."
+            )
+
+        steady_observables = self._observable_steady_state_values(
+            observable_names,
+            full_steady_state,
+        )
+        observation_deviations = (
+            observation_data - steady_observables[:, None]
+            if data_in_levels
+            else observation_data
+        )
+        if observation_deviations.size == 0 or np.max(np.abs(observation_deviations)) <= 1e-14:
+            shocks = np.zeros(
+                (self.timings.nExo, observation_data.shape[1]),
+                dtype=np.float64,
+            )
+            variables = np.zeros(
+                (self.timings.nVars, observation_data.shape[1]),
+                dtype=np.float64,
+            )
+            if levels:
+                variables = variables + full_steady_state[:, None]
+            return observable_names, shocks, variables
+
+        if filter_name == "inversion":
+            shocks, variables = self._estimate_first_order_inversion_filter_paths(
+                observation_deviations,
+                observable_indices,
+                parsed_result.solution.solution_matrix,
+            )
+        else:
+            shocks, variables = self._estimate_first_order_kalman_filter_paths(
+                observation_deviations,
+                observable_names,
+                observable_indices,
+                parsed_result,
+                smooth=smooth,
+                initial_covariance_strategy=initial_covariance_strategy,
+                jitter=jitter,
+            )
+
+        if levels:
+            variables = variables + full_steady_state[:, None]
+        return observable_names, shocks, variables
+
+    def estimate_observed_shocks_matrix(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        filter: str = "kalman",
+        algorithm: str = "first_order",
+        data_in_levels: bool = True,
+        smooth: bool = False,
+        verbose: bool = False,
+        expected_rows: Optional[int] = None,
+        expected_cols: Optional[int] = None,
+        label: str = "Estimated shocks",
+        initial_covariance_strategy: str = "theoretical",
+        jitter: float = 1e-9,
+    ) -> jax.Array:
+        del verbose
+        _, shocks, _ = self._estimate_observed_shocks_and_variables_matrix(
+            observations,
+            observables=observables,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            filter=filter,
+            algorithm=algorithm,
+            data_in_levels=data_in_levels,
+            levels=False,
+            smooth=smooth,
+            initial_covariance_strategy=initial_covariance_strategy,
+            jitter=jitter,
+        )
+        if expected_rows is not None and shocks.shape[0] != int(expected_rows):
+            raise ValueError(
+                f"{label} row mismatch: got {shocks.shape[0]}, expected {int(expected_rows)}."
+            )
+        if expected_cols is not None and shocks.shape[1] != int(expected_cols):
+            raise ValueError(
+                f"{label} length mismatch: got {shocks.shape[1]}, expected {int(expected_cols)}."
+            )
+        return jnp.asarray(shocks, dtype=jnp.float64)
+
+    def estimate_observed_variables_matrix(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        filter: str = "kalman",
+        algorithm: str = "first_order",
+        data_in_levels: bool = True,
+        levels: bool = True,
+        smooth: bool = False,
+        verbose: bool = False,
+        expected_rows: Optional[int] = None,
+        expected_cols: Optional[int] = None,
+        label: str = "Estimated variables",
+        initial_covariance_strategy: str = "theoretical",
+        jitter: float = 1e-9,
+    ) -> tuple[jax.Array, tuple[str, ...]]:
+        del verbose
+        _, _, variables = self._estimate_observed_shocks_and_variables_matrix(
+            observations,
+            observables=observables,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            filter=filter,
+            algorithm=algorithm,
+            data_in_levels=data_in_levels,
+            levels=levels,
+            smooth=smooth,
+            initial_covariance_strategy=initial_covariance_strategy,
+            jitter=jitter,
+        )
+        variable_names = tuple(self.timings.var)
+        if expected_rows is not None and variables.shape[0] != int(expected_rows):
+            raise ValueError(
+                f"{label} row mismatch: got {variables.shape[0]}, expected {int(expected_rows)}."
+            )
+        if expected_cols is not None and variables.shape[1] != int(expected_cols):
+            raise ValueError(
+                f"{label} length mismatch: got {variables.shape[1]}, expected {int(expected_cols)}."
+            )
+        if len(variable_names) != variables.shape[0]:
+            raise ValueError(
+                f"{label} variable-name count mismatch: got {len(variable_names)} names for {variables.shape[0]} rows."
+            )
+        return jnp.asarray(variables, dtype=jnp.float64), variable_names
+
+    def linear_filter_initial_state(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        state_names: Sequence[str] | str,
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        filter: str = "kalman",
+        algorithm: str = "first_order",
+        smooth: bool = False,
+        label: str = "Linear filter variables",
+    ) -> jax.Array:
+        names = self._coerce_observable_names(state_names)
+        variables, variable_names = self.estimate_observed_variables_matrix(
+            observations,
+            observables=observables,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            filter=filter,
+            algorithm=algorithm,
+            data_in_levels=True,
+            levels=True,
+            smooth=smooth,
+            expected_cols=np.asarray(self._coerce_observations(
+                observations,
+                observables=observables,
+            )[1]).shape[1],
+            label=label,
+        )
+        variable_lookup = {name: idx for idx, name in enumerate(variable_names)}
+        missing = tuple(name for name in names if name not in variable_lookup)
+        if missing:
+            raise ValueError(
+                "state_names not found in linear filter output: "
+                + ", ".join(missing)
+                + "."
+            )
+        selected = np.asarray(variables, dtype=np.float64)[
+            [variable_lookup[name] for name in names],
+            -1,
+        ]
+        return jnp.asarray(selected, dtype=jnp.float64)
+
+    def linear_filter_full_state_initial(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        filter: str = "kalman",
+        algorithm: str = "first_order",
+        smooth: bool = False,
+        label: str = "Linear filter variables",
+    ) -> jax.Array:
+        observation_data = self._coerce_observations(
+            observations,
+            observables=observables,
+        )[1]
+        variables, _ = self.estimate_observed_variables_matrix(
+            observations,
+            observables=observables,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            filter=filter,
+            algorithm=algorithm,
+            data_in_levels=True,
+            levels=True,
+            smooth=smooth,
+            expected_cols=observation_data.shape[1],
+            label=label,
+        )
+        return jnp.asarray(np.asarray(variables, dtype=np.float64)[:, 0], dtype=jnp.float64)
+
+    def compute_linear_gate_stats_from_filter(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        obs_sigma: Sequence[float] | Mapping[str, float],
+        shock_sigmas: Sequence[float] | Mapping[str, float],
+        state_names: Optional[Sequence[str] | str] = None,
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        periods: Optional[int] = None,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        filter: str = "kalman",
+        algorithm: str = "first_order",
+        smooth: bool = False,
+        shock_norm: str = "l2",
+        error_norm: str = "l2",
+        label: str = "Linear gate stats",
+    ) -> LinearGateStatsResult:
+        del state_names
+        if periods is not None and int(periods) <= 0:
+            raise ValueError(f"periods must be positive, got {periods}.")
+
+        observable_names, shocks, variables = self._estimate_observed_shocks_and_variables_matrix(
+            observations,
+            observables=observables,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            filter=filter,
+            algorithm=algorithm,
+            data_in_levels=True,
+            levels=True,
+            smooth=smooth,
+        )
+        return self.compute_linear_gate_stats_from_shocks(
+            observations,
+            shocks,
+            obs_sigma,
+            shock_sigmas,
+            observables=observable_names,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            initial_state=variables[:, 0],
+            shock_norm=shock_norm,
+            error_norm=error_norm,
+        )
+
     def compute_linear_gate_stats_from_shocks(
         self,
         observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
@@ -3122,6 +3614,242 @@ def compute_linear_gate_stats_from_shocks_model(
         initial_state=initial_state,
         shock_norm=shock_norm,
         error_norm=error_norm,
+    )
+
+
+def compute_linear_gate_stats_from_shocks(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    shocks: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    obs_sigma: Sequence[float] | Mapping[str, float],
+    shock_sigmas: Sequence[float] | Mapping[str, float],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_state: Optional[Sequence[float]] = None,
+    shock_norm: str = "l2",
+    error_norm: str = "l2",
+) -> LinearGateStatsResult:
+    return model.compute_linear_gate_stats_from_shocks(
+        observations,
+        shocks,
+        obs_sigma,
+        shock_sigmas,
+        observables=observables,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_state=initial_state,
+        shock_norm=shock_norm,
+        error_norm=error_norm,
+    )
+
+
+def estimate_observed_shocks_matrix(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    filter: str = "kalman",
+    algorithm: str = "first_order",
+    data_in_levels: bool = True,
+    smooth: bool = False,
+    verbose: bool = False,
+    expected_rows: Optional[int] = None,
+    expected_cols: Optional[int] = None,
+    label: str = "Estimated shocks",
+    initial_covariance_strategy: str = "theoretical",
+    jitter: float = 1e-9,
+) -> jax.Array:
+    return model.estimate_observed_shocks_matrix(
+        observations,
+        observables=observables,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        filter=filter,
+        algorithm=algorithm,
+        data_in_levels=data_in_levels,
+        smooth=smooth,
+        verbose=verbose,
+        expected_rows=expected_rows,
+        expected_cols=expected_cols,
+        label=label,
+        initial_covariance_strategy=initial_covariance_strategy,
+        jitter=jitter,
+    )
+
+
+def estimate_observed_variables_matrix(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    filter: str = "kalman",
+    algorithm: str = "first_order",
+    data_in_levels: bool = True,
+    levels: bool = True,
+    smooth: bool = False,
+    verbose: bool = False,
+    expected_rows: Optional[int] = None,
+    expected_cols: Optional[int] = None,
+    label: str = "Estimated variables",
+    initial_covariance_strategy: str = "theoretical",
+    jitter: float = 1e-9,
+) -> tuple[jax.Array, tuple[str, ...]]:
+    return model.estimate_observed_variables_matrix(
+        observations,
+        observables=observables,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        filter=filter,
+        algorithm=algorithm,
+        data_in_levels=data_in_levels,
+        levels=levels,
+        smooth=smooth,
+        verbose=verbose,
+        expected_rows=expected_rows,
+        expected_cols=expected_cols,
+        label=label,
+        initial_covariance_strategy=initial_covariance_strategy,
+        jitter=jitter,
+    )
+
+
+def linear_filter_initial_state(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    state_names: Sequence[str] | str,
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    filter: str = "kalman",
+    algorithm: str = "first_order",
+    smooth: bool = False,
+    label: str = "Linear filter variables",
+) -> jax.Array:
+    return model.linear_filter_initial_state(
+        observations,
+        state_names,
+        observables=observables,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        filter=filter,
+        algorithm=algorithm,
+        smooth=smooth,
+        label=label,
+    )
+
+
+def linear_filter_full_state_initial(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    filter: str = "kalman",
+    algorithm: str = "first_order",
+    smooth: bool = False,
+    label: str = "Linear filter variables",
+) -> jax.Array:
+    return model.linear_filter_full_state_initial(
+        observations,
+        observables=observables,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        filter=filter,
+        algorithm=algorithm,
+        smooth=smooth,
+        label=label,
+    )
+
+
+def compute_linear_gate_stats_from_filter(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    obs_sigma: Sequence[float] | Mapping[str, float],
+    shock_sigmas: Sequence[float] | Mapping[str, float],
+    state_names: Optional[Sequence[str] | str] = None,
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    periods: Optional[int] = None,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    filter: str = "kalman",
+    algorithm: str = "first_order",
+    smooth: bool = False,
+    shock_norm: str = "l2",
+    error_norm: str = "l2",
+    label: str = "Linear gate stats",
+) -> LinearGateStatsResult:
+    return model.compute_linear_gate_stats_from_filter(
+        observations,
+        obs_sigma,
+        shock_sigmas,
+        state_names,
+        observables=observables,
+        periods=periods,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        filter=filter,
+        algorithm=algorithm,
+        smooth=smooth,
+        shock_norm=shock_norm,
+        error_norm=error_norm,
+        label=label,
     )
 
 
