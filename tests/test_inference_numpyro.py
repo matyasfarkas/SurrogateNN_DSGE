@@ -236,6 +236,36 @@ def test_jax_fixed_steady_state_loglikelihood_matches_high_level_path() -> None:
     )
 
 
+def test_jax_fixed_steady_state_loglikelihood_defaults_to_schur() -> None:
+    model, first_order_result, observables, levels, _ = _numpyro_fixture()
+    parameter_vector = assemble_parameter_vector(
+        model,
+        {"rho_a": jnp.asarray(0.8, dtype=jnp.float64), "rho_y": jnp.asarray(0.6, dtype=jnp.float64)},
+    )
+
+    default_value = jax.jit(
+        lambda theta: kalman_loglikelihood_from_model_jax(
+            model,
+            levels,
+            observables=observables,
+            parameter_values=theta,
+            steady_state=first_order_result.steady_state,
+        )
+    )(parameter_vector)
+    schur_value = jax.jit(
+        lambda theta: kalman_loglikelihood_from_model_jax(
+            model,
+            levels,
+            observables=observables,
+            parameter_values=theta,
+            steady_state=first_order_result.steady_state,
+            qme_algorithm="schur",
+        )
+    )(parameter_vector)
+
+    np.testing.assert_allclose(default_value, schur_value, rtol=1e-10, atol=1e-10)
+
+
 def test_jax_schur_fixed_steady_state_loglikelihood_matches_high_level_path() -> None:
     model, _, observables, levels, _ = _numpyro_fixture()
     first_order_result = solve_first_order_model(

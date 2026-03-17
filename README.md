@@ -65,7 +65,7 @@ Not implemented yet:
 - occasionally binding constraint parsing from the Julia macro layer
 - Julia sparse-tree / HMC SEP variants and OBC-specific SEP machinery
 - fully GPU-native generalized QZ / ordered-QZ primitives; the current JAX-facing `schur` QME path uses a SciPy host callback in the primal solve because JAX does not yet expose generalized `qz` / `ordqz`
-- Julia currently defaults the quadratic-matrix-equation path to `:schur`; this port still defaults public first-order workflows to `doubling` unless `qme_algorithm=\"schur\"` is requested explicitly
+- the public first-order default now matches Julia and uses `schur`; request `qme_algorithm=\"doubling\"` explicitly if you want to stay on the fully JAX-native doubling path
 - fully JAX-traceable parsed-model structural likelihoods beyond the first-order path, including higher-order estimation edges for compiled NumPyro kernels like `NUTS` and `HMC`
 - the broader regime-switching estimation harness beyond the currently ported likelihood mixer and gate/regime utilities
 - posterior-chain convenience helpers from the Julia switching diagnostics layer such as `chunk_stats`, `theta_draws`, and `epsilon_means_from_chain`

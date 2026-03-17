@@ -240,6 +240,30 @@ def test_first_order_solution_matches_julia_fixture() -> None:
     )
 
 
+def test_first_order_solution_defaults_to_schur() -> None:
+    timings, jacobian, _ = _rbc_cme_fixture()
+
+    default_result = solve_first_order_dsge_solution(jacobian, timings)
+    schur_result = solve_first_order_dsge_solution(
+        jacobian,
+        timings,
+        qme_algorithm="schur",
+    )
+
+    np.testing.assert_allclose(
+        default_result.solution_matrix,
+        schur_result.solution_matrix,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        default_result.qme_solution,
+        schur_result.qme_solution,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
 def test_first_order_solution_schur_matches_julia_fixture() -> None:
     timings, jacobian, expected_solution = _rbc_cme_fixture()
 
@@ -279,6 +303,31 @@ def test_jax_first_order_solution_matches_existing_solver() -> None:
         solve_first_order_dsge_solution(jacobian, timings).solution_matrix,
         rtol=1e-8,
         atol=1e-8,
+    )
+
+
+def test_jax_first_order_solution_defaults_to_schur() -> None:
+    timings, jacobian, _ = _rbc_cme_fixture()
+    compiled = jax.jit(
+        solve_first_order_dsge_solution_jax,
+        static_argnames=("timings",),
+    )
+
+    default_result = compiled(jacobian, timings)
+    schur_result = jax.jit(
+        solve_first_order_dsge_solution_jax,
+        static_argnames=("timings", "qme_algorithm"),
+    )(
+        jacobian,
+        timings,
+        qme_algorithm="schur",
+    )
+
+    np.testing.assert_allclose(
+        default_result.solution_matrix,
+        schur_result.solution_matrix,
+        rtol=1e-10,
+        atol=1e-10,
     )
 
 

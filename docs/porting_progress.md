@@ -74,7 +74,7 @@ Python/JAX status:
 - `solve_quadratic_matrix_equation_schur` implemented with the same companion-pencil generalized Schur / ordered-QZ construction as the Julia `:schur` path
 - `solve_quadratic_matrix_equation_schur_jax` implemented with an implicit reverse-mode pullback, so JAX can differentiate the Schur-selected solution even though the primal ordered-QZ solve currently runs through SciPy
 - `DSGETimings` implemented for low-level timing metadata
-- `solve_first_order_dsge_solution` implemented with `qme_algorithm="doubling"` and `qme_algorithm="schur"` options
+- `solve_first_order_dsge_solution` implemented with `qme_algorithm="doubling"` and `qme_algorithm="schur"` options, and the default now matches Julia's `:schur` path
 - `linear_state_space_from_first_order_solution` implemented to connect first-order solutions to the Kalman layer
 - tests include the Julia `RBC_CME` Jacobian/timing fixture and verify the resulting solution matrix against upstream reference values, Schur-vs-doubling parity, JIT coverage for the Schur first-order path, and reverse-mode autodiff through the Schur QME solution
 
@@ -473,16 +473,17 @@ Julia reference:
 Python/JAX status:
 
 - parsed-model first-order callers that build solutions internally now expose `qme_algorithm`, including state-space construction, Kalman likelihoods, inversion likelihoods, switching likelihoods, observed-shock / observed-variable helpers, filter-state extractors, and linear gate-stat helpers
+- the default first-order branch selection on those public APIs now matches Julia and uses `schur`, while `doubling` remains available as an explicit opt-in
 - the concrete NumPyro bridge now forwards the same `qme_algorithm` choice, so both the concrete log-density path and the compiled JAX likelihood bridge can use the Schur/QZ branch consistently
 - upstream compile smoke now also covers explicit Schur/QZ first-order solves plus JAX-compiled Kalman likelihoods on `RBC_CME`, `RBC_Dynare`, `FS2000`, and `Backus_Kehoe_Kydland_1992`
-- tests verify high-level Schur parity for parsed-model state-space construction, Kalman likelihoods, first-order filter helpers, concrete NumPyro log-density evaluation, and the new multi-model Schur compile smoke
+- tests verify high-level Schur parity for parsed-model state-space construction, Kalman likelihoods, first-order filter helpers, concrete NumPyro log-density evaluation, the new multi-model Schur compile smoke, and explicit default-equals-Schur behavior for low-level first-order solves plus compiled Kalman likelihoods
 
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
 - The Julia `:bartels_stewart`, `:bicgstab`, `:dqgmres`, and `:gmres` Sylvester variants are not ported yet.
 - The Julia QME `:schur` variant is now ported, but the JAX-facing primal solve is not fully GPU-native yet; until JAX exposes generalized `qz` / `ordqz`, the ordered-QZ step runs through SciPy on the host and only the reverse-mode derivative is native JAX.
-- Julia defaults the QME path to `:schur`; the Python port still defaults public first-order workflows to `doubling` unless `qme_algorithm="schur"` is requested explicitly.
+- The Python port now defaults public first-order workflows to `schur` for Julia parity, which means the default compiled JAX likelihood path also uses the host-callback ordered-QZ branch unless `qme_algorithm="doubling"` is requested explicitly.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
