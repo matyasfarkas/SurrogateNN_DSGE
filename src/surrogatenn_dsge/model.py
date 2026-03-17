@@ -26,6 +26,7 @@ from .dsge import (
     SecondOrderStochasticSteadyStateResult,
     ThirdOrderDSGEResult,
     ThirdOrderStochasticSteadyStateResult,
+    rollout_first_order_solution,
     linear_state_space_from_first_order_solution,
     solve_first_order_dsge_solution,
     solve_second_order_dsge_solution,
@@ -50,8 +51,10 @@ from .statespace import (
     kalman_loglikelihood_per_period as _statespace_kalman_loglikelihood_per_period,
 )
 from .switching import (
+    LinearGateStatsResult,
     SwitchingLikelihoodConfig,
     SwitchingLikelihoodResult,
+    compute_gate_stat_series,
     compute_switching_loglikelihood,
 )
 
@@ -1242,6 +1245,39 @@ class MacroModel:
         lookup = dict(zip(self.timings.var, full_steady_state))
         return np.asarray([lookup[name] for name in observables], dtype=np.float64)
 
+    def _coerce_named_values(
+        self,
+        values: Sequence[float] | Mapping[str, float],
+        names: Sequence[str],
+        *,
+        label: str,
+    ) -> np.ndarray:
+        ordered_names = tuple(str(name) for name in names)
+        if isinstance(values, Mapping):
+            unexpected = tuple(sorted(set(values).difference(ordered_names)))
+            if unexpected:
+                raise ValueError(
+                    f"{label} contains unexpected names: " + ", ".join(unexpected) + "."
+                )
+            missing = tuple(name for name in ordered_names if name not in values)
+            if missing:
+                raise ValueError(
+                    f"{label} is missing values for " + ", ".join(missing) + "."
+                )
+            vector = np.asarray(
+                [values[name] for name in ordered_names],
+                dtype=np.float64,
+            )
+        else:
+            vector = np.asarray(values, dtype=np.float64)
+            if vector.shape != (len(ordered_names),):
+                raise ValueError(
+                    f"{label} must have shape ({len(ordered_names)},), got {vector.shape}."
+                )
+        if not np.isfinite(vector).all():
+            raise ValueError(f"{label} must contain only finite values.")
+        return vector
+
     def _parameter_values_within_bounds(
         self,
         parameter_values: np.ndarray,
@@ -1855,6 +1891,109 @@ class MacroModel:
             hard_mask=hard_mask,
             gate_probs=gate_probs,
             config=switching_config,
+        )
+
+    def compute_linear_gate_stats_from_shocks(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        shocks: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        obs_sigma: Sequence[float] | Mapping[str, float],
+        shock_sigmas: Sequence[float] | Mapping[str, float],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        initial_state: Optional[Sequence[float]] = None,
+        shock_norm: str = "l2",
+        error_norm: str = "l2",
+    ) -> LinearGateStatsResult:
+        observable_names, observation_data = self._coerce_observations(
+            observations,
+            observables=observables,
+        )
+        observable_indices = self.resolve_observable_indices(observable_names)
+        parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+        )
+        if parsed_result is None or full_steady_state is None:
+            raise ValueError(
+                "Could not prepare a converged first-order solution for linear gate statistics."
+            )
+
+        periods = int(observation_data.shape[1])
+        shock_values = self._coerce_sep_deterministic_shocks(
+            shocks,
+            periods=periods,
+        )
+        if shock_values is None:
+            raise ValueError("shocks must be provided for linear gate statistics.")
+        shock_matrix = np.asarray(shock_values, dtype=np.float64).T
+        obs_sigma_vector = self._coerce_named_values(
+            obs_sigma,
+            observable_names,
+            label="obs_sigma",
+        )
+        shock_sigma_vector = self._coerce_named_values(
+            shock_sigmas,
+            self.timings.exo,
+            label="shock_sigmas",
+        )
+        initial_state_values = (
+            np.asarray(full_steady_state, dtype=np.float64)
+            if initial_state is None
+            else np.asarray(
+                self._coerce_dynamic_state_vector(
+                    initial_state,
+                    label="initial_state",
+                ),
+                dtype=np.float64,
+            )
+        )
+        state_indices = np.asarray(
+            self.timings.past_not_future_and_mixed_idx,
+            dtype=np.int64,
+        )
+        reduced_initial_state = (
+            initial_state_values[state_indices] - full_steady_state[state_indices]
+        )
+        linear_deviations = np.asarray(
+            rollout_first_order_solution(
+                parsed_result.solution.solution_matrix,
+                self.timings,
+                shock_matrix,
+                initial_reduced_state=reduced_initial_state,
+            ),
+            dtype=np.float64,
+        )
+        linear_observations = linear_deviations[list(observable_indices), :] + (
+            self._observable_steady_state_values(
+                observable_names,
+                full_steady_state,
+            )[:, None]
+        )
+        e_stat, f_stat = compute_gate_stat_series(
+            observation_data,
+            linear_observations,
+            shock_matrix,
+            obs_sigma_vector,
+            shock_sigma_vector,
+            shock_norm=shock_norm,
+            error_norm=error_norm,
+        )
+        return LinearGateStatsResult(
+            linear_observations=jnp.asarray(linear_observations, dtype=jnp.float64),
+            shocks=jnp.asarray(shock_matrix, dtype=jnp.float64),
+            e_stat=jnp.asarray(e_stat, dtype=jnp.float64),
+            f_stat=jnp.asarray(f_stat, dtype=jnp.float64),
         )
 
     def _apply_default_calibrated_parameter_guess(
@@ -2947,6 +3086,42 @@ def switching_loglikelihood_from_model(
         sep_inv_resid_tol=sep_inv_resid_tol,
         sep_inv_lambda=sep_inv_lambda,
         switching_config=switching_config,
+    )
+
+
+def compute_linear_gate_stats_from_shocks_model(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    shocks: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    obs_sigma: Sequence[float] | Mapping[str, float],
+    shock_sigmas: Sequence[float] | Mapping[str, float],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_state: Optional[Sequence[float]] = None,
+    shock_norm: str = "l2",
+    error_norm: str = "l2",
+) -> LinearGateStatsResult:
+    return model.compute_linear_gate_stats_from_shocks(
+        observations,
+        shocks,
+        obs_sigma,
+        shock_sigmas,
+        observables=observables,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_state=initial_state,
+        shock_norm=shock_norm,
+        error_norm=error_norm,
     )
 
 

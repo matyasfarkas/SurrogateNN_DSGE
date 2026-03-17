@@ -407,6 +407,21 @@ Python/JAX status:
 - upstream compile smoke now covers first-order solve plus JAX-compiled Kalman likelihoods on `RBC_CME`, calibrated `RBC_CME`, lead-lag and special-function `RBC_CME` variants, `RBC_Dynare`, `FS2000`, `RBC_baseline`, and `Backus_Kehoe_Kydland_1992`
 - tests verify gate-stat normalization and calibration behavior, hard vs soft gate probabilities, special-function steady-state evaluation with safe seeds, and successful parse/solve/JAX-compile smoke across the multi-model upstream fixture set
 
+### 27. First-order switching diagnostics and supplied-shock linear gate stats
+
+Julia reference:
+
+- `src/regime_switching/gating.jl` (`compute_linear_gate_stats_from_shocks`)
+- `src/regime_switching/diagnostics.jl`
+- `src/regime_switching/likelihood.jl` (`evaluate_switching_vs_fom`)
+
+Python/JAX status:
+
+- the DSGE core now includes `first_order_state_update` and `rollout_first_order_solution`, so first-order solution matrices can be simulated directly without routing everything through the Kalman wrapper
+- parsed models now expose `compute_linear_gate_stats_from_shocks_model`, which rolls a first-order solution forward under a supplied shock path, reconstructs the matching linear observable path, and evaluates `e_stat` / `f_stat` with either ordered sigma vectors or name-indexed sigma mappings
+- switching diagnostics now cover contiguous gated runs, longest/first/last block selection, context-window extraction, gate-mask summary statistics, window overlap summaries, loglikelihood decomposition summaries, runtime summaries, and switching-vs-FOM comparison metrics
+- tests verify the diagnostics against manual episode accounting and verify parsed-model linear gate stats on the upstream `RBC_CME` model against an explicit manual first-order rollout
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -421,6 +436,7 @@ Python/JAX status:
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; the current SEP inversion bridge accepts `sep_sparse_tree` for API compatibility but still runs the full-tree solver underneath because Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, and automatic hard-regime assignment utilities are now ported, but the broader switching-estimation harness and higher-level automatic gate workflows are not ported yet.
+- Filter-based linear gate-stat helpers such as Julia `compute_linear_gate_stats_from_filter`, along with the broader observed-shock / observed-variable estimation helpers they depend on, are not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed full-tree SEP path.
 

@@ -9,11 +9,19 @@ from surrogatenn_dsge import (
     assign_regimes,
     calibrate_gate,
     calibrate_gate_bias,
+    choose_gated_run,
+    compute_gate_stats,
     compute_gate_stat_series,
+    contiguous_true_runs,
+    episode_overlap,
+    evaluate_switching_vs_fom,
     gate_probabilities,
     gate_share,
     logistic,
     logit,
+    select_gated_block_periods,
+    summarize_loglik_decomposition,
+    summarize_runtime,
 )
 
 
@@ -117,3 +125,89 @@ def test_gate_probabilities_support_hard_and_soft_modes() -> None:
         atol=1e-12,
     )
     assert np.isfinite(bias)
+
+
+def test_switching_diagnostics_match_expected_episode_accounting() -> None:
+    mask = np.asarray([False, True, True, False, True, False], dtype=bool)
+
+    runs = contiguous_true_runs(mask)
+    longest = choose_gated_run(runs, "longest")
+    selected, eval_idx, ctx_idx, note = select_gated_block_periods(
+        mask,
+        "longest",
+        context_periods=1,
+        max_eval_periods=2,
+    )
+    stats = compute_gate_stats(mask)
+    overlap = episode_overlap(mask, 2, 4)
+
+    assert tuple(tuple(run) for run in runs) == ((2, 3), (5,))
+    assert longest is not None
+    assert tuple(longest) == (2, 3)
+    np.testing.assert_array_equal(selected, np.asarray([1, 2, 3], dtype=np.int64))
+    np.testing.assert_array_equal(eval_idx, np.asarray([2, 3], dtype=np.int64))
+    np.testing.assert_array_equal(ctx_idx, np.asarray([1], dtype=np.int64))
+    assert note == "Selected longest block 2:3 with context 1:1"
+    assert stats == {
+        "periods_total": 6,
+        "periods_nonlinear": 3,
+        "periods_linear": 3,
+        "share_nonlinear": 0.5,
+        "episodes": 2,
+        "max_episode_len": 2,
+        "min_episode_len": 1,
+        "mean_episode_len": 1.5,
+    }
+    assert overlap == {
+        "window_start": 2,
+        "window_end": 4,
+        "window_periods": 3,
+        "nonlinear_in_window": 2,
+        "share_window_nonlinear": 2.0 / 3.0,
+        "share_nonlinear_inside_window": 2.0 / 3.0,
+    }
+
+
+def test_switching_comparison_summaries_match_manual_values() -> None:
+    ll_rom = np.asarray([-2.0, -1.5, -0.5], dtype=np.float64)
+    ll_fom = np.asarray([-1.0, -2.5, -0.25], dtype=np.float64)
+    mask = np.asarray([False, True, True], dtype=bool)
+
+    decomposition = summarize_loglik_decomposition(ll_rom, ll_fom, mask)
+    comparison = evaluate_switching_vs_fom(
+        np.where(mask, ll_fom, ll_rom),
+        ll_fom,
+        runtime_switching=2.0,
+        runtime_fom=5.0,
+    )
+    runtime = summarize_runtime(runtime_switching_s=2.0, runtime_fom_s=5.0)
+
+    assert decomposition == {
+        "ll_rom_total": -4.0,
+        "ll_fom_total": -3.75,
+        "ll_mixed_total": -4.75,
+        "ll_rom_linear_periods": -2.0,
+        "ll_rom_nonlinear_periods": -2.0,
+        "ll_fom_linear_periods": -1.0,
+        "ll_fom_nonlinear_periods": -2.75,
+        "periods_nonlinear": 2,
+        "periods_total": 3,
+    }
+    np.testing.assert_allclose(comparison["switching_total"], -4.75, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(comparison["fom_total"], -3.75, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(comparison["total_diff"], -1.0, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(comparison["mean_abs_diff"], 1.0 / 3.0, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(comparison["max_abs_diff"], 1.0, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(comparison["rmse"], np.sqrt(1.0 / 3.0), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(
+        comparison["relative_mean_abs_diff"],
+        (1.0 / 3.0) / np.mean(np.abs(ll_fom)),
+        rtol=0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(comparison["speedup"], 2.5, rtol=0, atol=1e-12)
+    assert runtime == {
+        "runtime_switching_s": 2.0,
+        "runtime_fom_s": 5.0,
+        "speedup": 2.5,
+    }

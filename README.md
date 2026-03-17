@@ -24,6 +24,8 @@ Implemented:
 - parsed-model inversion loglikelihood helpers for both first-order and stochastic extended path likelihoods, including SEP inversion diagnostics and Julia-style runtime override keywords
 - regime-switching likelihood mixing with supplied hard masks or gate probabilities, plus a parsed-model bridge that mixes ROM Kalman and FOM inversion per-period likelihoods
 - gate-stat computation, threshold calibration, probability mapping, padding, and automatic hard-regime assignment utilities for the switching layer
+- first-order rollout helpers and parsed-model linear gate-stat computation from supplied shock paths, including named observable/shock sigma inputs
+- switching diagnostics and comparison helpers for gated episodes, loglikelihood decompositions, and runtime summaries
 - optional NumPyro inference helpers for subset priors, parameter-vector assembly, and concrete log-density evaluation on top of the parsed-model Kalman likelihood
 - JAX first-order structural likelihood and NumPyro wrappers that can run compiled kernels like `NUTS` on the parsed-model first-order path with either an explicit steady state or automatic JAX steady-state and calibration-equation solves
 - quadratic matrix equation doubling solver
@@ -61,5 +63,6 @@ Not implemented yet:
 - Julia sparse-tree / HMC SEP variants and OBC-specific SEP machinery
 - fully JAX-traceable parsed-model structural likelihoods beyond the first-order path, including higher-order estimation edges for compiled NumPyro kernels like `NUTS` and `HMC`
 - the broader regime-switching estimation harness beyond the currently ported likelihood mixer and gate/regime utilities
+- filter-based automatic linear gate-stat workflows and the Julia shock/variable-estimation helpers that feed them
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).

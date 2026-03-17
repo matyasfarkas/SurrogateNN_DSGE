@@ -24,6 +24,13 @@ class GateCalibrationResult(NamedTuple):
     achieved_share: float
 
 
+class LinearGateStatsResult(NamedTuple):
+    linear_observations: jax.Array
+    shocks: jax.Array
+    e_stat: jax.Array
+    f_stat: jax.Array
+
+
 @dataclass(frozen=True)
 class RegimeSwitchConfig:
     gate_mode: str = "hard"
@@ -565,3 +572,218 @@ def mix_loglikelihood(
         gate_probs=gate_probs,
         config=config,
     ).total
+
+
+def evaluate_switching_vs_fom(
+    ll_switching: Sequence[float] | np.ndarray,
+    ll_fom: Sequence[float] | np.ndarray,
+    *,
+    runtime_switching: Optional[float] = None,
+    runtime_fom: Optional[float] = None,
+) -> dict[str, float | int | None]:
+    switching = np.asarray(ll_switching, dtype=np.float64).reshape(-1)
+    fom = np.asarray(ll_fom, dtype=np.float64).reshape(-1)
+    if switching.shape != fom.shape:
+        raise ValueError(
+            "ll_switching and ll_fom must have identical shapes, got "
+            f"{switching.shape} and {fom.shape}."
+        )
+    diffs = switching - fom
+    abs_diffs = np.abs(diffs)
+    denom = max(float(np.mean(np.abs(fom))), float(np.finfo(np.float64).eps))
+    speedup = None
+    if (
+        runtime_switching is not None
+        and runtime_fom is not None
+        and float(runtime_switching) > 0.0
+    ):
+        speedup = float(runtime_fom) / float(runtime_switching)
+    return {
+        "n": int(switching.size),
+        "switching_total": float(np.sum(switching)),
+        "fom_total": float(np.sum(fom)),
+        "total_diff": float(np.sum(switching) - np.sum(fom)),
+        "mean_abs_diff": float(np.mean(abs_diffs)),
+        "max_abs_diff": float(np.max(abs_diffs)) if abs_diffs.size else 0.0,
+        "rmse": float(np.sqrt(np.mean(diffs**2))) if diffs.size else 0.0,
+        "relative_mean_abs_diff": float(np.mean(abs_diffs) / denom),
+        "runtime_switching_s": None
+        if runtime_switching is None
+        else float(runtime_switching),
+        "runtime_fom_s": None if runtime_fom is None else float(runtime_fom),
+        "speedup": speedup,
+    }
+
+
+def _gate_segments(mask: Sequence[bool] | np.ndarray) -> tuple[tuple[int, int], ...]:
+    values = np.asarray(mask, dtype=bool).reshape(-1)
+    segments: list[tuple[int, int]] = []
+    period = 0
+    while period < values.size:
+        if not values[period]:
+            period += 1
+            continue
+        start = period + 1
+        while period < values.size and values[period]:
+            period += 1
+        segments.append((start, period))
+    return tuple(segments)
+
+
+def contiguous_true_runs(mask: Sequence[bool] | np.ndarray) -> tuple[range, ...]:
+    return tuple(range(start, stop + 1) for start, stop in _gate_segments(mask))
+
+
+def choose_gated_run(
+    runs: Sequence[range],
+    strategy: str,
+) -> Optional[range]:
+    if not runs:
+        return None
+    if strategy == "first":
+        return runs[0]
+    if strategy == "last":
+        return runs[-1]
+    if strategy == "longest":
+        return max(runs, key=len)
+    raise ValueError(
+        f"Unsupported gated block strategy {strategy!r}. "
+        "Use 'first', 'last', or 'longest'."
+    )
+
+
+def select_gated_block_periods(
+    gate_mask: Sequence[bool] | np.ndarray,
+    strategy: str,
+    context_periods: int,
+    max_eval_periods: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
+    runs = contiguous_true_runs(gate_mask)
+    if not runs:
+        empty = np.asarray([], dtype=np.int64)
+        return empty, empty, empty, "No gated periods found."
+    run = choose_gated_run(runs, strategy)
+    assert run is not None
+    eval_periods = np.asarray(list(run), dtype=np.int64)
+    if max_eval_periods > 0 and eval_periods.size > max_eval_periods:
+        eval_periods = eval_periods[:max_eval_periods]
+    context = np.asarray([], dtype=np.int64)
+    if context_periods > 0 and eval_periods.size > 0 and eval_periods[0] > 1:
+        start = max(1, int(eval_periods[0]) - int(context_periods))
+        context = np.arange(start, int(eval_periods[0]), dtype=np.int64)
+    selected = np.concatenate([context, eval_periods])
+    note = f"Selected {strategy} block {run.start}:{run.stop - 1}"
+    if context.size:
+        note += f" with context {context[0]}:{context[-1]}"
+    return selected, eval_periods, context, note
+
+
+def compute_gate_stats(mask: Sequence[bool] | np.ndarray) -> dict[str, float | int]:
+    values = np.asarray(mask, dtype=bool).reshape(-1)
+    segments = _gate_segments(values)
+    lengths = np.asarray([stop - start + 1 for start, stop in segments], dtype=np.int64)
+    nonlinear = int(np.sum(values))
+    total = int(values.size)
+    return {
+        "periods_total": total,
+        "periods_nonlinear": nonlinear,
+        "periods_linear": total - nonlinear,
+        "share_nonlinear": 0.0 if total == 0 else float(nonlinear / total),
+        "episodes": len(segments),
+        "max_episode_len": int(np.max(lengths)) if lengths.size else 0,
+        "min_episode_len": int(np.min(lengths)) if lengths.size else 0,
+        "mean_episode_len": 0.0 if lengths.size == 0 else float(np.mean(lengths)),
+    }
+
+
+def episode_overlap(
+    mask: Sequence[bool] | np.ndarray,
+    window_start: int,
+    window_end: int,
+) -> dict[str, float | int]:
+    if window_end < window_start:
+        raise ValueError("window_end must be >= window_start.")
+    values = np.asarray(mask, dtype=bool).reshape(-1)
+    total = int(values.size)
+    if total == 0:
+        return {
+            "window_start": int(window_start),
+            "window_end": int(window_end),
+            "window_periods": 0,
+            "nonlinear_in_window": 0,
+            "share_window_nonlinear": 0.0,
+            "share_nonlinear_inside_window": 0.0,
+        }
+    lo = int(np.clip(window_start, 1, max(total, 1)))
+    hi = int(np.clip(window_end, 1, max(total, 1)))
+    if hi < lo:
+        return {
+            "window_start": lo,
+            "window_end": hi,
+            "window_periods": 0,
+            "nonlinear_in_window": 0,
+            "share_window_nonlinear": 0.0,
+            "share_nonlinear_inside_window": 0.0,
+        }
+    in_window = values[lo - 1 : hi]
+    nonlinear_in_window = int(np.sum(in_window))
+    nonlinear_total = int(np.sum(values))
+    window_periods = int(hi - lo + 1)
+    return {
+        "window_start": lo,
+        "window_end": hi,
+        "window_periods": window_periods,
+        "nonlinear_in_window": nonlinear_in_window,
+        "share_window_nonlinear": float(nonlinear_in_window / window_periods),
+        "share_nonlinear_inside_window": 0.0
+        if nonlinear_total == 0
+        else float(nonlinear_in_window / nonlinear_total),
+    }
+
+
+def summarize_loglik_decomposition(
+    ll_rom: Sequence[float] | np.ndarray,
+    ll_fom: Sequence[float] | np.ndarray,
+    mask: Sequence[bool] | np.ndarray,
+) -> dict[str, float | int]:
+    rom = np.asarray(ll_rom, dtype=np.float64).reshape(-1)
+    fom = np.asarray(ll_fom, dtype=np.float64).reshape(-1)
+    hard = np.asarray(mask, dtype=bool).reshape(-1)
+    if rom.shape != fom.shape or rom.shape != hard.shape:
+        raise ValueError(
+            "ll_rom, ll_fom, and mask must have identical shapes, got "
+            f"{rom.shape}, {fom.shape}, and {hard.shape}."
+        )
+    mixed = np.where(hard, fom, rom)
+    return {
+        "ll_rom_total": float(np.sum(rom)),
+        "ll_fom_total": float(np.sum(fom)),
+        "ll_mixed_total": float(np.sum(mixed)),
+        "ll_rom_linear_periods": float(np.sum(rom[~hard])),
+        "ll_rom_nonlinear_periods": float(np.sum(rom[hard])),
+        "ll_fom_linear_periods": float(np.sum(fom[~hard])),
+        "ll_fom_nonlinear_periods": float(np.sum(fom[hard])),
+        "periods_nonlinear": int(np.sum(hard)),
+        "periods_total": int(hard.size),
+    }
+
+
+def summarize_runtime(
+    *,
+    runtime_switching_s: Optional[float] = None,
+    runtime_fom_s: Optional[float] = None,
+) -> dict[str, float | None]:
+    speedup = None
+    if (
+        runtime_switching_s is not None
+        and runtime_fom_s is not None
+        and float(runtime_switching_s) > 0.0
+    ):
+        speedup = float(runtime_fom_s) / float(runtime_switching_s)
+    return {
+        "runtime_switching_s": None
+        if runtime_switching_s is None
+        else float(runtime_switching_s),
+        "runtime_fom_s": None if runtime_fom_s is None else float(runtime_fom_s),
+        "speedup": speedup,
+    }

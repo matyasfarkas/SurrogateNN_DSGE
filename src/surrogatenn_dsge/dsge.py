@@ -1957,3 +1957,93 @@ def linear_state_space_from_first_order_solution(
         observation_noise_covariance=observation_noise,
         initial_covariance_strategy=initial_covariance_strategy,
     )
+
+
+def first_order_state_update(
+    solution_matrix: Union[jax.Array, np.ndarray],
+    timings: DSGETimings,
+    reduced_state: Union[jax.Array, np.ndarray],
+    shocks: Union[jax.Array, np.ndarray],
+) -> jax.Array:
+    solution = jnp.asarray(solution_matrix, dtype=jnp.float64)
+    reduced = jnp.asarray(reduced_state, dtype=solution.dtype)
+    shock = jnp.asarray(shocks, dtype=solution.dtype)
+    expected_solution_shape = (
+        timings.nVars,
+        timings.nPast_not_future_and_mixed + timings.nExo,
+    )
+    if solution.shape != expected_solution_shape:
+        raise ValueError(
+            "solution_matrix must have shape "
+            f"{expected_solution_shape}, got {solution.shape}."
+        )
+    if reduced.shape != (timings.nPast_not_future_and_mixed,):
+        raise ValueError(
+            "reduced_state must have shape "
+            f"({timings.nPast_not_future_and_mixed},), got {reduced.shape}."
+        )
+    if shock.shape != (timings.nExo,):
+        raise ValueError(
+            f"shocks must have shape ({timings.nExo},), got {shock.shape}."
+        )
+    return solution @ jnp.concatenate([reduced, shock], axis=0)
+
+
+def rollout_first_order_solution(
+    solution_matrix: Union[jax.Array, np.ndarray],
+    timings: DSGETimings,
+    shocks: Union[jax.Array, np.ndarray],
+    *,
+    initial_reduced_state: Optional[Union[jax.Array, np.ndarray]] = None,
+) -> jax.Array:
+    solution = jnp.asarray(solution_matrix, dtype=jnp.float64)
+    shock_matrix = jnp.asarray(shocks, dtype=solution.dtype)
+    expected_solution_shape = (
+        timings.nVars,
+        timings.nPast_not_future_and_mixed + timings.nExo,
+    )
+    if solution.shape != expected_solution_shape:
+        raise ValueError(
+            "solution_matrix must have shape "
+            f"{expected_solution_shape}, got {solution.shape}."
+        )
+    if shock_matrix.ndim != 2:
+        raise ValueError(f"shocks must be rank-2, got shape {shock_matrix.shape}.")
+    if shock_matrix.shape[0] != timings.nExo:
+        raise ValueError(
+            f"shocks must have {timings.nExo} rows, got {shock_matrix.shape[0]}."
+        )
+
+    if initial_reduced_state is None:
+        reduced_state = jnp.zeros(
+            (timings.nPast_not_future_and_mixed,),
+            dtype=solution.dtype,
+        )
+    else:
+        reduced_state = jnp.asarray(initial_reduced_state, dtype=solution.dtype)
+        if reduced_state.shape != (timings.nPast_not_future_and_mixed,):
+            raise ValueError(
+                "initial_reduced_state must have shape "
+                f"({timings.nPast_not_future_and_mixed},), got {reduced_state.shape}."
+            )
+
+    state_indices = jnp.asarray(
+        timings.past_not_future_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+
+    def step(
+        current_reduced_state: jax.Array,
+        shock_t: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        next_full_state = first_order_state_update(
+            solution,
+            timings,
+            current_reduced_state,
+            shock_t,
+        )
+        next_reduced_state = next_full_state[state_indices]
+        return next_reduced_state, next_full_state
+
+    _, full_states_t = lax.scan(step, reduced_state, shock_matrix.T)
+    return full_states_t.T
