@@ -75,6 +75,7 @@ from .model import (
     solve_stochastic_extended_path_model,
     solve_third_order_model,
     solve_steady_state,
+    solve_steady_state_jax,
 )
 from .sep import (
     SEPConfig,
@@ -173,6 +174,7 @@ __all__ = [
     "solve_third_order_model",
     "solve_third_order_stochastic_steady_state",
     "solve_steady_state",
+    "solve_steady_state_jax",
     "solve_stochastic_extended_path",
     "solve_stochastic_extended_path_residual_expectation",
     "solve_lyapunov_equation",

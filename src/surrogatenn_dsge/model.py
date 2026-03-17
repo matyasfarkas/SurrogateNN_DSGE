@@ -6,6 +6,7 @@ import re
 from typing import Mapping, NamedTuple, Optional, Sequence, Union
 
 import jax
+from jax import lax
 import jax.numpy as jnp
 import numpy as np
 import scipy.special as scipy_special
@@ -119,6 +120,15 @@ class ParsedParameterBlock(NamedTuple):
     equation_texts: tuple[str, ...]
     initial_values: dict[str, float]
     bounds: dict[str, tuple[float, float]]
+
+
+class _JaxNewtonState(NamedTuple):
+    x: jax.Array
+    residual: jax.Array
+    residual_norm: jax.Array
+    converged: jax.Array
+    done: jax.Array
+    iterations: jax.Array
 
 
 @dataclass(frozen=True)
@@ -255,12 +265,67 @@ class MacroModel:
         )
 
     @cached_property
+    def _steady_state_residual_jax_fn(self) -> object:
+        return sp.lambdify(
+            list(self._steady_state_symbols) + list(self._parameter_symbols),
+            self._steady_state_matrix,
+            modules=_jax_lambdify_modules(),
+        )
+
+    @cached_property
     def _dynamic_residual_fn(self) -> object:
         return sp.lambdify(
             self._dynamic_input_symbols,
             self._dynamic_matrix,
             modules=_jax_lambdify_modules(),
         )
+
+    @cached_property
+    def _steady_state_expansion_indices(self) -> tuple[int, ...]:
+        base_lookup = {name: idx for idx, name in enumerate(self.steady_state_names)}
+        indices: list[int] = []
+        for name in self.timings.var:
+            if name in base_lookup:
+                indices.append(base_lookup[name])
+                continue
+            if name in self.timings.exo_present:
+                indices.append(0)
+                continue
+            stripped = _strip_auxiliary_suffix(name)
+            if stripped in base_lookup:
+                indices.append(base_lookup[stripped])
+                continue
+            if stripped in self.timings.exo:
+                indices.append(0)
+                continue
+            raise ValueError(f"Could not expand steady state value for `{name}`.")
+        return tuple(indices)
+
+    @cached_property
+    def _steady_state_expansion_zero_mask(self) -> tuple[bool, ...]:
+        zero_mask: list[bool] = []
+        for name in self.timings.var:
+            if name in self.timings.exo_present:
+                zero_mask.append(True)
+                continue
+            stripped = _strip_auxiliary_suffix(name)
+            zero_mask.append(stripped in self.timings.exo)
+        return tuple(zero_mask)
+
+    @cached_property
+    def _steady_reference_indices(self) -> tuple[int, ...]:
+        index_lookup = {name: idx for idx, name in enumerate(self.timings.var)}
+        indices: list[int] = []
+        for name in self.steady_state_reference_names:
+            if name in index_lookup:
+                indices.append(index_lookup[name])
+                continue
+            stripped = _strip_auxiliary_suffix(name)
+            if stripped in index_lookup:
+                indices.append(index_lookup[stripped])
+                continue
+            raise ValueError(f"Missing steady-state reference value for `{name}`.")
+        return tuple(indices)
 
     @cached_property
     def _dynamic_jacobian_fn(self) -> object:
@@ -298,6 +363,22 @@ class MacroModel:
             raise ValueError(
                 "parameter_values must have shape "
                 f"({len(self.parameter_names)},), got {values.shape}."
+            )
+        return values
+
+    def _coerce_parameter_values_jax(
+        self,
+        parameter_values: Optional[Sequence[float]],
+    ) -> jax.Array:
+        if parameter_values is None:
+            values = jnp.asarray(self.parameter_values, dtype=jnp.float64)
+        else:
+            values = jnp.asarray(parameter_values, dtype=jnp.float64)
+        expected_shape = (len(self.parameter_names),)
+        if values.shape != expected_shape:
+            raise ValueError(
+                "parameter_values must have shape "
+                f"{expected_shape}, got {values.shape}."
             )
         return values
 
@@ -357,6 +438,27 @@ class MacroModel:
             raise ValueError(f"Could not expand steady state value for `{name}`.")
         return full
 
+    def _expand_to_full_steady_state_jax(
+        self,
+        base_steady_state: Sequence[float],
+    ) -> jax.Array:
+        base = jnp.asarray(base_steady_state, dtype=jnp.float64)
+        expected_shape = (len(self.steady_state_names),)
+        if base.shape != expected_shape:
+            raise ValueError(
+                "base_steady_state must have shape "
+                f"{expected_shape}, got {base.shape}."
+            )
+        source = (
+            base
+            if len(self.steady_state_names) > 0
+            else jnp.zeros((1,), dtype=jnp.float64)
+        )
+        indices = jnp.asarray(self._steady_state_expansion_indices, dtype=jnp.int32)
+        zero_mask = jnp.asarray(self._steady_state_expansion_zero_mask)
+        expanded = source[indices]
+        return jnp.where(zero_mask, jnp.zeros_like(expanded), expanded)
+
     def _extract_base_steady_state(
         self,
         full_steady_state: Sequence[float],
@@ -407,6 +509,22 @@ class MacroModel:
                 continue
             raise ValueError(f"Missing steady-state reference value for `{name}`.")
         return refs
+
+    def _steady_reference_values_jax(
+        self,
+        full_steady_state: Sequence[float],
+    ) -> jax.Array:
+        state = jnp.asarray(full_steady_state, dtype=jnp.float64)
+        expected_shape = (self.timings.nVars,)
+        if state.shape != expected_shape:
+            raise ValueError(
+                "full_steady_state must have shape "
+                f"{expected_shape}, got {state.shape}."
+            )
+        if not self.steady_state_reference_names:
+            return jnp.zeros((0,), dtype=state.dtype)
+        indices = jnp.asarray(self._steady_reference_indices, dtype=jnp.int32)
+        return state[indices]
 
     def _coerce_dynamic_state_vector(
         self,
@@ -732,6 +850,54 @@ class MacroModel:
             steady_state=jnp.asarray(full, dtype=jnp.float64),
             base_steady_state=jnp.asarray(base_steady_state, dtype=jnp.float64),
             parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
+            converged=converged,
+            iterations=iterations,
+            residual_norm=residual_norm,
+        )
+
+    def solve_steady_state_jax(
+        self,
+        *,
+        parameter_values: Optional[Sequence[float]] = None,
+        initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        tol: float = 1e-12,
+        max_iter: int = 100,
+        line_search_min_step: float = 2.0**-16,
+    ) -> SteadyStateResult:
+        if self.calibrated_parameter_names:
+            raise NotImplementedError(
+                "solve_steady_state_jax does not yet support calibration equations "
+                "from `@parameters`; supply `steady_state` explicitly or use the "
+                "NumPy-based `solve_steady_state` path."
+            )
+
+        guess = jnp.asarray(
+            self._coerce_steady_state_guess(initial_guess),
+            dtype=jnp.float64,
+        )
+        resolved_parameters = self._coerce_parameter_values_jax(parameter_values)
+
+        def residual_fn(x: jax.Array) -> jax.Array:
+            return jnp.asarray(
+                self._steady_state_residual_jax_fn(*x, *resolved_parameters),
+                dtype=jnp.float64,
+            ).reshape(-1)
+
+        base_steady_state, converged, iterations, residual_norm = _solve_newton_system_jax(
+            guess,
+            residual_fn=residual_fn,
+            jacobian_fn=jax.jacrev(residual_fn),
+            lower_bounds=self._bounds_vector(self.steady_state_names)[0],
+            upper_bounds=self._bounds_vector(self.steady_state_names)[1],
+            tol=tol,
+            max_iter=max_iter,
+            line_search_min_step=line_search_min_step,
+        )
+        full = self._expand_to_full_steady_state_jax(base_steady_state)
+        return SteadyStateResult(
+            steady_state=full,
+            base_steady_state=base_steady_state,
+            parameter_values=resolved_parameters,
             converged=converged,
             iterations=iterations,
             residual_norm=residual_norm,
@@ -1790,6 +1956,24 @@ def solve_steady_state(
     )
 
 
+def solve_steady_state_jax(
+    model: MacroModel,
+    *,
+    parameter_values: Optional[Sequence[float]] = None,
+    initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    tol: float = 1e-12,
+    max_iter: int = 100,
+    line_search_min_step: float = 2.0**-16,
+) -> SteadyStateResult:
+    return model.solve_steady_state_jax(
+        parameter_values=parameter_values,
+        initial_guess=initial_guess,
+        tol=tol,
+        max_iter=max_iter,
+        line_search_min_step=line_search_min_step,
+    )
+
+
 def resolve_parameter_values(
     model: MacroModel,
     *,
@@ -2153,6 +2337,135 @@ def _solve_newton_system(
                 break
 
     return x, residual_norm < tol, max_iter, residual_norm
+
+
+def _solve_newton_system_jax(
+    initial: Sequence[float],
+    *,
+    residual_fn: object,
+    jacobian_fn: object,
+    lower_bounds: Optional[Sequence[float]] = None,
+    upper_bounds: Optional[Sequence[float]] = None,
+    tol: float,
+    max_iter: int,
+    line_search_min_step: float,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    x0 = jnp.asarray(initial, dtype=jnp.float64)
+    if lower_bounds is not None or upper_bounds is not None:
+        lower = (
+            jnp.asarray(lower_bounds, dtype=jnp.float64)
+            if lower_bounds is not None
+            else jnp.full_like(x0, -jnp.inf)
+        )
+        upper = (
+            jnp.asarray(upper_bounds, dtype=jnp.float64)
+            if upper_bounds is not None
+            else jnp.full_like(x0, jnp.inf)
+        )
+        x0 = jnp.clip(x0, lower, upper)
+    else:
+        lower = upper = None
+
+    tol_arr = jnp.asarray(tol, dtype=jnp.float64)
+    backtracking_steps = max(
+        1,
+        int(np.ceil(np.log2(1.0 / line_search_min_step))) + 1,
+    )
+
+    def _clip(x: jax.Array) -> jax.Array:
+        if lower is None or upper is None:
+            return x
+        return jnp.clip(x, lower, upper)
+
+    residual0 = jnp.asarray(residual_fn(x0), dtype=jnp.float64).reshape(-1)
+    residual_norm0 = jnp.linalg.norm(residual0, ord=jnp.inf)
+    converged0 = jnp.isfinite(residual_norm0) & (residual_norm0 < tol_arr)
+    initial_state = _JaxNewtonState(
+        x=x0,
+        residual=residual0,
+        residual_norm=residual_norm0,
+        converged=converged0,
+        done=converged0 | (~jnp.isfinite(residual_norm0)),
+        iterations=jnp.asarray(0),
+    )
+
+    def body(iteration: int, state: _JaxNewtonState) -> _JaxNewtonState:
+        def _active(current_state: _JaxNewtonState) -> _JaxNewtonState:
+            jacobian = jnp.asarray(jacobian_fn(current_state.x), dtype=jnp.float64)
+            direction = -(jnp.linalg.pinv(jacobian) @ current_state.residual)
+
+            def line_search_body(
+                search_step: int,
+                search_state: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+            ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+                candidate_x, candidate_residual, candidate_norm, accepted = search_state
+                step_scale = jnp.asarray(0.5**search_step, dtype=current_state.x.dtype)
+                proposed_x = _clip(current_state.x + step_scale * direction)
+                proposed_residual = jnp.asarray(
+                    residual_fn(proposed_x),
+                    dtype=jnp.float64,
+                ).reshape(-1)
+                proposed_norm = jnp.linalg.norm(proposed_residual, ord=jnp.inf)
+                improve = (
+                    jnp.isfinite(proposed_norm)
+                    & (proposed_norm < current_state.residual_norm)
+                )
+                accept_now = (~accepted) & improve
+                return (
+                    jnp.where(accept_now, proposed_x, candidate_x),
+                    jnp.where(accept_now, proposed_residual, candidate_residual),
+                    jnp.where(accept_now, proposed_norm, candidate_norm),
+                    accepted | improve,
+                )
+
+            line_search_init = (
+                current_state.x,
+                current_state.residual,
+                current_state.residual_norm,
+                jnp.asarray(False),
+            )
+            candidate_x, candidate_residual, candidate_norm, accepted = lax.fori_loop(
+                0,
+                backtracking_steps,
+                line_search_body,
+                line_search_init,
+            )
+
+            fallback_x = _clip(current_state.x + direction)
+            fallback_residual = jnp.asarray(
+                residual_fn(fallback_x),
+                dtype=jnp.float64,
+            ).reshape(-1)
+            fallback_norm = jnp.linalg.norm(fallback_residual, ord=jnp.inf)
+
+            next_x = jnp.where(accepted, candidate_x, fallback_x)
+            next_residual = jnp.where(accepted, candidate_residual, fallback_residual)
+            next_norm = jnp.where(accepted, candidate_norm, fallback_norm)
+            finite_norm = jnp.isfinite(next_norm)
+            converged = finite_norm & (next_norm < tol_arr)
+            return _JaxNewtonState(
+                x=next_x,
+                residual=next_residual,
+                residual_norm=next_norm,
+                converged=converged,
+                done=converged | (~finite_norm),
+                iterations=jnp.asarray(iteration + 1),
+            )
+
+        return lax.cond(
+            state.done,
+            lambda current_state: current_state,
+            _active,
+            state,
+        )
+
+    final_state = lax.fori_loop(0, max_iter, body, initial_state)
+    return (
+        final_state.x,
+        final_state.converged,
+        final_state.iterations,
+        final_state.residual_norm,
+    )
 
 
 def _extract_block(

@@ -155,6 +155,39 @@ def test_jax_fixed_steady_state_loglikelihood_matches_high_level_path() -> None:
     )
 
 
+def test_jax_auto_steady_state_loglikelihood_matches_high_level_path() -> None:
+    model, _, observables, levels, _ = _numpyro_fixture()
+    parameter_vector = assemble_parameter_vector(
+        model,
+        {"rho_a": jnp.asarray(0.8, dtype=jnp.float64), "rho_y": jnp.asarray(0.6, dtype=jnp.float64)},
+    )
+
+    compiled = jax.jit(
+        lambda theta: kalman_loglikelihood_from_model_jax(
+            model,
+            levels,
+            observables=observables,
+            parameter_values=theta,
+            steady_state_initial_guess={"a": 1.5, "y": 2.0},
+        )
+    )
+    jax_loglikelihood = compiled(parameter_vector)
+    high_level = kalman_loglikelihood_from_model(
+        model,
+        levels,
+        observables=observables,
+        parameter_values=parameter_vector,
+        steady_state_initial_guess={"a": 1.5, "y": 2.0},
+    )
+
+    np.testing.assert_allclose(
+        jax_loglikelihood,
+        high_level,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
 def test_jax_numpyro_log_density_matches_manual_prior_plus_likelihood() -> None:
     model, first_order_result, observables, levels, priors = _numpyro_fixture()
     parameter_samples = {
@@ -239,14 +272,14 @@ def test_numpyro_wrapper_fails_fast_for_compiled_structural_kernels() -> None:
         mcmc.run(jax.random.PRNGKey(1))
 
 
-def test_jax_fixed_steady_state_wrapper_runs_nuts() -> None:
-    model, first_order_result, observables, levels, priors = _numpyro_fixture()
+def test_jax_wrapper_runs_nuts_with_auto_steady_state() -> None:
+    model, _, observables, levels, priors = _numpyro_fixture()
     numpyro_model = build_numpyro_kalman_model_jax(
         model,
         levels,
         priors,
         observables=observables,
-        steady_state=first_order_result.steady_state,
+        steady_state_initial_guess={"a": 1.5, "y": 2.0},
     )
     kernel = NUTS(numpyro_model)
     mcmc = MCMC(kernel, num_warmup=4, num_samples=4, num_chains=1, progress_bar=False)

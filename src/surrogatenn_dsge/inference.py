@@ -183,7 +183,10 @@ def kalman_loglikelihood_from_model_jax(
     model: MacroModel,
     observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
     *,
-    steady_state: Sequence[float],
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
     observables: Optional[Sequence[str] | str] = None,
     parameter_values: Optional[Sequence[float] | Mapping[str, Any]] = None,
     base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
@@ -198,22 +201,9 @@ def kalman_loglikelihood_from_model_jax(
         observations,
         observables=observables,
     )
-    full_steady_state = np.asarray(
-        model._coerce_full_steady_state(steady_state),
-        dtype=np.float64,
-    )
     observable_indices = model.resolve_observable_indices(observable_names)
-    steady_state_array = jnp.asarray(full_steady_state, dtype=jnp.float64)
-    steady_reference_values = jnp.asarray(
-        model._steady_reference_values(full_steady_state),
-        dtype=jnp.float64,
-    )
-    observable_steady_state = jnp.asarray(
-        model._observable_steady_state_values(observable_names, full_steady_state),
-        dtype=jnp.float64,
-    )
+    observable_index_array = jnp.asarray(observable_indices, dtype=jnp.int32)
     observations_array = jnp.asarray(observation_data, dtype=jnp.float64)
-    demeaned_observations = observations_array - observable_steady_state[:, None]
     lower_bounds, upper_bounds = model._bounds_vector(model.parameter_names)
     lower_bounds_array = jnp.asarray(lower_bounds, dtype=jnp.float64)
     upper_bounds_array = jnp.asarray(upper_bounds, dtype=jnp.float64)
@@ -223,51 +213,66 @@ def kalman_loglikelihood_from_model_jax(
         parameter_values,
         base_parameter_values=base_parameter_values,
     )
-
-    dynamic_point = jnp.concatenate(
-        [
-            steady_state_array[
-                jnp.asarray(model.timings.future_not_past_and_mixed_idx, dtype=jnp.int32)
-            ],
-            steady_state_array,
-            steady_state_array[
-                jnp.asarray(model.timings.past_not_future_and_mixed_idx, dtype=jnp.int32)
-            ],
-            jnp.zeros((model.timings.nExo,), dtype=jnp.float64),
-        ]
+    future_index_array = jnp.asarray(
+        model.timings.future_not_past_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+    past_index_array = jnp.asarray(
+        model.timings.past_not_future_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+    explicit_steady_state = (
+        None
+        if steady_state is None
+        else jnp.asarray(model._coerce_full_steady_state(steady_state), dtype=jnp.float64)
     )
 
-    def residual_from_dynamic_vector(
-        dynamic_vector: jax.Array,
-        parameters: jax.Array,
-    ) -> jax.Array:
-        lead_state = steady_state_array.at[
-            jnp.asarray(model.timings.future_not_past_and_mixed_idx, dtype=jnp.int32)
-        ].set(dynamic_vector[: model.timings.nFuture_not_past_and_mixed])
-        current_start = model.timings.nFuture_not_past_and_mixed
-        current_end = current_start + model.timings.nVars
-        current_state = dynamic_vector[current_start:current_end]
-        lag_state = steady_state_array.at[
-            jnp.asarray(model.timings.past_not_future_and_mixed_idx, dtype=jnp.int32)
-        ].set(
-            dynamic_vector[
-                current_end : current_end + model.timings.nPast_not_future_and_mixed
-            ]
-        )
-        shock = dynamic_vector[current_end + model.timings.nPast_not_future_and_mixed :]
-        return model._evaluate_dynamic_residual_with_context(
-            lag_state,
-            current_state,
-            lead_state,
-            shock,
-            parameter_values=parameters,
-            steady_reference_values=steady_reference_values,
+    if steady_state is None and model.calibrated_parameter_names:
+        raise NotImplementedError(
+            "kalman_loglikelihood_from_model_jax does not yet support automatic "
+            "steady-state/calibration solves for models with calibration equations; "
+            "supply `steady_state` explicitly or use the NumPy-based likelihood path."
         )
 
-    def _valid_loglikelihood(parameters: jax.Array) -> jax.Array:
-        jacobian = jax.jacrev(
-            lambda dynamic_vector: residual_from_dynamic_vector(dynamic_vector, parameters)
-        )(dynamic_point)
+    def _loglikelihood_from_full_steady_state(
+        full_steady_state: jax.Array,
+        parameters: jax.Array,
+    ) -> jax.Array:
+        steady_reference_values = model._steady_reference_values_jax(full_steady_state)
+        observable_steady_state = full_steady_state[observable_index_array]
+        demeaned_observations = observations_array - observable_steady_state[:, None]
+        dynamic_point = jnp.concatenate(
+            [
+                full_steady_state[future_index_array],
+                full_steady_state,
+                full_steady_state[past_index_array],
+                jnp.zeros((model.timings.nExo,), dtype=jnp.float64),
+            ]
+        )
+
+        def residual_from_dynamic_vector(dynamic_vector: jax.Array) -> jax.Array:
+            lead_state = full_steady_state.at[future_index_array].set(
+                dynamic_vector[: model.timings.nFuture_not_past_and_mixed]
+            )
+            current_start = model.timings.nFuture_not_past_and_mixed
+            current_end = current_start + model.timings.nVars
+            current_state = dynamic_vector[current_start:current_end]
+            lag_state = full_steady_state.at[past_index_array].set(
+                dynamic_vector[
+                    current_end : current_end + model.timings.nPast_not_future_and_mixed
+                ]
+            )
+            shock = dynamic_vector[current_end + model.timings.nPast_not_future_and_mixed :]
+            return model._evaluate_dynamic_residual_with_context(
+                lag_state,
+                current_state,
+                lead_state,
+                shock,
+                parameter_values=parameters,
+                steady_reference_values=steady_reference_values,
+            )
+
+        jacobian = jax.jacrev(residual_from_dynamic_vector)(dynamic_point)
         first_order_result = solve_first_order_dsge_solution_jax(
             jacobian,
             model.timings,
@@ -294,6 +299,26 @@ def kalman_loglikelihood_from_model_jax(
             _success,
             lambda _: failure_value,
             first_order_result,
+        )
+
+    def _valid_loglikelihood(parameters: jax.Array) -> jax.Array:
+        if explicit_steady_state is not None:
+            return _loglikelihood_from_full_steady_state(explicit_steady_state, parameters)
+
+        steady_state_result = model.solve_steady_state_jax(
+            parameter_values=parameters,
+            initial_guess=steady_state_initial_guess,
+            tol=steady_state_tol,
+            max_iter=steady_state_max_iter,
+        )
+        return lax.cond(
+            steady_state_result.converged,
+            lambda result: _loglikelihood_from_full_steady_state(
+                result.steady_state,
+                parameters,
+            ),
+            lambda _: failure_value,
+            steady_state_result,
         )
 
     within_bounds = jnp.all(
@@ -386,7 +411,10 @@ def build_numpyro_kalman_model_jax(
     observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
     priors: Mapping[str, Any],
     *,
-    steady_state: Sequence[float],
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
     observables: Optional[Sequence[str] | str] = None,
     base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
     initial_covariance_strategy: str = "theoretical",
@@ -395,8 +423,15 @@ def build_numpyro_kalman_model_jax(
     presample_periods: int = 0,
     jitter: float = 1e-9,
     on_failure_loglikelihood: float = -np.inf,
-):
+    ):
     numpyro, _, _ = _require_numpyro()
+
+    if steady_state is None and model.calibrated_parameter_names:
+        raise NotImplementedError(
+            "build_numpyro_kalman_model_jax does not yet support automatic "
+            "steady-state/calibration solves for models with calibration equations; "
+            "supply `steady_state` explicitly for now."
+        )
 
     prior_names = tuple(priors)
     if not prior_names:
@@ -426,6 +461,9 @@ def build_numpyro_kalman_model_jax(
             observables=observables,
             parameter_values=parameter_vector,
             steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
             initial_covariance_strategy=initial_covariance_strategy,
             measurement_error_scale=measurement_error_scale,
             measurement_error_covariance=measurement_error_covariance,
@@ -487,7 +525,10 @@ def evaluate_numpyro_kalman_log_density_jax(
     priors: Mapping[str, Any],
     parameter_samples: Mapping[str, Any],
     *,
-    steady_state: Sequence[float],
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
     observables: Optional[Sequence[str] | str] = None,
     base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
     initial_covariance_strategy: str = "theoretical",
@@ -503,6 +544,9 @@ def evaluate_numpyro_kalman_log_density_jax(
         observations,
         priors,
         steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
         observables=observables,
         base_parameter_values=base_parameter_values,
         initial_covariance_strategy=initial_covariance_strategy,
