@@ -355,7 +355,19 @@ Python/JAX status:
 - parsed models now expose a JAX steady-state Newton solver for non-calibrated models, including bounded backtracking and JIT coverage
 - the compiled first-order Kalman likelihood and NumPyro wrapper no longer require an explicit steady state for that subset; they can solve the steady state inside the JAX trace from an initial guess
 - the calibration-equation boundary remains explicit: models with `@parameters` calibration equations still require an explicit steady state or the existing NumPy-based path
-- tests verify steady-state parity against the NumPy solver, JIT compatibility, the calibration-equation guard, likelihood parity with automatic steady-state solves, and a compiled `NUTS` run on the auto-steady-state path
+- tests verify steady-state parity against the NumPy solver, JIT compatibility, likelihood parity with automatic steady-state solves, and a compiled `NUTS` run on the auto-steady-state path
+
+### 24. Automatic JAX calibration-equation solves for first-order compiled estimation
+
+Julia reference:
+
+- this extends the Python/JAX estimation bridge over the existing calibrated parsed-model path rather than introducing a separate Julia-facing API
+
+Python/JAX status:
+
+- parsed models now expose JAX parameter-resolution and joint steady-state/calibration solves for `@parameters` calibration equations
+- the compiled first-order Kalman likelihood and NumPyro wrapper now cover calibrated parsed models as well, using the JAX steady-state/calibration solve inside the trace
+- tests verify JAX parity for direct calibrated-parameter resolution, joint calibrated steady states on both a minimal target-calibration model and the existing `RBC_CME` fixture, calibrated auto-steady-state likelihood parity, and a compiled `NUTS` run on a calibrated model
 
 ## Explicit gaps
 
@@ -368,7 +380,7 @@ Python/JAX status:
 - The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
-- The parsed-model structural likelihood is still not pure-JAX end to end once calibration equations are involved; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state solves for non-calibrated models only.
+- The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, and the parsed full-tree SEP path.

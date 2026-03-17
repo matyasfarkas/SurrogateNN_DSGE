@@ -273,6 +273,22 @@ class MacroModel:
         )
 
     @cached_property
+    def _parameter_equation_residual_jax_fn(self) -> object:
+        return sp.lambdify(
+            list(self._steady_state_symbols) + list(self._parameter_symbols),
+            self._parameter_matrix,
+            modules=_jax_lambdify_modules(),
+        )
+
+    @cached_property
+    def _joint_steady_state_residual_jax_fn(self) -> object:
+        return sp.lambdify(
+            self._joint_unknown_symbols,
+            self._joint_steady_state_matrix,
+            modules=_jax_lambdify_modules(),
+        )
+
+    @cached_property
     def _dynamic_residual_fn(self) -> object:
         return sp.lambdify(
             self._dynamic_input_symbols,
@@ -326,6 +342,11 @@ class MacroModel:
                 continue
             raise ValueError(f"Missing steady-state reference value for `{name}`.")
         return tuple(indices)
+
+    @cached_property
+    def _base_steady_state_indices(self) -> tuple[int, ...]:
+        index_lookup = {name: idx for idx, name in enumerate(self.timings.var)}
+        return tuple(index_lookup[name] for name in self.steady_state_names)
 
     @cached_property
     def _dynamic_jacobian_fn(self) -> object:
@@ -475,6 +496,22 @@ class MacroModel:
             dtype=np.float64,
         )
 
+    def _extract_base_steady_state_jax(
+        self,
+        full_steady_state: Sequence[float],
+    ) -> jax.Array:
+        full = jnp.asarray(full_steady_state, dtype=jnp.float64)
+        expected_shape = (self.timings.nVars,)
+        if full.shape != expected_shape:
+            raise ValueError(
+                "full_steady_state must have shape "
+                f"{expected_shape}, got {full.shape}."
+            )
+        if not self.steady_state_names:
+            return jnp.zeros((0,), dtype=full.dtype)
+        indices = jnp.asarray(self._base_steady_state_indices, dtype=jnp.int32)
+        return full[indices]
+
     def _coerce_full_steady_state(
         self,
         steady_state: Optional[Sequence[float]],
@@ -525,6 +562,23 @@ class MacroModel:
             return jnp.zeros((0,), dtype=state.dtype)
         indices = jnp.asarray(self._steady_reference_indices, dtype=jnp.int32)
         return state[indices]
+
+    def _apply_default_calibrated_parameter_guess_jax(
+        self,
+        parameter_values: jax.Array,
+        *,
+        parameter_values_provided: bool,
+    ) -> jax.Array:
+        if parameter_values_provided or not self.default_initial_guess:
+            return parameter_values
+        calibrated = set(self.calibrated_parameter_names)
+        updated = jnp.asarray(parameter_values, dtype=jnp.float64)
+        for idx, name in enumerate(self.parameter_names):
+            if name in calibrated and name in self.default_initial_guess:
+                updated = updated.at[idx].set(
+                    jnp.asarray(self.default_initial_guess[name], dtype=updated.dtype)
+                )
+        return updated
 
     def _coerce_dynamic_state_vector(
         self,
@@ -764,6 +818,79 @@ class MacroModel:
         )
         return jnp.asarray(resolved, dtype=jnp.float64)
 
+    def resolve_parameter_values_jax(
+        self,
+        *,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        tol: float = 1e-12,
+        max_iter: int = 100,
+        line_search_min_step: float = 2.0**-16,
+    ) -> jax.Array:
+        parameters = self._coerce_parameter_values_jax(parameter_values)
+
+        if len(self.parameter_names) == 0:
+            return jnp.asarray(parameters, dtype=jnp.float64)
+        parameters = self._apply_default_calibrated_parameter_guess_jax(
+            parameters,
+            parameter_values_provided=parameter_values is not None,
+        )
+        lower_bounds, upper_bounds = self._bounds_vector(self.parameter_names)
+
+        if steady_state is None:
+            if self._parameter_equations_depend_on_steady_state:
+                raise ValueError(
+                    "Resolving parameter values requires `steady_state` when the "
+                    "`@parameters` block contains calibration equations."
+                )
+            base_steady_state = jnp.ones(
+                (len(self.steady_state_names),),
+                dtype=jnp.float64,
+            )
+
+            def residual_fn(x: jax.Array) -> jax.Array:
+                return jnp.asarray(
+                    self._parameter_equation_residual_jax_fn(*base_steady_state, *x),
+                    dtype=jnp.float64,
+                ).reshape(-1)
+        else:
+            state = jnp.asarray(steady_state, dtype=jnp.float64)
+            if state.shape == (len(self.steady_state_names),):
+                base_steady_state = state
+            elif state.shape == (self.timings.nVars,):
+                base_steady_state = self._extract_base_steady_state_jax(state)
+            else:
+                raise ValueError(
+                    "steady_state must have shape "
+                    f"({len(self.steady_state_names)},) or ({self.timings.nVars},), got {state.shape}."
+                )
+
+            def residual_fn(x: jax.Array) -> jax.Array:
+                return jnp.concatenate(
+                    [
+                        jnp.asarray(
+                            self._steady_state_residual_jax_fn(*base_steady_state, *x),
+                            dtype=jnp.float64,
+                        ).reshape(-1),
+                        jnp.asarray(
+                            self._parameter_equation_residual_jax_fn(*base_steady_state, *x),
+                            dtype=jnp.float64,
+                        ).reshape(-1),
+                    ]
+                )
+
+        resolved, _, _, _ = _solve_newton_system_jax(
+            parameters,
+            residual_fn=residual_fn,
+            jacobian_fn=jax.jacrev(residual_fn),
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            tol=tol,
+            max_iter=max_iter,
+            line_search_min_step=line_search_min_step,
+        )
+        return jnp.asarray(resolved, dtype=jnp.float64)
+
     def solve_steady_state(
         self,
         *,
@@ -864,35 +991,63 @@ class MacroModel:
         max_iter: int = 100,
         line_search_min_step: float = 2.0**-16,
     ) -> SteadyStateResult:
-        if self.calibrated_parameter_names:
-            raise NotImplementedError(
-                "solve_steady_state_jax does not yet support calibration equations "
-                "from `@parameters`; supply `steady_state` explicitly or use the "
-                "NumPy-based `solve_steady_state` path."
-            )
-
         guess = jnp.asarray(
             self._coerce_steady_state_guess(initial_guess),
             dtype=jnp.float64,
         )
-        resolved_parameters = self._coerce_parameter_values_jax(parameter_values)
-
-        def residual_fn(x: jax.Array) -> jax.Array:
-            return jnp.asarray(
-                self._steady_state_residual_jax_fn(*x, *resolved_parameters),
-                dtype=jnp.float64,
-            ).reshape(-1)
-
-        base_steady_state, converged, iterations, residual_norm = _solve_newton_system_jax(
-            guess,
-            residual_fn=residual_fn,
-            jacobian_fn=jax.jacrev(residual_fn),
-            lower_bounds=self._bounds_vector(self.steady_state_names)[0],
-            upper_bounds=self._bounds_vector(self.steady_state_names)[1],
-            tol=tol,
-            max_iter=max_iter,
-            line_search_min_step=line_search_min_step,
+        initial_parameters = self._apply_default_calibrated_parameter_guess_jax(
+            self._coerce_parameter_values_jax(parameter_values),
+            parameter_values_provided=parameter_values is not None,
         )
+
+        if self._parameter_equations_depend_on_steady_state:
+            joint_initial = jnp.concatenate([guess, initial_parameters])
+            lower_bounds, upper_bounds = self._bounds_vector(
+                tuple(self.steady_state_names) + tuple(self.parameter_names)
+            )
+
+            def residual_fn(x: jax.Array) -> jax.Array:
+                return jnp.asarray(
+                    self._joint_steady_state_residual_jax_fn(*x),
+                    dtype=jnp.float64,
+                ).reshape(-1)
+
+            solution, converged, iterations, residual_norm = _solve_newton_system_jax(
+                joint_initial,
+                residual_fn=residual_fn,
+                jacobian_fn=jax.jacrev(residual_fn),
+                lower_bounds=lower_bounds,
+                upper_bounds=upper_bounds,
+                tol=tol,
+                max_iter=max_iter,
+                line_search_min_step=line_search_min_step,
+            )
+            base_steady_state = solution[: len(self.steady_state_names)]
+            resolved_parameters = solution[len(self.steady_state_names) :]
+        else:
+            resolved_parameters = self.resolve_parameter_values_jax(
+                parameter_values=parameter_values,
+                tol=tol,
+                max_iter=max_iter,
+                line_search_min_step=line_search_min_step,
+            )
+
+            def residual_fn(x: jax.Array) -> jax.Array:
+                return jnp.asarray(
+                    self._steady_state_residual_jax_fn(*x, *resolved_parameters),
+                    dtype=jnp.float64,
+                ).reshape(-1)
+
+            base_steady_state, converged, iterations, residual_norm = _solve_newton_system_jax(
+                guess,
+                residual_fn=residual_fn,
+                jacobian_fn=jax.jacrev(residual_fn),
+                lower_bounds=self._bounds_vector(self.steady_state_names)[0],
+                upper_bounds=self._bounds_vector(self.steady_state_names)[1],
+                tol=tol,
+                max_iter=max_iter,
+                line_search_min_step=line_search_min_step,
+            )
         full = self._expand_to_full_steady_state_jax(base_steady_state)
         return SteadyStateResult(
             steady_state=full,
@@ -1987,6 +2142,24 @@ def resolve_parameter_values(
         steady_state=steady_state,
         tol=tol,
         max_iter=max_iter,
+    )
+
+
+def resolve_parameter_values_jax(
+    model: MacroModel,
+    *,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    tol: float = 1e-12,
+    max_iter: int = 100,
+    line_search_min_step: float = 2.0**-16,
+) -> jax.Array:
+    return model.resolve_parameter_values_jax(
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        tol=tol,
+        max_iter=max_iter,
+        line_search_min_step=line_search_min_step,
     )
 
 

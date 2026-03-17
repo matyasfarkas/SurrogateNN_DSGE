@@ -9,9 +9,11 @@ from surrogatenn_dsge import (
     linear_state_space_from_first_order_solution,
     parse_macro_model,
     resolve_parameter_values,
+    resolve_parameter_values_jax,
     simulate_linear_gaussian_state_space,
     solve_first_order_model,
     solve_steady_state,
+    solve_steady_state_jax,
 )
 
 
@@ -117,6 +119,36 @@ def test_end_target_calibration_syntax_resolves_parameter_from_steady_state() ->
     np.testing.assert_allclose(
         steady_state_result.steady_state,
         jnp.asarray([3.0], dtype=jnp.float64),
+        rtol=0,
+        atol=1e-12,
+    )
+
+
+def test_jax_end_target_calibration_matches_numpy_path() -> None:
+    model = parse_macro_model(END_TARGET_CALIBRATION_SOURCE)
+
+    resolved_jax = resolve_parameter_values_jax(
+        model,
+        steady_state=jnp.asarray([3.0], dtype=jnp.float64),
+    )
+    steady_state_jax = solve_steady_state_jax(model)
+    steady_state_numpy = solve_steady_state(model)
+
+    np.testing.assert_allclose(
+        resolved_jax,
+        resolve_parameter_values(model, steady_state=jnp.asarray([3.0], dtype=jnp.float64)),
+        rtol=0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        steady_state_jax.steady_state,
+        steady_state_numpy.steady_state,
+        rtol=0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        steady_state_jax.parameter_values,
+        steady_state_numpy.parameter_values,
         rtol=0,
         atol=1e-12,
     )
@@ -257,6 +289,42 @@ def test_rbc_calibration_equations_match_julia_fixture() -> None:
         first_order_result.jacobian,
         rtol=1e-9,
         atol=1e-9,
+    )
+
+
+def test_jax_rbc_calibrated_steady_state_matches_numpy_path() -> None:
+    model = parse_macro_model(RBC_CME_CALIBRATION_SOURCE)
+    initial_guess = {
+        "A": 1.0,
+        "Pi": 1.0025,
+        "R": 1.0035,
+        "c": 1.2,
+        "k": 9.4,
+        "y": 1.42,
+        "z_delta": 1.0,
+    }
+
+    jax_result = solve_steady_state_jax(
+        model,
+        initial_guess=initial_guess,
+    )
+    numpy_result = solve_steady_state(
+        model,
+        initial_guess=initial_guess,
+    )
+
+    assert bool(np.asarray(jax_result.converged))
+    np.testing.assert_allclose(
+        jax_result.steady_state,
+        numpy_result.steady_state,
+        rtol=1e-8,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        jax_result.parameter_values,
+        numpy_result.parameter_values,
+        rtol=1e-8,
+        atol=1e-8,
     )
 
 

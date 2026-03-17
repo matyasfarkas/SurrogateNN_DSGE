@@ -3,7 +3,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 from surrogatenn_dsge import (
     parse_macro_model,
@@ -89,11 +88,27 @@ def test_jax_steady_state_solver_is_jittable() -> None:
     )
 
 
-def test_jax_steady_state_solver_rejects_calibration_equations() -> None:
+def test_jax_steady_state_solver_supports_calibration_equations() -> None:
     model = parse_macro_model(CALIBRATION_SOURCE)
+    jax_result = solve_steady_state_jax(
+        model,
+        initial_guess={"x": 2.0},
+    )
+    numpy_result = solve_steady_state(
+        model,
+        initial_guess={"x": 2.0},
+    )
 
-    with pytest.raises(NotImplementedError, match="calibration equations"):
-        solve_steady_state_jax(
-            model,
-            initial_guess={"x": 2.0},
-        )
+    assert bool(np.asarray(jax_result.converged))
+    np.testing.assert_allclose(
+        jax_result.steady_state,
+        numpy_result.steady_state,
+        rtol=0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        jax_result.parameter_values,
+        numpy_result.parameter_values,
+        rtol=0,
+        atol=1e-12,
+    )

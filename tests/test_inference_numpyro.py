@@ -42,6 +42,21 @@ end
 """
 
 
+CALIBRATED_LIKELIHOOD_SOURCE = """
+@model calibrated_loglikelihood begin
+    x[0] = rho * x[-1] + (1 - rho) * mu + eps_x[x]
+end
+
+@parameters calibrated_loglikelihood begin
+    target = theta + 1
+    x[ss] = target | mu
+    theta = 2
+    0 < rho < 1
+    rho = 0.8
+end
+"""
+
+
 def _numpyro_fixture():
     model = parse_macro_model(LIKELIHOOD_SOURCE)
     first_order_result = solve_first_order_model(
@@ -67,6 +82,34 @@ def _numpyro_fixture():
     priors = {
         "rho_a": dist.Uniform(0.05, 0.95),
         "rho_y": dist.Uniform(0.05, 0.95),
+    }
+    return model, first_order_result, observables, levels, priors
+
+
+def _calibrated_numpyro_fixture():
+    model = parse_macro_model(CALIBRATED_LIKELIHOOD_SOURCE)
+    first_order_result = solve_first_order_model(
+        model,
+        steady_state_initial_guess={"x": 3.0},
+    )
+    observables = ("x",)
+    state_space = build_linear_state_space_from_model(
+        model,
+        observables,
+        first_order_result=first_order_result,
+    )
+    simulation = simulate_linear_gaussian_state_space(
+        state_space,
+        key=jax.random.PRNGKey(3),
+        num_periods=12,
+    )
+    steady_lookup = dict(zip(model.timings.var, np.asarray(first_order_result.steady_state)))
+    levels = simulation.observations + np.asarray(
+        [[steady_lookup["x"]]],
+        dtype=np.float64,
+    )
+    priors = {
+        "rho": dist.Uniform(0.05, 0.95),
     }
     return model, first_order_result, observables, levels, priors
 
@@ -289,3 +332,54 @@ def test_jax_wrapper_runs_nuts_with_auto_steady_state() -> None:
 
     assert samples["rho_a"].shape == (4,)
     assert samples["rho_y"].shape == (4,)
+
+
+def test_jax_calibrated_auto_steady_state_loglikelihood_matches_high_level_path() -> None:
+    model, _, observables, levels, _ = _calibrated_numpyro_fixture()
+    parameter_vector = assemble_parameter_vector(
+        model,
+        {"rho": jnp.asarray(0.8, dtype=jnp.float64)},
+    )
+
+    compiled = jax.jit(
+        lambda theta: kalman_loglikelihood_from_model_jax(
+            model,
+            levels,
+            observables=observables,
+            parameter_values=theta,
+            steady_state_initial_guess={"x": 3.0},
+        )
+    )
+    jax_loglikelihood = compiled(parameter_vector)
+    high_level = kalman_loglikelihood_from_model(
+        model,
+        levels,
+        observables=observables,
+        parameter_values=parameter_vector,
+        steady_state_initial_guess={"x": 3.0},
+    )
+
+    np.testing.assert_allclose(
+        jax_loglikelihood,
+        high_level,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_jax_calibrated_wrapper_runs_nuts() -> None:
+    model, _, observables, levels, priors = _calibrated_numpyro_fixture()
+    numpyro_model = build_numpyro_kalman_model_jax(
+        model,
+        levels,
+        priors,
+        observables=observables,
+        steady_state_initial_guess={"x": 3.0},
+    )
+    kernel = NUTS(numpyro_model)
+    mcmc = MCMC(kernel, num_warmup=4, num_samples=4, num_chains=1, progress_bar=False)
+
+    mcmc.run(jax.random.PRNGKey(4))
+    samples = mcmc.get_samples()
+
+    assert samples["rho"].shape == (4,)

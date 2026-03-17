@@ -227,13 +227,6 @@ def kalman_loglikelihood_from_model_jax(
         else jnp.asarray(model._coerce_full_steady_state(steady_state), dtype=jnp.float64)
     )
 
-    if steady_state is None and model.calibrated_parameter_names:
-        raise NotImplementedError(
-            "kalman_loglikelihood_from_model_jax does not yet support automatic "
-            "steady-state/calibration solves for models with calibration equations; "
-            "supply `steady_state` explicitly or use the NumPy-based likelihood path."
-        )
-
     def _loglikelihood_from_full_steady_state(
         full_steady_state: jax.Array,
         parameters: jax.Array,
@@ -425,13 +418,6 @@ def build_numpyro_kalman_model_jax(
     on_failure_loglikelihood: float = -np.inf,
     ):
     numpyro, _, _ = _require_numpyro()
-
-    if steady_state is None and model.calibrated_parameter_names:
-        raise NotImplementedError(
-            "build_numpyro_kalman_model_jax does not yet support automatic "
-            "steady-state/calibration solves for models with calibration equations; "
-            "supply `steady_state` explicitly for now."
-        )
 
     prior_names = tuple(priors)
     if not prior_names:
