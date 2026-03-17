@@ -6,6 +6,7 @@ from typing import NamedTuple, Optional, Sequence, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import lax
 
 from .linalg import solve_discrete_sylvester
 from .statespace import LinearGaussianStateSpace, build_linear_gaussian_state_space
@@ -16,6 +17,16 @@ class QuadraticMatrixEquationResult(NamedTuple):
     converged: bool
     iterations: int
     relative_residual: float
+
+
+class _QuadraticMatrixEquationDoublingState(NamedTuple):
+    e_matrix: jax.Array
+    f_matrix: jax.Array
+    x_matrix: jax.Array
+    y_matrix: jax.Array
+    converged: jax.Array
+    failed: jax.Array
+    iterations: jax.Array
 
 
 class FirstOrderDSGEResult(NamedTuple):
@@ -550,6 +561,131 @@ def solve_quadratic_matrix_equation_doubling(
     )
 
 
+def solve_quadratic_matrix_equation_doubling_jax(
+    a: Union[jax.Array, np.ndarray],
+    b: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+    *,
+    initial_guess: Optional[Union[jax.Array, np.ndarray]] = None,
+    tol: float = 1e-14,
+    acceptance_tol: float = 1e-8,
+    max_iter: int = 100,
+) -> QuadraticMatrixEquationResult:
+    a_arr = jnp.asarray(a, dtype=jnp.float64)
+    b_arr = jnp.asarray(b, dtype=jnp.float64)
+    c_arr = jnp.asarray(c, dtype=jnp.float64)
+    if a_arr.ndim != 2 or b_arr.ndim != 2 or c_arr.ndim != 2:
+        raise ValueError("A, B, and C must be rank-2 matrices.")
+    if a_arr.shape[0] != a_arr.shape[1] or b_arr.shape[0] != b_arr.shape[1]:
+        raise ValueError("A and B must be square.")
+    if a_arr.shape != b_arr.shape or a_arr.shape != c_arr.shape:
+        raise ValueError("A, B, and C must have identical shapes.")
+
+    if initial_guess is None:
+        guess = jnp.zeros_like(a_arr)
+        guess_provided = False
+    else:
+        guess = jnp.asarray(initial_guess, dtype=a_arr.dtype)
+        if guess.shape != a_arr.shape:
+            raise ValueError(
+                f"initial_guess must match A's shape, got {guess.shape} and {a_arr.shape}."
+            )
+        guess_provided = True
+
+    tol_arr = jnp.asarray(tol, dtype=a_arr.dtype)
+    acceptance_tol_arr = jnp.asarray(acceptance_tol, dtype=a_arr.dtype)
+    guess_provided_arr = jnp.asarray(guess_provided)
+    identity = jnp.eye(a_arr.shape[0], dtype=a_arr.dtype)
+
+    b_bar = a_arr @ guess + b_arr
+    e_matrix = jnp.linalg.solve(b_bar, c_arr)
+    f_matrix = jnp.linalg.solve(b_bar, a_arr)
+    x_matrix = -e_matrix - guess
+    y_matrix = -f_matrix
+    initial_failed = ~(
+        jnp.all(jnp.isfinite(e_matrix))
+        & jnp.all(jnp.isfinite(f_matrix))
+        & jnp.all(jnp.isfinite(x_matrix))
+        & jnp.all(jnp.isfinite(y_matrix))
+    )
+
+    def step(
+        iteration: int,
+        state: _QuadraticMatrixEquationDoublingState,
+    ) -> _QuadraticMatrixEquationDoublingState:
+        def _active(current_state: _QuadraticMatrixEquationDoublingState) -> _QuadraticMatrixEquationDoublingState:
+            ei = identity - current_state.y_matrix @ current_state.x_matrix
+            fi = identity - current_state.x_matrix @ current_state.y_matrix
+            e_new = current_state.e_matrix @ jnp.linalg.solve(ei, current_state.e_matrix)
+            f_new = current_state.f_matrix @ jnp.linalg.solve(fi, current_state.f_matrix)
+            x_increment = current_state.f_matrix @ jnp.linalg.solve(
+                fi,
+                current_state.x_matrix @ current_state.e_matrix,
+            )
+            y_increment = current_state.e_matrix @ jnp.linalg.solve(
+                ei,
+                current_state.y_matrix @ current_state.f_matrix,
+            )
+            x_new = current_state.x_matrix + x_increment
+            y_new = current_state.y_matrix + y_increment
+            finite_step = (
+                jnp.all(jnp.isfinite(e_new))
+                & jnp.all(jnp.isfinite(f_new))
+                & jnp.all(jnp.isfinite(x_increment))
+                & jnp.all(jnp.isfinite(y_increment))
+                & jnp.all(jnp.isfinite(x_new))
+                & jnp.all(jnp.isfinite(y_new))
+            )
+            converged_now = (
+                ((iteration + 1 > 5) | guess_provided_arr)
+                & (jnp.linalg.norm(x_increment) < tol_arr)
+                & finite_step
+            )
+            return _QuadraticMatrixEquationDoublingState(
+                e_matrix=jnp.where(finite_step, e_new, current_state.e_matrix),
+                f_matrix=jnp.where(finite_step, f_new, current_state.f_matrix),
+                x_matrix=jnp.where(finite_step, x_new, current_state.x_matrix),
+                y_matrix=jnp.where(finite_step, y_new, current_state.y_matrix),
+                converged=converged_now,
+                failed=current_state.failed | (~finite_step),
+                iterations=jnp.asarray(iteration + 1),
+            )
+
+        return lax.cond(
+            state.converged | state.failed,
+            lambda current_state: current_state,
+            _active,
+            state,
+        )
+
+    initial_state = _QuadraticMatrixEquationDoublingState(
+        e_matrix=e_matrix,
+        f_matrix=f_matrix,
+        x_matrix=x_matrix,
+        y_matrix=y_matrix,
+        converged=jnp.asarray(False),
+        failed=initial_failed,
+        iterations=jnp.asarray(0),
+    )
+    final_state = lax.fori_loop(0, max_iter, step, initial_state)
+    solution = final_state.x_matrix + guess
+    relative_residual = quadratic_matrix_equation_residual(
+        a_arr,
+        solution,
+        b_arr,
+        c_arr,
+    )
+    converged = (~final_state.failed) & (
+        final_state.converged | (relative_residual < acceptance_tol_arr)
+    )
+    return QuadraticMatrixEquationResult(
+        solution=solution,
+        converged=converged,
+        iterations=final_state.iterations,
+        relative_residual=relative_residual,
+    )
+
+
 def solve_first_order_dsge_solution(
     jacobian: Union[jax.Array, np.ndarray],
     timings: DSGETimings,
@@ -670,6 +806,136 @@ def solve_first_order_dsge_solution(
         converged=True,
         state_transition=transition,
         shock_impact=exogenous,
+    )
+
+
+def solve_first_order_dsge_solution_jax(
+    jacobian: Union[jax.Array, np.ndarray],
+    timings: DSGETimings,
+    *,
+    qme_initial_guess: Optional[Union[jax.Array, np.ndarray]] = None,
+    qme_tol: float = 1e-14,
+    qme_acceptance_tol: float = 1e-8,
+) -> FirstOrderDSGEResult:
+    grad = jnp.asarray(jacobian, dtype=jnp.float64)
+    if grad.ndim != 2:
+        raise ValueError(f"jacobian must be rank-2, got shape {grad.shape}.")
+
+    dyn_index = np.arange(timings.nPresent_only, timings.nVars)
+    reverse_dynamic_order = _indexin(
+        timings.past_not_future_idx + timings.future_not_past_and_mixed_idx,
+        timings.present_but_not_only_idx,
+    )
+    comb = tuple(
+        sorted(
+            set(timings.future_not_past_and_mixed_idx)
+            | set(timings.past_not_future_idx)
+        )
+    )
+    future_in_comb = _indexin(timings.future_not_past_and_mixed_idx, comb)
+    past_in_comb = _indexin(timings.past_not_future_and_mixed_idx, comb)
+    selector = jnp.eye(len(comb), dtype=grad.dtype)
+
+    n_future = timings.nFuture_not_past_and_mixed
+    n_vars = timings.nVars
+    n_past = timings.nPast_not_future_and_mixed
+
+    grad_plus = grad[:, :n_future]
+    grad_zero = grad[:, n_future : n_future + n_vars]
+    grad_minus = grad[:, n_future + n_vars : n_future + n_vars + n_past]
+    grad_exo = grad[:, n_future + n_vars + n_past :]
+
+    q_complete = jnp.linalg.qr(
+        grad_zero[:, timings.present_only_idx],
+        mode="complete",
+    )[0]
+    a_plus = q_complete.T @ grad_plus
+    a_zero = q_complete.T @ grad_zero
+    a_minus = q_complete.T @ grad_minus
+
+    a_tilde_plus = a_plus[dyn_index] @ selector[list(future_in_comb), :]
+    a_tilde_zero = a_zero[dyn_index][:, comb]
+    a_tilde_minus = a_minus[dyn_index] @ selector[list(past_in_comb), :]
+
+    qme_result = solve_quadratic_matrix_equation_doubling_jax(
+        a_tilde_plus,
+        a_tilde_zero,
+        a_tilde_minus,
+        initial_guess=qme_initial_guess,
+        tol=qme_tol,
+        acceptance_tol=qme_acceptance_tol,
+    )
+
+    reverse_dynamic_order_idx = jnp.asarray(reverse_dynamic_order, dtype=jnp.int32)
+    past_in_comb_idx = jnp.asarray(past_in_comb, dtype=jnp.int32)
+    past_not_future_and_mixed_idx = jnp.asarray(
+        _indexin(timings.past_not_future_and_mixed_idx, timings.present_but_not_only_idx),
+        dtype=jnp.int32,
+    )
+    reorder_idx = jnp.asarray(timings.reorder, dtype=jnp.int32)
+    future_idx = jnp.asarray(timings.future_not_past_and_mixed_idx, dtype=jnp.int32)
+    state_idx = jnp.asarray(timings.past_not_future_and_mixed_idx, dtype=jnp.int32)
+    empty = jnp.zeros(
+        (timings.nVars, timings.nPast_not_future_and_mixed + timings.nExo),
+        dtype=grad.dtype,
+    )
+
+    def _failed_result(qme_solution: jax.Array) -> FirstOrderDSGEResult:
+        return FirstOrderDSGEResult(
+            solution_matrix=empty,
+            qme_solution=qme_solution,
+            converged=jnp.asarray(False),
+            state_transition=empty[:, : timings.nPast_not_future_and_mixed],
+            shock_impact=empty[:, timings.nPast_not_future_and_mixed :],
+        )
+
+    def _successful_result(qme_solution: jax.Array) -> FirstOrderDSGEResult:
+        sol_compact = qme_solution[reverse_dynamic_order_idx][:, past_in_comb_idx]
+
+        if timings.nFuture_not_past_and_mixed > 0:
+            d_block = sol_compact[-timings.nFuture_not_past_and_mixed :, :]
+        else:
+            d_block = jnp.zeros((0, sol_compact.shape[1]), dtype=sol_compact.dtype)
+
+        l_block = qme_solution[past_not_future_and_mixed_idx][:, past_in_comb_idx]
+
+        a_bar_zero_u = a_zero[: timings.nPresent_only][:, timings.present_only_idx]
+        a_plus_u = a_plus[: timings.nPresent_only]
+        a_tilde_zero_u = a_zero[: timings.nPresent_only][:, timings.present_but_not_only_idx]
+        a_minus_u = a_minus[: timings.nPresent_only]
+
+        if timings.nPresent_only > 0:
+            rhs = a_tilde_zero_u @ qme_solution[:, past_in_comb_idx]
+            if timings.nFuture_not_past_and_mixed > 0:
+                rhs = rhs + a_plus_u @ d_block @ l_block
+            rhs = rhs + a_minus_u
+            upper_block = -jnp.linalg.solve(a_bar_zero_u, rhs)
+        else:
+            upper_block = jnp.zeros((0, n_past), dtype=qme_solution.dtype)
+
+        transition = jnp.vstack([upper_block, sol_compact])[reorder_idx]
+        selector_matrix = jnp.eye(timings.nVars, dtype=transition.dtype)[state_idx, :]
+        if timings.nFuture_not_past_and_mixed > 0:
+            m_matrix = transition[future_idx, :] @ selector_matrix
+        else:
+            m_matrix = jnp.zeros((0, timings.nVars), dtype=transition.dtype)
+
+        current_block = grad_zero + grad_plus @ m_matrix
+        exogenous = -jnp.linalg.solve(current_block, grad_exo)
+        solution_matrix = jnp.concatenate([transition, exogenous], axis=1)
+        return FirstOrderDSGEResult(
+            solution_matrix=solution_matrix,
+            qme_solution=qme_solution,
+            converged=jnp.asarray(True),
+            state_transition=transition,
+            shock_impact=exogenous,
+        )
+
+    return lax.cond(
+        qme_result.converged,
+        _successful_result,
+        _failed_result,
+        qme_result.solution,
     )
 
 

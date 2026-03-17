@@ -331,6 +331,19 @@ Python/JAX status:
 - `pyproject.toml` now exposes an `inference` extra for `numpyro`, and the dev extra includes that dependency so the integration tests are reproducible
 - tests verify subset parameter assembly, NumPyro log-density parity against manual prior-plus-likelihood calculations, deterministic sites for the assembled parameter vector and loglikelihood, and the explicit fast-fail behavior for compiled kernels
 
+### 22. Fixed-steady-state compiled JAX first-order estimation path
+
+Julia reference:
+
+- this is a Python/JAX bridge around the existing first-order perturbation and Kalman stack rather than a direct one-to-one Julia API surface
+
+Python/JAX status:
+
+- the port now includes a traceable quadratic matrix equation doubling solver and a JAX-first-order solution path for compiled use
+- parsed models can now evaluate a first-order Kalman loglikelihood entirely in JAX when the steady state is supplied explicitly, avoiding the current NumPy/SymPy steady-state and calibration bottleneck
+- a dedicated NumPyro wrapper now supports compiled kernels like `NUTS` on that fixed-steady-state first-order path, while preserving the older concrete-only wrapper for the general parsed-model likelihood
+- tests verify JIT parity for the new first-order solver, fixed-steady-state JAX likelihood parity against the existing parsed-model likelihood, NumPyro log-density parity, and an actual compiled `NUTS` run
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -342,7 +355,7 @@ Python/JAX status:
 - The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
-- The parsed-model structural likelihood is not yet pure-JAX end to end, so compiled NumPyro kernels like `NUTS`, `HMC`, `SA`, or `AIES` cannot yet run structural estimation on the parsed model path.
+- The parsed-model structural likelihood is still not pure-JAX end to end once automatic steady-state or calibration solves are required; compiled NumPyro kernels are currently available only on the fixed-steady-state first-order path.
 - The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, and the parsed full-tree SEP path.

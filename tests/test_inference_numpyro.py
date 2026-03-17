@@ -6,15 +6,18 @@ import numpy as np
 import numpyro
 import numpyro.distributions as dist
 from numpyro import handlers
-from numpyro.infer import MCMC, SA
+from numpyro.infer import MCMC, NUTS, SA
 import pytest
 
 from surrogatenn_dsge import (
     assemble_parameter_vector,
     build_linear_state_space_from_model,
     build_numpyro_kalman_model,
+    build_numpyro_kalman_model_jax,
     evaluate_numpyro_kalman_log_density,
+    evaluate_numpyro_kalman_log_density_jax,
     kalman_loglikelihood_from_model,
+    kalman_loglikelihood_from_model_jax,
     parse_macro_model,
     simulate_linear_gaussian_state_space,
     solve_first_order_model,
@@ -119,6 +122,75 @@ def test_numpyro_log_density_matches_manual_prior_plus_likelihood() -> None:
     )
 
 
+def test_jax_fixed_steady_state_loglikelihood_matches_high_level_path() -> None:
+    model, first_order_result, observables, levels, _ = _numpyro_fixture()
+    parameter_vector = assemble_parameter_vector(
+        model,
+        {"rho_a": jnp.asarray(0.8, dtype=jnp.float64), "rho_y": jnp.asarray(0.6, dtype=jnp.float64)},
+    )
+
+    compiled = jax.jit(
+        lambda theta: kalman_loglikelihood_from_model_jax(
+            model,
+            levels,
+            observables=observables,
+            parameter_values=theta,
+            steady_state=first_order_result.steady_state,
+        )
+    )
+    jax_loglikelihood = compiled(parameter_vector)
+    high_level = kalman_loglikelihood_from_model(
+        model,
+        levels,
+        observables=observables,
+        parameter_values=parameter_vector,
+        steady_state=first_order_result.steady_state,
+    )
+
+    np.testing.assert_allclose(
+        jax_loglikelihood,
+        high_level,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_jax_numpyro_log_density_matches_manual_prior_plus_likelihood() -> None:
+    model, first_order_result, observables, levels, priors = _numpyro_fixture()
+    parameter_samples = {
+        "rho_a": jnp.asarray(0.8, dtype=jnp.float64),
+        "rho_y": jnp.asarray(0.6, dtype=jnp.float64),
+    }
+
+    log_density = evaluate_numpyro_kalman_log_density_jax(
+        model,
+        levels,
+        priors,
+        parameter_samples,
+        observables=observables,
+        steady_state=first_order_result.steady_state,
+    )
+    parameter_vector = assemble_parameter_vector(model, parameter_samples)
+    manual_log_density = (
+        priors["rho_a"].log_prob(parameter_samples["rho_a"])
+        + priors["rho_y"].log_prob(parameter_samples["rho_y"])
+        + kalman_loglikelihood_from_model_jax(
+            model,
+            levels,
+            observables=observables,
+            parameter_values=parameter_vector,
+            steady_state=first_order_result.steady_state,
+        )
+    )
+
+    np.testing.assert_allclose(
+        log_density,
+        manual_log_density,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
 def test_numpyro_model_records_parameter_vector_and_loglikelihood() -> None:
     model, _, observables, levels, priors = _numpyro_fixture()
     parameter_samples = {
@@ -165,3 +237,22 @@ def test_numpyro_wrapper_fails_fast_for_compiled_structural_kernels() -> None:
 
     with pytest.raises(NotImplementedError, match="not yet JAX-traceable"):
         mcmc.run(jax.random.PRNGKey(1))
+
+
+def test_jax_fixed_steady_state_wrapper_runs_nuts() -> None:
+    model, first_order_result, observables, levels, priors = _numpyro_fixture()
+    numpyro_model = build_numpyro_kalman_model_jax(
+        model,
+        levels,
+        priors,
+        observables=observables,
+        steady_state=first_order_result.steady_state,
+    )
+    kernel = NUTS(numpyro_model)
+    mcmc = MCMC(kernel, num_warmup=4, num_samples=4, num_chains=1, progress_bar=False)
+
+    mcmc.run(jax.random.PRNGKey(2))
+    samples = mcmc.get_samples()
+
+    assert samples["rho_a"].shape == (4,)
+    assert samples["rho_y"].shape == (4,)

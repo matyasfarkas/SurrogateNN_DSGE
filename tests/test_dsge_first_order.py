@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -9,7 +10,9 @@ from surrogatenn_dsge import (
     linear_state_space_from_first_order_solution,
     simulate_linear_gaussian_state_space,
     solve_first_order_dsge_solution,
+    solve_first_order_dsge_solution_jax,
     solve_quadratic_matrix_equation_doubling,
+    solve_quadratic_matrix_equation_doubling_jax,
 )
 
 
@@ -112,6 +115,19 @@ def test_quadratic_matrix_equation_solver_converges_on_scalar_case() -> None:
     np.testing.assert_allclose(result.solution, jnp.array([[1.0]]), rtol=1e-8, atol=1e-8)
 
 
+def test_jax_quadratic_matrix_equation_solver_is_jittable() -> None:
+    compiled = jax.jit(solve_quadratic_matrix_equation_doubling_jax)
+    result = compiled(
+        jnp.array([[1.0]]),
+        jnp.array([[-3.0]]),
+        jnp.array([[2.0]]),
+        initial_guess=jnp.array([[0.1]]),
+    )
+
+    assert bool(np.asarray(result.converged))
+    np.testing.assert_allclose(result.solution, jnp.array([[1.0]]), rtol=1e-8, atol=1e-8)
+
+
 def test_first_order_solution_matches_julia_fixture() -> None:
     timings, jacobian, expected_solution = _rbc_cme_fixture()
 
@@ -123,6 +139,30 @@ def test_first_order_solution_matches_julia_fixture() -> None:
         expected_solution,
         rtol=1e-6,
         atol=1e-6,
+    )
+
+
+def test_jax_first_order_solution_matches_existing_solver() -> None:
+    timings, jacobian, expected_solution = _rbc_cme_fixture()
+    compiled = jax.jit(
+        solve_first_order_dsge_solution_jax,
+        static_argnames=("timings",),
+    )
+
+    result = compiled(jacobian, timings)
+
+    assert bool(np.asarray(result.converged))
+    np.testing.assert_allclose(
+        result.solution_matrix,
+        expected_solution,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        result.solution_matrix,
+        solve_first_order_dsge_solution(jacobian, timings).solution_matrix,
+        rtol=1e-8,
+        atol=1e-8,
     )
 
 
