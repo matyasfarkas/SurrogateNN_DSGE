@@ -71,10 +71,12 @@ Julia reference:
 Python/JAX status:
 
 - `solve_quadratic_matrix_equation_doubling` implemented
+- `solve_quadratic_matrix_equation_schur` implemented with the same companion-pencil generalized Schur / ordered-QZ construction as the Julia `:schur` path
+- `solve_quadratic_matrix_equation_schur_jax` implemented with an implicit reverse-mode pullback, so JAX can differentiate the Schur-selected solution even though the primal ordered-QZ solve currently runs through SciPy
 - `DSGETimings` implemented for low-level timing metadata
-- `solve_first_order_dsge_solution` implemented
+- `solve_first_order_dsge_solution` implemented with `qme_algorithm="doubling"` and `qme_algorithm="schur"` options
 - `linear_state_space_from_first_order_solution` implemented to connect first-order solutions to the Kalman layer
-- tests include the Julia `RBC_CME` Jacobian/timing fixture and verify the resulting solution matrix against upstream reference values
+- tests include the Julia `RBC_CME` Jacobian/timing fixture and verify the resulting solution matrix against upstream reference values, Schur-vs-doubling parity, JIT coverage for the Schur first-order path, and reverse-mode autodiff through the Schur QME solution
 
 ### 5. Generic stochastic extended path core
 
@@ -462,7 +464,7 @@ Python/JAX status:
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
 - The Julia `:bartels_stewart`, `:bicgstab`, `:dqgmres`, and `:gmres` Sylvester variants are not ported yet.
-- The Julia QME `:schur` variant is not ported yet; the Python port currently uses the doubling solver.
+- The Julia QME `:schur` variant is now ported, but the JAX-facing primal solve is not fully GPU-native yet; until JAX exposes generalized `qz` / `ordqz`, the ordered-QZ step runs through SciPy on the host and only the reverse-mode derivative is native JAX.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.

@@ -13,6 +13,8 @@ from surrogatenn_dsge import (
     solve_first_order_dsge_solution_jax,
     solve_quadratic_matrix_equation_doubling,
     solve_quadratic_matrix_equation_doubling_jax,
+    solve_quadratic_matrix_equation_schur,
+    solve_quadratic_matrix_equation_schur_jax,
 )
 
 
@@ -103,6 +105,47 @@ def _rbc_cme_fixture():
     return timings, jacobian, expected_solution
 
 
+def _indexin(values, reference):
+    ref_map = {value: idx for idx, value in enumerate(reference)}
+    return tuple(ref_map[value] for value in values)
+
+
+def _rbc_cme_qme_fixture():
+    timings, jacobian, _ = _rbc_cme_fixture()
+    grad = jnp.asarray(jacobian, dtype=jnp.float64)
+    dyn_index = np.arange(timings.nPresent_only, timings.nVars)
+    comb = tuple(
+        sorted(
+            set(timings.future_not_past_and_mixed_idx)
+            | set(timings.past_not_future_idx)
+        )
+    )
+    future_in_comb = _indexin(timings.future_not_past_and_mixed_idx, comb)
+    past_in_comb = _indexin(timings.past_not_future_and_mixed_idx, comb)
+    selector = jnp.eye(len(comb), dtype=grad.dtype)
+
+    n_future = timings.nFuture_not_past_and_mixed
+    n_vars = timings.nVars
+    n_past = timings.nPast_not_future_and_mixed
+
+    grad_plus = grad[:, :n_future]
+    grad_zero = grad[:, n_future : n_future + n_vars]
+    grad_minus = grad[:, n_future + n_vars : n_future + n_vars + n_past]
+
+    q_complete = jnp.linalg.qr(
+        grad_zero[:, timings.present_only_idx],
+        mode="complete",
+    )[0]
+    a_plus = q_complete.T @ grad_plus
+    a_zero = q_complete.T @ grad_zero
+    a_minus = q_complete.T @ grad_minus
+
+    a_tilde_plus = a_plus[dyn_index] @ selector[list(future_in_comb), :]
+    a_tilde_zero = a_zero[dyn_index][:, comb]
+    a_tilde_minus = a_minus[dyn_index] @ selector[list(past_in_comb), :]
+    return timings, a_tilde_plus, a_tilde_zero, a_tilde_minus
+
+
 def test_quadratic_matrix_equation_solver_converges_on_scalar_case() -> None:
     result = solve_quadratic_matrix_equation_doubling(
         jnp.array([[1.0]]),
@@ -128,10 +171,83 @@ def test_jax_quadratic_matrix_equation_solver_is_jittable() -> None:
     np.testing.assert_allclose(result.solution, jnp.array([[1.0]]), rtol=1e-8, atol=1e-8)
 
 
+def test_quadratic_matrix_equation_schur_matches_doubling_on_rbc_fixture() -> None:
+    timings, a_tilde_plus, a_tilde_zero, a_tilde_minus = _rbc_cme_qme_fixture()
+
+    schur_result = solve_quadratic_matrix_equation_schur(
+        a_tilde_plus,
+        a_tilde_zero,
+        a_tilde_minus,
+        timings,
+    )
+    doubling_result = solve_quadratic_matrix_equation_doubling(
+        a_tilde_plus,
+        a_tilde_zero,
+        a_tilde_minus,
+    )
+
+    assert schur_result.converged
+    np.testing.assert_allclose(
+        schur_result.solution,
+        doubling_result.solution,
+        rtol=1e-8,
+        atol=1e-8,
+    )
+
+
+def test_jax_schur_quadratic_matrix_equation_supports_reverse_mode_autodiff() -> None:
+    timings, a_tilde_plus, a_tilde_zero, a_tilde_minus = _rbc_cme_qme_fixture()
+    compiled_grad = jax.jit(
+        jax.grad(
+            lambda shift: jnp.sum(
+                solve_quadratic_matrix_equation_schur_jax(
+                    a_tilde_plus,
+                    a_tilde_zero.at[0, 0].add(shift),
+                    a_tilde_minus,
+                    timings,
+                ).solution
+                ** 2
+            )
+        )
+    )
+    epsilon = 1e-6
+    autodiff_grad = float(np.asarray(compiled_grad(0.0)))
+
+    def objective(shift: float) -> float:
+        result = solve_quadratic_matrix_equation_schur(
+            a_tilde_plus,
+            a_tilde_zero.at[0, 0].add(shift),
+            a_tilde_minus,
+            timings,
+        )
+        return float(np.asarray(jnp.sum(result.solution ** 2)))
+
+    finite_difference = (objective(epsilon) - objective(-epsilon)) / (2.0 * epsilon)
+    np.testing.assert_allclose(autodiff_grad, finite_difference, rtol=5e-5, atol=5e-6)
+
+
 def test_first_order_solution_matches_julia_fixture() -> None:
     timings, jacobian, expected_solution = _rbc_cme_fixture()
 
     result = solve_first_order_dsge_solution(jacobian, timings)
+
+    assert result.converged
+    np.testing.assert_allclose(
+        result.solution_matrix,
+        expected_solution,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+def test_first_order_solution_schur_matches_julia_fixture() -> None:
+    timings, jacobian, expected_solution = _rbc_cme_fixture()
+
+    result = solve_first_order_dsge_solution(
+        jacobian,
+        timings,
+        qme_algorithm="schur",
+    )
 
     assert result.converged
     np.testing.assert_allclose(
@@ -161,6 +277,38 @@ def test_jax_first_order_solution_matches_existing_solver() -> None:
     np.testing.assert_allclose(
         result.solution_matrix,
         solve_first_order_dsge_solution(jacobian, timings).solution_matrix,
+        rtol=1e-8,
+        atol=1e-8,
+    )
+
+
+def test_jax_first_order_solution_schur_matches_existing_solver() -> None:
+    timings, jacobian, expected_solution = _rbc_cme_fixture()
+    compiled = jax.jit(
+        solve_first_order_dsge_solution_jax,
+        static_argnames=("timings", "qme_algorithm"),
+    )
+
+    result = compiled(
+        jacobian,
+        timings,
+        qme_algorithm="schur",
+    )
+
+    assert bool(np.asarray(result.converged))
+    np.testing.assert_allclose(
+        result.solution_matrix,
+        expected_solution,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        result.solution_matrix,
+        solve_first_order_dsge_solution(
+            jacobian,
+            timings,
+            qme_algorithm="schur",
+        ).solution_matrix,
         rtol=1e-8,
         atol=1e-8,
     )

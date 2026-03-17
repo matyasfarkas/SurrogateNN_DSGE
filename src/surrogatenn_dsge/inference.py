@@ -196,6 +196,7 @@ def kalman_loglikelihood_from_model_jax(
     presample_periods: int = 0,
     jitter: float = 1e-9,
     on_failure_loglikelihood: float = -np.inf,
+    qme_algorithm: str = "doubling",
 ) -> jax.Array:
     observable_names, observation_data = model._coerce_observations(
         observations,
@@ -269,6 +270,7 @@ def kalman_loglikelihood_from_model_jax(
         first_order_result = solve_first_order_dsge_solution_jax(
             jacobian,
             model.timings,
+            qme_algorithm=qme_algorithm,
         )
 
         def _success(result) -> jax.Array:
@@ -416,7 +418,8 @@ def build_numpyro_kalman_model_jax(
     presample_periods: int = 0,
     jitter: float = 1e-9,
     on_failure_loglikelihood: float = -np.inf,
-    ):
+    qme_algorithm: str = "doubling",
+):
     numpyro, _, _ = _require_numpyro()
 
     prior_names = tuple(priors)
@@ -456,6 +459,7 @@ def build_numpyro_kalman_model_jax(
             presample_periods=presample_periods,
             jitter=jitter,
             on_failure_loglikelihood=on_failure_loglikelihood,
+            qme_algorithm=qme_algorithm,
         )
         numpyro.deterministic("parameter_vector", parameter_vector)
         numpyro.deterministic("loglikelihood", loglikelihood)
@@ -523,6 +527,7 @@ def evaluate_numpyro_kalman_log_density_jax(
     presample_periods: int = 0,
     jitter: float = 1e-9,
     on_failure_loglikelihood: float = -np.inf,
+    qme_algorithm: str = "doubling",
 ) -> jax.Array:
     _, _, log_density = _require_numpyro()
     numpyro_model = build_numpyro_kalman_model_jax(
@@ -541,6 +546,7 @@ def evaluate_numpyro_kalman_log_density_jax(
         presample_periods=presample_periods,
         jitter=jitter,
         on_failure_loglikelihood=on_failure_loglikelihood,
+        qme_algorithm=qme_algorithm,
     )
     log_joint, _ = log_density(numpyro_model, (), {}, parameter_samples)
     return jnp.asarray(log_joint, dtype=jnp.float64)

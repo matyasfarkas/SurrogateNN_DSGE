@@ -2743,6 +2743,7 @@ class MacroModel:
         steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
         steady_state_tol: float = 1e-12,
         steady_state_max_iter: int = 100,
+        qme_algorithm: str = "doubling",
     ) -> ParsedModelFirstOrderResult:
         if len(self._dynamic_expressions) != self.timings.nVars:
             raise ValueError(
@@ -2775,7 +2776,11 @@ class MacroModel:
             parameter_values=resolved_parameters,
             steady_state=full_steady_state,
         )
-        solution = solve_first_order_dsge_solution(jacobian, self.timings)
+        solution = solve_first_order_dsge_solution(
+            jacobian,
+            self.timings,
+            qme_algorithm=qme_algorithm,
+        )
         return ParsedModelFirstOrderResult(
             steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
             parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
@@ -2791,6 +2796,7 @@ class MacroModel:
         steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
         steady_state_tol: float = 1e-12,
         steady_state_max_iter: int = 100,
+        qme_algorithm: str = "doubling",
         pruning: bool = False,
         sylvester_algorithm: str = "doubling",
         sylvester_tol: float = 1e-14,
@@ -2834,7 +2840,11 @@ class MacroModel:
             parameter_values=resolved_parameters,
             steady_state=full_steady_state,
         )
-        first_order_solution = solve_first_order_dsge_solution(jacobian, self.timings)
+        first_order_solution = solve_first_order_dsge_solution(
+            jacobian,
+            self.timings,
+            qme_algorithm=qme_algorithm,
+        )
         second_order_solution = solve_second_order_dsge_solution(
             jacobian,
             hessian,
@@ -2871,6 +2881,7 @@ class MacroModel:
         steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
         steady_state_tol: float = 1e-12,
         steady_state_max_iter: int = 100,
+        qme_algorithm: str = "doubling",
         pruning: bool = False,
         sylvester_algorithm: str = "doubling",
         sylvester_tol: float = 1e-14,
@@ -2918,7 +2929,11 @@ class MacroModel:
             parameter_values=resolved_parameters,
             steady_state=full_steady_state,
         )
-        first_order_solution = solve_first_order_dsge_solution(jacobian, self.timings)
+        first_order_solution = solve_first_order_dsge_solution(
+            jacobian,
+            self.timings,
+            qme_algorithm=qme_algorithm,
+        )
         second_order_solution = solve_second_order_dsge_solution(
             jacobian,
             hessian,
@@ -3861,6 +3876,7 @@ def solve_first_order_model(
     steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
     steady_state_tol: float = 1e-12,
     steady_state_max_iter: int = 100,
+    qme_algorithm: str = "doubling",
 ) -> ParsedModelFirstOrderResult:
     return model.solve_first_order(
         parameter_values=parameter_values,
@@ -3868,6 +3884,7 @@ def solve_first_order_model(
         steady_state_initial_guess=steady_state_initial_guess,
         steady_state_tol=steady_state_tol,
         steady_state_max_iter=steady_state_max_iter,
+        qme_algorithm=qme_algorithm,
     )
 
 
@@ -3909,6 +3926,7 @@ def solve_second_order_model(
     steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
     steady_state_tol: float = 1e-12,
     steady_state_max_iter: int = 100,
+    qme_algorithm: str = "doubling",
     pruning: bool = False,
     sylvester_algorithm: str = "doubling",
     sylvester_tol: float = 1e-14,
@@ -3923,6 +3941,7 @@ def solve_second_order_model(
         steady_state_initial_guess=steady_state_initial_guess,
         steady_state_tol=steady_state_tol,
         steady_state_max_iter=steady_state_max_iter,
+        qme_algorithm=qme_algorithm,
         pruning=pruning,
         sylvester_algorithm=sylvester_algorithm,
         sylvester_tol=sylvester_tol,
@@ -3941,6 +3960,7 @@ def solve_third_order_model(
     steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
     steady_state_tol: float = 1e-12,
     steady_state_max_iter: int = 100,
+    qme_algorithm: str = "doubling",
     pruning: bool = False,
     sylvester_algorithm: str = "doubling",
     sylvester_tol: float = 1e-14,
@@ -3955,6 +3975,7 @@ def solve_third_order_model(
         steady_state_initial_guess=steady_state_initial_guess,
         steady_state_tol=steady_state_tol,
         steady_state_max_iter=steady_state_max_iter,
+        qme_algorithm=qme_algorithm,
         pruning=pruning,
         sylvester_algorithm=sylvester_algorithm,
         sylvester_tol=sylvester_tol,

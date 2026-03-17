@@ -198,6 +198,46 @@ def test_jax_fixed_steady_state_loglikelihood_matches_high_level_path() -> None:
     )
 
 
+def test_jax_schur_fixed_steady_state_loglikelihood_matches_high_level_path() -> None:
+    model, _, observables, levels, _ = _numpyro_fixture()
+    first_order_result = solve_first_order_model(
+        model,
+        steady_state_initial_guess={"a": 1.5, "y": 2.0},
+        qme_algorithm="schur",
+    )
+    parameter_vector = assemble_parameter_vector(
+        model,
+        {"rho_a": jnp.asarray(0.8, dtype=jnp.float64), "rho_y": jnp.asarray(0.6, dtype=jnp.float64)},
+    )
+
+    compiled = jax.jit(
+        lambda theta: kalman_loglikelihood_from_model_jax(
+            model,
+            levels,
+            observables=observables,
+            parameter_values=theta,
+            steady_state=first_order_result.steady_state,
+            qme_algorithm="schur",
+        )
+    )
+    jax_loglikelihood = compiled(parameter_vector)
+    high_level = kalman_loglikelihood_from_model(
+        model,
+        levels,
+        observables=observables,
+        first_order_result=first_order_result,
+        parameter_values=parameter_vector,
+        steady_state=first_order_result.steady_state,
+    )
+
+    np.testing.assert_allclose(
+        jax_loglikelihood,
+        high_level,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
 def test_jax_auto_steady_state_loglikelihood_matches_high_level_path() -> None:
     model, _, observables, levels, _ = _numpyro_fixture()
     parameter_vector = assemble_parameter_vector(
