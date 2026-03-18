@@ -128,6 +128,7 @@ def test_obc_model_sep_enforces_max_constraint_along_path() -> None:
     )
 
     assert result.solution.converged
+    assert result.solution.jacobian_method == "finite_difference"
     r_index = model.timings.var.index("r")
     r_path = np.asarray(result.solution.mean_path[r_index, 1:], dtype=np.float64)
     assert np.all(r_path >= 1.0 - 1e-8)

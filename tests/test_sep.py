@@ -371,6 +371,51 @@ def test_sep_hmc_parallel_tempering_runs() -> None:
     assert np.all(np.isfinite(solution.mean_path))
 
 
+def test_sep_finite_difference_jacobian_matches_autodiff_on_smooth_model() -> None:
+    deterministic_shocks = jnp.asarray([[0.2], [0.0], [0.0]], dtype=jnp.float64)
+
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        return y_curr - (0.2 * y_prev + 0.15 * y_next**2 + shock)
+
+    autodiff_solution = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            jacobian_method="autodiff",
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+    finite_difference_solution = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            jacobian_method="finite_difference",
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+
+    assert autodiff_solution.converged
+    assert finite_difference_solution.converged
+    assert autodiff_solution.jacobian_method == "autodiff"
+    assert finite_difference_solution.jacobian_method == "finite_difference"
+    np.testing.assert_allclose(
+        finite_difference_solution.mean_path,
+        autodiff_solution.mean_path,
+        rtol=1e-8,
+        atol=1e-8,
+    )
+
+
 def test_sep_hmc_legacy_expectation_api_runs_deterministically() -> None:
     deterministic_shocks = jnp.asarray([[0.15], [0.0], [0.0]], dtype=jnp.float64)
 
@@ -446,3 +491,22 @@ def test_sep_hmc_legacy_expectation_api_runs_deterministically() -> None:
         rtol=1e-12,
         atol=1e-12,
     )
+
+
+def test_sep_rejects_autodiff_jacobian_for_hmc() -> None:
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        return y_curr - (0.2 * y_prev + 0.15 * y_next**2 + shock)
+
+    with np.testing.assert_raises_regex(ValueError, "incompatible with expectation_method='hmc'"):
+        solve_stochastic_extended_path_residual_expectation(
+            conditional_residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(
+                periods=3,
+                branching_order=1,
+                expectation_method="hmc",
+                jacobian_method="autodiff",
+            ),
+        )

@@ -77,6 +77,7 @@ def test_parsed_model_sep_matches_manual_conditional_residual_solver() -> None:
 
     assert manual.converged
     assert parsed.solution.converged
+    assert parsed.solution.jacobian_method == "autodiff"
     np.testing.assert_allclose(parsed.steady_state, 0.0, rtol=0, atol=1e-12)
     np.testing.assert_allclose(
         parsed.solution.stacked_states,

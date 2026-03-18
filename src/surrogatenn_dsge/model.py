@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from functools import cached_property
 import re
 from typing import Mapping, NamedTuple, Optional, Sequence, Union
@@ -2910,6 +2910,13 @@ class MacroModel:
             self._steady_reference_values(full_steady_state),
             dtype=jnp.float64,
         )
+        effective_config = config
+        if self.has_obc and config.jacobian_method == "auto":
+            # Avoid autodiff through max/min kinks on parsed OBC models.
+            effective_config = dataclass_replace(
+                config,
+                jacobian_method="finite_difference",
+            )
 
         def conditional_residual(
             lag_state: jax.Array,
@@ -2932,7 +2939,7 @@ class MacroModel:
             initial_state=initial_state_values,
             terminal_state=terminal_state_values,
             shock_dim=self.timings.nExo,
-            config=config,
+            config=effective_config,
             deterministic_shocks=deterministic_shock_values,
             initial_guess=initial_guess,
         )

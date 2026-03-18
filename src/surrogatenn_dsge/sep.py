@@ -28,6 +28,7 @@ class SEPSolution(NamedTuple):
     converged: bool
     iterations: int
     group_counts: tuple[int, ...]
+    jacobian_method: str
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class SEPConfig:
     shock_scale: float = 1.0
     sparse_tree: bool = False
     expectation_method: str = "gauss_hermite"
+    jacobian_method: str = "auto"
     hmc_samples: int = 100
     hmc_warmup: int = 50
     hmc_leapfrog_steps: int = 10
@@ -73,6 +75,16 @@ def _validate_sep_config(config: SEPConfig, *, shock_dim: int) -> None:
         raise ValueError(
             "SEPConfig.expectation_method must be 'gauss_hermite' or 'hmc', "
             f"got {config.expectation_method!r}."
+        )
+    if config.jacobian_method not in {"auto", "autodiff", "finite_difference"}:
+        raise ValueError(
+            "SEPConfig.jacobian_method must be 'auto', 'autodiff', or "
+            f"'finite_difference', got {config.jacobian_method!r}."
+        )
+    if config.expectation_method == "hmc" and config.jacobian_method == "autodiff":
+        raise ValueError(
+            "SEPConfig.jacobian_method='autodiff' is incompatible with "
+            "expectation_method='hmc'; use 'auto' or 'finite_difference'."
         )
     if config.hmc_samples < 1:
         raise ValueError(
@@ -598,6 +610,11 @@ def _solve_stochastic_extended_path_impl(
             )
 
     use_hmc = config.expectation_method == "hmc"
+    jacobian_method = config.jacobian_method
+    if jacobian_method == "auto":
+        jacobian_method_used = "finite_difference" if use_hmc else "autodiff"
+    else:
+        jacobian_method_used = jacobian_method
     rule = (
         GaussHermiteRule(
             nodes=jnp.zeros((1, shock_dim), dtype=jnp.float64),
@@ -889,7 +906,7 @@ def _solve_stochastic_extended_path_impl(
 
         jacobian = (
             _finite_difference_jacobian(residual_vector, current)
-            if use_hmc
+            if jacobian_method_used == "finite_difference"
             else jax.jacobian(residual_vector)(current)
         )
         normal_matrix = jacobian.T @ jacobian
@@ -951,4 +968,5 @@ def _solve_stochastic_extended_path_impl(
         converged=converged,
         iterations=iterations,
         group_counts=counts,
+        jacobian_method=jacobian_method_used,
     )
