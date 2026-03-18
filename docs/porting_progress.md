@@ -598,6 +598,22 @@ Python/JAX status:
 - the current transformation supports one binary `min` or `max` call per equation, which is enough for the tested simple bound formulations but does not yet claim the full Julia OBC transformation surface
 - tests verify inactive-branch steady-state violations are nonpositive, deterministic SEP paths satisfy the transformed OBC diagnostics along the whole path, and the first-order linear rollout correctly flags a large-shock lower-bound breach
 
+### 39. Parsed-model `get_irf` and simulation helpers
+
+Julia reference:
+
+- `src/get_functions.jl` (`get_irf`, `simulate`)
+- `src/common_docstrings.jl` (`ignore_obc`, `initial_state`, shock handling)
+- `src/macros.jl` (runtime note that first-order OBC enforcement is active unless `ignore_obc = true`)
+
+Python/JAX status:
+
+- parsed models now expose `get_irf` and `simulate`, with top-level wrappers `get_irf(...)` and `simulate_model(...)`
+- the new runtime helpers support named variable selection, named shock selection such as `"all"` or a specific exogenous name, explicit deterministic shock histories as matrices or mappings, `levels` vs deviation output, `initial_state`, and the existing first-order `qme_algorithm` selection
+- first-order runtime requests on OBC models now honor `ignore_obc`; when `ignore_obc = false`, the helper routes through a deterministic `SEPConfig(branching_order = 0)` solve instead of silently returning the unconstrained linear path
+- this narrows the user-facing MacroModelling gap materially, but it is not yet exact Julia parity because the current OBC runtime route uses deterministic SEP rather than Julia's dedicated first-order artificial-shock enforcement solver
+- tests verify a closed-form linear AR(1) IRF, simulation-vs-rollout parity on the same linear model, OBC routing behavior for a simple bound model, and runtime smoke across upstream `RBC_Dynare`, `FS2000`, and `RBC_baseline`
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -609,6 +625,7 @@ Python/JAX status:
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
 - The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
 - The current parsed front end now supports basic `max` / `min` OBC syntax, branch-frozen linearization around the active steady-state branch, and parsed-model OBC violation diagnostics, but the Julia-specific enforcement layer around kinks, including explicit OBC shock-sequence optimization, subdifferential Newton options, and the broader OBC runtime surface, is still unported.
+- Parsed-model `get_irf` and `simulate_model` are now available, but the full Julia runtime surface is still broader, especially `simulate(..., shocks = :simulate)` random-shock semantics, the richer shock/variable selection API, and the exact first-order OBC artificial-shock enforcement path.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, and branch-frozen subgradient Jacobians for parsed OBC models on the Gauss-Hermite path, but the remaining sparse-tree-specific Jacobian/runtime optimizations and broader OBC-specific subdifferential SEP machinery are still unported.

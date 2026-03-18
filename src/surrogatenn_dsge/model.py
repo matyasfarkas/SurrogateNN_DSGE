@@ -154,6 +154,27 @@ class OBCViolationPathResult(NamedTuple):
     violations: jax.Array
 
 
+class ModelSimulationResult(NamedTuple):
+    variables: tuple[str, ...]
+    data: jax.Array
+    state_path: jax.Array
+    shocks: jax.Array
+    algorithm_used: str
+    steady_state: jax.Array
+    parameter_values: jax.Array
+
+
+class ModelIRFResult(NamedTuple):
+    variables: tuple[str, ...]
+    shock_names: tuple[str, ...]
+    responses: jax.Array
+    state_paths: jax.Array
+    shocks: jax.Array
+    algorithm_used: str
+    steady_state: jax.Array
+    parameter_values: jax.Array
+
+
 class ParsedParameterBlock(NamedTuple):
     target_names: tuple[str, ...]
     calibrated_target_names: tuple[str, ...]
@@ -690,6 +711,194 @@ class MacroModel:
                 f"({periods}, {self.timings.nExo}) or ({self.timings.nExo}, {periods}), got {values.shape}."
             )
         return jnp.asarray(values, dtype=jnp.float64)
+
+    def _resolve_variable_selection(
+        self,
+        variables: Optional[Sequence[str] | str],
+    ) -> tuple[tuple[str, ...], np.ndarray]:
+        if variables is None:
+            selected = tuple(self.timings.var)
+        elif isinstance(variables, str):
+            token = variables.strip()
+            token = token[1:] if token.startswith(":") else token
+            if token == "all":
+                selected = tuple(self.timings.var)
+            else:
+                selected = (variables,)
+        else:
+            selected = tuple(str(name) for name in variables)
+        if not selected:
+            raise ValueError("variables must contain at least one variable name.")
+        lookup = {name: idx for idx, name in enumerate(self.timings.var)}
+        unexpected = sorted(set(selected).difference(lookup))
+        if unexpected:
+            raise ValueError("Unknown variable names: " + ", ".join(unexpected))
+        indices = np.asarray([lookup[name] for name in selected], dtype=np.int64)
+        return selected, indices
+
+    def _coerce_simulation_shocks(
+        self,
+        shocks: Optional[Sequence[Sequence[float]] | Mapping[str, Sequence[float]]],
+        *,
+        periods: int,
+    ) -> np.ndarray:
+        shock_matrix = self._coerce_sep_deterministic_shocks(shocks, periods=periods)
+        if shock_matrix is None:
+            return np.zeros((self.timings.nExo, periods), dtype=np.float64)
+        return np.asarray(shock_matrix, dtype=np.float64).T
+
+    def _coerce_irf_shock_scenarios(
+        self,
+        shocks: Optional[
+            str | Sequence[str] | Sequence[Sequence[float]] | Mapping[str, Sequence[float]]
+        ],
+        *,
+        periods: int,
+        shock_size: float,
+        negative_shock: bool,
+    ) -> tuple[tuple[str, ...], np.ndarray]:
+        if self.timings.nExo == 0:
+            return ("none",), np.zeros((0, periods, 1), dtype=np.float64)
+
+        sign = -1.0 if negative_shock else 1.0
+        amplitude = sign * float(shock_size)
+
+        if shocks is None:
+            shocks = "all"
+
+        if isinstance(shocks, str):
+            token = shocks.strip()
+            token = token[1:] if token.startswith(":") else token
+            if token == "all":
+                selected = tuple(self.timings.exo)
+            elif token == "none":
+                return ("none",), np.zeros((self.timings.nExo, periods, 1), dtype=np.float64)
+            else:
+                selected = (shocks,)
+            lookup = {name: idx for idx, name in enumerate(self.timings.exo)}
+            unexpected = sorted(set(selected).difference(lookup))
+            if unexpected:
+                raise ValueError("Unknown shock names: " + ", ".join(unexpected))
+            scenarios = np.zeros(
+                (self.timings.nExo, periods, len(selected)),
+                dtype=np.float64,
+            )
+            for scenario_idx, name in enumerate(selected):
+                scenarios[lookup[name], 0, scenario_idx] = amplitude
+            return selected, scenarios
+
+        if (
+            isinstance(shocks, Sequence)
+            and not isinstance(shocks, (np.ndarray, jax.Array))
+            and len(shocks) > 0
+            and all(isinstance(name, str) for name in shocks)
+        ):
+            selected = tuple(str(name) for name in shocks)
+            lookup = {name: idx for idx, name in enumerate(self.timings.exo)}
+            unexpected = sorted(set(selected).difference(lookup))
+            if unexpected:
+                raise ValueError("Unknown shock names: " + ", ".join(unexpected))
+            scenarios = np.zeros(
+                (self.timings.nExo, periods, len(selected)),
+                dtype=np.float64,
+            )
+            for scenario_idx, name in enumerate(selected):
+                scenarios[lookup[name], 0, scenario_idx] = amplitude
+            return selected, scenarios
+
+        shock_matrix = self._coerce_simulation_shocks(shocks, periods=periods)
+        return ("custom",), shock_matrix[:, :, None]
+
+    def _simulate_first_order_path(
+        self,
+        shocks: np.ndarray,
+        *,
+        first_order_result: ParsedModelFirstOrderResult,
+        steady_state: np.ndarray,
+        initial_state: Optional[Sequence[float]] = None,
+    ) -> np.ndarray:
+        periods = shocks.shape[1]
+        initial_state_values = (
+            np.asarray(steady_state, dtype=np.float64)
+            if initial_state is None
+            else np.asarray(
+                self._coerce_dynamic_state_vector(initial_state, label="initial_state"),
+                dtype=np.float64,
+            )
+        )
+        state_indices = np.asarray(
+            self.timings.past_not_future_and_mixed_idx,
+            dtype=np.int64,
+        )
+        reduced_initial_state = (
+            initial_state_values[state_indices] - steady_state[state_indices]
+        )
+        deviations = np.asarray(
+            rollout_first_order_solution(
+                first_order_result.solution.solution_matrix,
+                self.timings,
+                shocks,
+                initial_reduced_state=reduced_initial_state,
+            ),
+            dtype=np.float64,
+        )
+        if deviations.shape != (self.timings.nVars, periods):
+            raise ValueError(
+                "First-order rollout returned an unexpected shape "
+                f"{deviations.shape}, expected ({self.timings.nVars}, {periods})."
+            )
+        return deviations + steady_state[:, None]
+
+    def _simulate_sep_path(
+        self,
+        shocks: np.ndarray,
+        *,
+        parameter_values: np.ndarray,
+        steady_state: np.ndarray,
+        initial_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+        config: SEPConfig,
+    ) -> np.ndarray:
+        periods = shocks.shape[1]
+        initial_state_values = (
+            np.asarray(steady_state, dtype=np.float64)
+            if initial_state is None
+            else np.asarray(
+                self._coerce_dynamic_state_vector(initial_state, label="initial_state"),
+                dtype=np.float64,
+            )
+        )
+        terminal_state_values = (
+            np.asarray(steady_state, dtype=np.float64)
+            if terminal_state is None
+            else np.asarray(
+                self._coerce_dynamic_state_vector(terminal_state, label="terminal_state"),
+                dtype=np.float64,
+            )
+        )
+        runtime_config = config
+        if runtime_config.periods != periods:
+            runtime_config = dataclass_replace(runtime_config, periods=periods)
+        sep_result = self.solve_stochastic_extended_path(
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            initial_state=initial_state_values,
+            terminal_state=terminal_state_values,
+            config=runtime_config,
+            deterministic_shocks=shocks,
+        )
+        if not sep_result.solution.converged:
+            raise ValueError("Stochastic extended path solve did not converge.")
+        state_path = np.asarray(
+            sep_result.solution.mean_path[:, 1 : periods + 1],
+            dtype=np.float64,
+        )
+        if state_path.shape != (self.timings.nVars, periods):
+            raise ValueError(
+                "SEP path returned an unexpected shape "
+                f"{state_path.shape}, expected ({self.timings.nVars}, {periods})."
+            )
+        return state_path
 
     def _evaluate_dynamic_residual_with_context(
         self,
@@ -2887,6 +3096,214 @@ class MacroModel:
             violations=violations,
         )
 
+    def simulate(
+        self,
+        *,
+        periods: int,
+        shocks: Optional[Sequence[Sequence[float]] | Mapping[str, Sequence[float]]] = None,
+        variables: Optional[Sequence[str] | str] = None,
+        algorithm: str = "first_order",
+        ignore_obc: bool = False,
+        levels: bool = True,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        qme_algorithm: str = "schur",
+        initial_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+        config: SEPConfig = SEPConfig(),
+    ) -> ModelSimulationResult:
+        if periods < 1:
+            raise ValueError(f"periods must be positive, got {periods}.")
+        selected_variables, variable_indices = self._resolve_variable_selection(variables)
+        shock_matrix = self._coerce_simulation_shocks(shocks, periods=periods)
+
+        algorithm_token = algorithm.lower()
+        if algorithm_token not in {"first_order", "stochastic_extended_path", "sep"}:
+            raise ValueError(
+                f"Unknown algorithm {algorithm!r}. "
+                "Use 'first_order' or 'stochastic_extended_path'."
+            )
+        use_sep = algorithm_token in {"stochastic_extended_path", "sep"} or (
+            algorithm_token == "first_order" and self.has_obc and not ignore_obc
+        )
+
+        if use_sep:
+            full_steady_state, resolved_parameters = (
+                self._prepare_steady_state_and_parameters_for_runtime(
+                    parameter_values=parameter_values,
+                    steady_state=steady_state,
+                    steady_state_initial_guess=steady_state_initial_guess,
+                    steady_state_tol=steady_state_tol,
+                    steady_state_max_iter=steady_state_max_iter,
+                )
+            )
+            if full_steady_state is None or resolved_parameters is None:
+                raise ValueError("Could not prepare a converged steady state for simulation.")
+            runtime_config = config
+            if algorithm_token == "first_order":
+                runtime_config = dataclass_replace(runtime_config, periods=periods, branching_order=0)
+            state_path = self._simulate_sep_path(
+                shock_matrix,
+                parameter_values=resolved_parameters,
+                steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                initial_state=initial_state,
+                terminal_state=terminal_state,
+                config=runtime_config,
+            )
+            algorithm_used = "stochastic_extended_path"
+            parameter_output = np.asarray(resolved_parameters, dtype=np.float64)
+            steady_output = np.asarray(full_steady_state, dtype=np.float64)
+        else:
+            parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
+                first_order_result=first_order_result,
+                parameter_values=parameter_values,
+                steady_state=steady_state,
+                steady_state_initial_guess=steady_state_initial_guess,
+                steady_state_tol=steady_state_tol,
+                steady_state_max_iter=steady_state_max_iter,
+                qme_algorithm=qme_algorithm,
+            )
+            if parsed_result is None or full_steady_state is None:
+                raise ValueError("Could not prepare a converged first-order solution for simulation.")
+            state_path = self._simulate_first_order_path(
+                shock_matrix,
+                first_order_result=parsed_result,
+                steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                initial_state=initial_state,
+            )
+            algorithm_used = "first_order"
+            parameter_output = np.asarray(parsed_result.parameter_values, dtype=np.float64)
+            steady_output = np.asarray(full_steady_state, dtype=np.float64)
+
+        data = state_path[variable_indices]
+        if not levels:
+            data = data - steady_output[variable_indices][:, None]
+        return ModelSimulationResult(
+            variables=selected_variables,
+            data=jnp.asarray(data, dtype=jnp.float64),
+            state_path=jnp.asarray(state_path, dtype=jnp.float64),
+            shocks=jnp.asarray(shock_matrix, dtype=jnp.float64),
+            algorithm_used=algorithm_used,
+            steady_state=jnp.asarray(steady_output, dtype=jnp.float64),
+            parameter_values=jnp.asarray(parameter_output, dtype=jnp.float64),
+        )
+
+    def get_irf(
+        self,
+        *,
+        periods: int,
+        variables: Optional[Sequence[str] | str] = None,
+        shocks: Optional[
+            str | Sequence[str] | Sequence[Sequence[float]] | Mapping[str, Sequence[float]]
+        ] = "all",
+        shock_size: float = 1.0,
+        negative_shock: bool = False,
+        algorithm: str = "first_order",
+        ignore_obc: bool = False,
+        levels: bool = False,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        qme_algorithm: str = "schur",
+        initial_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+        config: SEPConfig = SEPConfig(),
+    ) -> ModelIRFResult:
+        if periods < 1:
+            raise ValueError(f"periods must be positive, got {periods}.")
+        selected_variables, variable_indices = self._resolve_variable_selection(variables)
+        shock_names, shock_scenarios = self._coerce_irf_shock_scenarios(
+            shocks,
+            periods=periods,
+            shock_size=shock_size,
+            negative_shock=negative_shock,
+        )
+
+        algorithm_token = algorithm.lower()
+        if algorithm_token not in {"first_order", "stochastic_extended_path", "sep"}:
+            raise ValueError(
+                f"Unknown algorithm {algorithm!r}. "
+                "Use 'first_order' or 'stochastic_extended_path'."
+            )
+        use_sep = algorithm_token in {"stochastic_extended_path", "sep"} or (
+            algorithm_token == "first_order" and self.has_obc and not ignore_obc
+        )
+
+        state_paths = np.zeros(
+            (self.timings.nVars, periods, shock_scenarios.shape[2]),
+            dtype=np.float64,
+        )
+        algorithm_used = "stochastic_extended_path" if use_sep else "first_order"
+
+        if use_sep:
+            full_steady_state, resolved_parameters = (
+                self._prepare_steady_state_and_parameters_for_runtime(
+                    parameter_values=parameter_values,
+                    steady_state=steady_state,
+                    steady_state_initial_guess=steady_state_initial_guess,
+                    steady_state_tol=steady_state_tol,
+                    steady_state_max_iter=steady_state_max_iter,
+                )
+            )
+            if full_steady_state is None or resolved_parameters is None:
+                raise ValueError("Could not prepare a converged steady state for IRFs.")
+            runtime_config = config
+            if algorithm_token == "first_order":
+                runtime_config = dataclass_replace(runtime_config, periods=periods, branching_order=0)
+            for scenario_idx in range(shock_scenarios.shape[2]):
+                state_paths[:, :, scenario_idx] = self._simulate_sep_path(
+                    shock_scenarios[:, :, scenario_idx],
+                    parameter_values=np.asarray(resolved_parameters, dtype=np.float64),
+                    steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                    initial_state=initial_state,
+                    terminal_state=terminal_state,
+                    config=runtime_config,
+                )
+            parameter_output = np.asarray(resolved_parameters, dtype=np.float64)
+            steady_output = np.asarray(full_steady_state, dtype=np.float64)
+        else:
+            parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
+                first_order_result=first_order_result,
+                parameter_values=parameter_values,
+                steady_state=steady_state,
+                steady_state_initial_guess=steady_state_initial_guess,
+                steady_state_tol=steady_state_tol,
+                steady_state_max_iter=steady_state_max_iter,
+                qme_algorithm=qme_algorithm,
+            )
+            if parsed_result is None or full_steady_state is None:
+                raise ValueError("Could not prepare a converged first-order solution for IRFs.")
+            for scenario_idx in range(shock_scenarios.shape[2]):
+                state_paths[:, :, scenario_idx] = self._simulate_first_order_path(
+                    shock_scenarios[:, :, scenario_idx],
+                    first_order_result=parsed_result,
+                    steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                    initial_state=initial_state,
+                )
+            parameter_output = np.asarray(parsed_result.parameter_values, dtype=np.float64)
+            steady_output = np.asarray(full_steady_state, dtype=np.float64)
+
+        responses = state_paths[variable_indices]
+        if not levels:
+            responses = responses - steady_output[variable_indices][:, None, None]
+        return ModelIRFResult(
+            variables=selected_variables,
+            shock_names=shock_names,
+            responses=jnp.asarray(responses, dtype=jnp.float64),
+            state_paths=jnp.asarray(state_paths, dtype=jnp.float64),
+            shocks=jnp.asarray(shock_scenarios, dtype=jnp.float64),
+            algorithm_used=algorithm_used,
+            steady_state=jnp.asarray(steady_output, dtype=jnp.float64),
+            parameter_values=jnp.asarray(parameter_output, dtype=jnp.float64),
+        )
+
     def _apply_default_calibrated_parameter_guess(
         self,
         parameter_values: np.ndarray,
@@ -4136,6 +4553,92 @@ def evaluate_obc_violations_along_path(
         parameter_values=parameter_values,
         steady_state=steady_state,
         terminal_state=terminal_state,
+    )
+
+
+def simulate_model(
+    model: MacroModel,
+    *,
+    periods: int,
+    shocks: Optional[Sequence[Sequence[float]] | Mapping[str, Sequence[float]]] = None,
+    variables: Optional[Sequence[str] | str] = None,
+    algorithm: str = "first_order",
+    ignore_obc: bool = False,
+    levels: bool = True,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+    config: SEPConfig = SEPConfig(),
+) -> ModelSimulationResult:
+    return model.simulate(
+        periods=periods,
+        shocks=shocks,
+        variables=variables,
+        algorithm=algorithm,
+        ignore_obc=ignore_obc,
+        levels=levels,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        qme_algorithm=qme_algorithm,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        config=config,
+    )
+
+
+def get_irf(
+    model: MacroModel,
+    *,
+    periods: int,
+    variables: Optional[Sequence[str] | str] = None,
+    shocks: Optional[
+        str | Sequence[str] | Sequence[Sequence[float]] | Mapping[str, Sequence[float]]
+    ] = "all",
+    shock_size: float = 1.0,
+    negative_shock: bool = False,
+    algorithm: str = "first_order",
+    ignore_obc: bool = False,
+    levels: bool = False,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+    config: SEPConfig = SEPConfig(),
+) -> ModelIRFResult:
+    return model.get_irf(
+        periods=periods,
+        variables=variables,
+        shocks=shocks,
+        shock_size=shock_size,
+        negative_shock=negative_shock,
+        algorithm=algorithm,
+        ignore_obc=ignore_obc,
+        levels=levels,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        qme_algorithm=qme_algorithm,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        config=config,
     )
 
 
