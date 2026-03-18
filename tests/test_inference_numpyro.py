@@ -14,13 +14,17 @@ from surrogatenn_dsge import (
     build_linear_state_space_from_model,
     build_numpyro_kalman_model,
     build_numpyro_kalman_model_jax,
+    build_numpyro_switching_model_jax,
     evaluate_numpyro_kalman_log_density,
     evaluate_numpyro_kalman_log_density_jax,
+    evaluate_numpyro_switching_log_density_jax,
     kalman_loglikelihood_from_model,
     kalman_loglikelihood_from_model_jax,
     parse_macro_model,
     simulate_linear_gaussian_state_space,
     solve_first_order_model,
+    switching_loglikelihood_from_model,
+    switching_loglikelihood_from_model_jax,
 )
 
 
@@ -53,6 +57,18 @@ end
     theta = 2
     0 < rho < 1
     rho = 0.8
+end
+"""
+
+
+SWITCHING_SOURCE = """
+@model switching_linear begin
+    y[0] = rho * y[-1] + eps[x]
+end
+
+@parameters switching_linear begin
+    0 < rho < 1
+    rho = 0.65
 end
 """
 
@@ -112,6 +128,17 @@ def _calibrated_numpyro_fixture():
         "rho": dist.Uniform(0.05, 0.95),
     }
     return model, first_order_result, observables, levels, priors
+
+
+def _switching_numpyro_fixture():
+    model = parse_macro_model(SWITCHING_SOURCE)
+    observables = ("y",)
+    levels = np.asarray([[0.1, -0.05, 0.12, 0.03, -0.02]], dtype=np.float64)
+    priors = {
+        "rho": dist.Uniform(0.05, 0.95),
+    }
+    gate_probs = np.asarray([0.1, 0.35, 0.5, 0.7, 0.9], dtype=np.float64)
+    return model, observables, levels, priors, gate_probs
 
 
 def test_assemble_parameter_vector_overrides_subset() -> None:
@@ -508,6 +535,111 @@ def test_jax_calibrated_wrapper_runs_nuts() -> None:
     mcmc = MCMC(kernel, num_warmup=4, num_samples=4, num_chains=1, progress_bar=False)
 
     mcmc.run(jax.random.PRNGKey(4))
+    samples = mcmc.get_samples()
+
+    assert samples["rho"].shape == (4,)
+
+
+def test_jax_switching_loglikelihood_matches_high_level_path() -> None:
+    model, observables, levels, _, gate_probs = _switching_numpyro_fixture()
+    parameter_vector = assemble_parameter_vector(
+        model,
+        {"rho": jnp.asarray(0.65, dtype=jnp.float64)},
+    )
+
+    compiled = jax.jit(
+        lambda theta: switching_loglikelihood_from_model_jax(
+            model,
+            levels,
+            observables=observables,
+            gate_probs=gate_probs,
+            fom_algorithm="first_order",
+            parameter_values=theta,
+            steady_state_initial_guess={"y": 0.0},
+            measurement_error_scale=0.0,
+            qme_algorithm="schur",
+        )
+    )
+    jax_loglikelihood = compiled(parameter_vector)
+    high_level = switching_loglikelihood_from_model(
+        model,
+        levels,
+        observables=observables,
+        gate_probs=gate_probs,
+        fom_algorithm="first_order",
+        parameter_values=parameter_vector,
+        steady_state_initial_guess={"y": 0.0},
+        measurement_error_scale=0.0,
+        qme_algorithm="schur",
+    ).total
+
+    np.testing.assert_allclose(
+        jax_loglikelihood,
+        high_level,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_jax_switching_log_density_matches_manual_prior_plus_likelihood() -> None:
+    model, observables, levels, priors, gate_probs = _switching_numpyro_fixture()
+    parameter_samples = {
+        "rho": jnp.asarray(0.65, dtype=jnp.float64),
+    }
+
+    log_density = evaluate_numpyro_switching_log_density_jax(
+        model,
+        levels,
+        priors,
+        parameter_samples,
+        observables=observables,
+        gate_probs=gate_probs,
+        fom_algorithm="first_order",
+        steady_state_initial_guess={"y": 0.0},
+        measurement_error_scale=0.0,
+        qme_algorithm="schur",
+    )
+    parameter_vector = assemble_parameter_vector(model, parameter_samples)
+    manual_log_density = (
+        priors["rho"].log_prob(parameter_samples["rho"])
+        + switching_loglikelihood_from_model_jax(
+            model,
+            levels,
+            observables=observables,
+            gate_probs=gate_probs,
+            fom_algorithm="first_order",
+            parameter_values=parameter_vector,
+            steady_state_initial_guess={"y": 0.0},
+            measurement_error_scale=0.0,
+            qme_algorithm="schur",
+        )
+    )
+
+    np.testing.assert_allclose(
+        log_density,
+        manual_log_density,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_jax_switching_wrapper_runs_nuts_with_schur() -> None:
+    model, observables, levels, priors, gate_probs = _switching_numpyro_fixture()
+    numpyro_model = build_numpyro_switching_model_jax(
+        model,
+        levels,
+        priors,
+        observables=observables,
+        gate_probs=gate_probs,
+        fom_algorithm="first_order",
+        steady_state_initial_guess={"y": 0.0},
+        measurement_error_scale=0.0,
+        qme_algorithm="schur",
+    )
+    kernel = NUTS(numpyro_model)
+    mcmc = MCMC(kernel, num_warmup=4, num_samples=4, num_chains=1, progress_bar=False)
+
+    mcmc.run(jax.random.PRNGKey(24))
     samples = mcmc.get_samples()
 
     assert samples["rho"].shape == (4,)

@@ -614,6 +614,21 @@ Python/JAX status:
 - this narrows the user-facing MacroModelling gap materially, but it is not yet exact Julia parity because the current OBC runtime route uses deterministic SEP rather than Julia's dedicated first-order artificial-shock enforcement solver
 - tests verify a closed-form linear AR(1) IRF, simulation-vs-rollout parity on the same linear model, OBC routing behavior for a simple bound model, and runtime smoke across upstream `RBC_Dynare`, `FS2000`, and `RBC_baseline`
 
+### 40. Compiled first-order switching likelihood and NumPyro wrapper
+
+Julia reference:
+
+- `src/regime_switching/likelihood.jl`
+- `scripts/hlt_sep_surrogate_synthetic_estimation.jl`
+
+Python/JAX status:
+
+- `switching_loglikelihood_from_model_jax` is now implemented for the first-order path, mixing the compiled JAX Kalman per-period likelihood with the compiled JAX first-order inversion per-period likelihood under fixed `gate_probs` or `hard_mask`
+- the compiled switching path supports the same parsed-model steady-state handling as the compiled Kalman path: explicit steady states, automatic JAX steady-state solves, calibrated JAX steady-state solves, and `qme_algorithm="schur"` or `"doubling"`
+- `build_numpyro_switching_model_jax` and `evaluate_numpyro_switching_log_density_jax` are implemented, so fixed-gate switching likelihoods can now be used directly inside NumPyro `NUTS`
+- this is intentionally narrower than the older concrete switching bridge: the compiled path is first-order only and expects the regime weights to be supplied, rather than computing gates internally from a non-JAX filter helper
+- tests verify JIT parity against the existing parsed switching bridge on a toy model, NumPyro log-density parity, and an actual compiled `NUTS` run on the Schur-based switching likelihood
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -628,6 +643,7 @@ Python/JAX status:
 - Parsed-model `get_irf` and `simulate_model` are now available, but the full Julia runtime surface is still broader, especially `simulate(..., shocks = :simulate)` random-shock semantics, the richer shock/variable selection API, and the exact first-order OBC artificial-shock enforcement path.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
+- The switching layer now has a compiled first-order likelihood and NumPyro wrapper for fixed gates, but the older high-level switching/filter helper surface is still not fully JAX-traceable and still contains NumPy-based paths for gate construction and filtered-state extraction.
 - The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, and branch-frozen subgradient Jacobians for parsed OBC models on the Gauss-Hermite path, but the remaining sparse-tree-specific Jacobian/runtime optimizations and broader OBC-specific subdifferential SEP machinery are still unported.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.

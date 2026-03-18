@@ -31,6 +31,7 @@ Implemented:
 - posterior-chain convenience helpers for switching workflows, including `theta_draws`, `epsilon_means_from_chain`, and `chunk_stats`, with support for NumPyro `MCMC` objects plus raw/checkpoint-style sample mappings
 - optional NumPyro inference helpers for subset priors, parameter-vector assembly, and concrete log-density evaluation on top of the parsed-model Kalman likelihood
 - JAX first-order structural likelihood and NumPyro wrappers that can run compiled kernels like `NUTS` on the parsed-model first-order path with either an explicit steady state or automatic JAX steady-state and calibration-equation solves
+- JAX first-order switching likelihood and NumPyro wrappers for fixed gate probabilities or hard masks, so ROM Kalman and FOM inversion can now be mixed on the compiled first-order path as well
 - quadratic matrix equation doubling solver plus a generalized Schur / ordered-QZ solver for the Julia `:schur` path
 - explicit Schur / ordered-QZ determinacy diagnostics for first-order models, including stable-root counts, unique/indeterminate/no-stable classification, and parsed-model wrappers to inspect the Schur branch directly
 - parsed-model state-space, likelihood, filtering, gate-stat, and concrete/compiled NumPyro helpers now expose `qme_algorithm` so first-order workflows can explicitly choose between the doubling and Schur/QZ solution branches
@@ -79,6 +80,7 @@ Not implemented yet:
 - the public first-order default now matches Julia and uses `schur`; request `qme_algorithm=\"doubling\"` explicitly if you want to stay on the fully JAX-native doubling path
 - the new determinacy diagnostics are currently tied to the Schur/QZ path; the doubling path still solves the QME but does not provide a comparable stable-root decomposition report
 - fully JAX-traceable parsed-model structural likelihoods beyond the first-order path, including higher-order estimation edges for compiled NumPyro kernels like `NUTS` and `HMC`
+- fully JAX-traceable parsed-model switching and filtering helpers beyond the new compiled first-order switching likelihood; the older high-level switching/filter bridge still contains NumPy-based paths and is not end-to-end traceable yet
 - the broader regime-switching estimation harness beyond the currently ported likelihood mixer and gate/regime utilities
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).

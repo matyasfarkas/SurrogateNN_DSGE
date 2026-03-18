@@ -9,9 +9,15 @@ import jax.numpy as jnp
 import numpy as np
 
 from .dsge import solve_first_order_dsge_solution_jax
+from .inversion import first_order_inversion_loglikelihood_per_period
 from .linalg import solve_discrete_lyapunov_direct
 from .model import MacroModel, kalman_loglikelihood_from_model
-from .statespace import LinearGaussianStateSpace, kalman_loglikelihood as _statespace_kalman_loglikelihood
+from .statespace import (
+    LinearGaussianStateSpace,
+    kalman_loglikelihood as _statespace_kalman_loglikelihood,
+    kalman_loglikelihood_per_period as _statespace_kalman_loglikelihood_per_period,
+)
+from .switching import SwitchingLikelihoodConfig, compute_switching_loglikelihood
 
 
 def _require_numpyro() -> tuple[Any, Any, Any]:
@@ -327,6 +333,214 @@ def kalman_loglikelihood_from_model_jax(
     )
 
 
+def switching_loglikelihood_from_model_jax(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    gate_probs: Optional[Sequence[float]] = None,
+    hard_mask: Optional[Sequence[bool]] = None,
+    fom_algorithm: str = "first_order",
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    observables: Optional[Sequence[str] | str] = None,
+    parameter_values: Optional[Sequence[float] | Mapping[str, Any]] = None,
+    base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    presample_periods: int = 0,
+    jitter: float = 1e-9,
+    on_failure_loglikelihood: float = -np.inf,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+) -> jax.Array:
+    if fom_algorithm != "first_order":
+        raise NotImplementedError(
+            "The compiled JAX switching likelihood currently supports "
+            "fom_algorithm='first_order' only."
+        )
+    if (gate_probs is None) == (hard_mask is None):
+        raise ValueError("Provide exactly one of gate_probs or hard_mask.")
+
+    observable_names, observation_data = model._coerce_observations(
+        observations,
+        observables=observables,
+    )
+    observable_indices = model.resolve_observable_indices(observable_names)
+    observable_index_array = jnp.asarray(observable_indices, dtype=jnp.int32)
+    observations_array = jnp.asarray(observation_data, dtype=jnp.float64)
+    n_periods = observations_array.shape[1]
+
+    gate_probs_array = None
+    if gate_probs is not None:
+        gate_probs_array = jnp.asarray(gate_probs, dtype=jnp.float64).reshape(-1)
+        if gate_probs_array.shape != (n_periods,):
+            raise ValueError(
+                f"gate_probs must have shape ({n_periods},), got {gate_probs_array.shape}."
+            )
+    hard_mask_array = None
+    if hard_mask is not None:
+        hard_mask_array = jnp.asarray(hard_mask, dtype=bool).reshape(-1)
+        if hard_mask_array.shape != (n_periods,):
+            raise ValueError(
+                f"hard_mask must have shape ({n_periods},), got {hard_mask_array.shape}."
+            )
+
+    lower_bounds, upper_bounds = model._bounds_vector(model.parameter_names)
+    lower_bounds_array = jnp.asarray(lower_bounds, dtype=jnp.float64)
+    upper_bounds_array = jnp.asarray(upper_bounds, dtype=jnp.float64)
+    failure_value = jnp.asarray(on_failure_loglikelihood, dtype=jnp.float64)
+    parameter_vector = _coerce_parameter_vector_for_jax(
+        model,
+        parameter_values,
+        base_parameter_values=base_parameter_values,
+    )
+    future_index_array = jnp.asarray(
+        model.timings.future_not_past_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+    past_index_array = jnp.asarray(
+        model.timings.past_not_future_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+    explicit_steady_state = (
+        None
+        if steady_state is None
+        else jnp.asarray(model._coerce_full_steady_state(steady_state), dtype=jnp.float64)
+    )
+    explicit_initial_state = (
+        None
+        if initial_state is None
+        else jnp.asarray(
+            model._coerce_dynamic_state_vector(initial_state, label="initial_state"),
+            dtype=jnp.float64,
+        )
+    )
+
+    def _loglikelihood_from_full_steady_state(
+        full_steady_state: jax.Array,
+        parameters: jax.Array,
+    ) -> jax.Array:
+        steady_reference_values = model._steady_reference_values_jax(full_steady_state)
+        observable_steady_state = full_steady_state[observable_index_array]
+        demeaned_observations = observations_array - observable_steady_state[:, None]
+        dynamic_point = jnp.concatenate(
+            [
+                full_steady_state[future_index_array],
+                full_steady_state,
+                full_steady_state[past_index_array],
+                jnp.zeros((model.timings.nExo,), dtype=jnp.float64),
+            ]
+        )
+
+        def residual_from_dynamic_vector(dynamic_vector: jax.Array) -> jax.Array:
+            lead_state = full_steady_state.at[future_index_array].set(
+                dynamic_vector[: model.timings.nFuture_not_past_and_mixed]
+            )
+            current_start = model.timings.nFuture_not_past_and_mixed
+            current_end = current_start + model.timings.nVars
+            current_state = dynamic_vector[current_start:current_end]
+            lag_state = full_steady_state.at[past_index_array].set(
+                dynamic_vector[
+                    current_end : current_end + model.timings.nPast_not_future_and_mixed
+                ]
+            )
+            shock = dynamic_vector[current_end + model.timings.nPast_not_future_and_mixed :]
+            return model._evaluate_dynamic_residual_with_context(
+                lag_state,
+                current_state,
+                lead_state,
+                shock,
+                parameter_values=parameters,
+                steady_reference_values=steady_reference_values,
+            )
+
+        jacobian = jax.jacrev(residual_from_dynamic_vector)(dynamic_point)
+        first_order_result = solve_first_order_dsge_solution_jax(
+            jacobian,
+            model.timings,
+            qme_algorithm=qme_algorithm,
+        )
+
+        def _success(result) -> jax.Array:
+            state_space = _linear_state_space_from_first_order_solution_jax(
+                result.solution_matrix,
+                model,
+                observable_indices,
+                initial_covariance_strategy=initial_covariance_strategy,
+                measurement_error_scale=measurement_error_scale,
+                measurement_error_covariance=measurement_error_covariance,
+            )
+            rom = _statespace_kalman_loglikelihood_per_period(
+                state_space,
+                demeaned_observations,
+                presample_periods=presample_periods,
+                jitter=jitter,
+            )
+            inversion_initial_state = (
+                jnp.zeros((model.timings.nVars,), dtype=jnp.float64)
+                if explicit_initial_state is None
+                else explicit_initial_state - full_steady_state
+            )
+            fom = first_order_inversion_loglikelihood_per_period(
+                result.solution_matrix,
+                model.timings,
+                demeaned_observations,
+                observable_indices,
+                initial_state=inversion_initial_state,
+                presample_periods=presample_periods,
+                on_failure_loglikelihood=on_failure_loglikelihood,
+            )
+            switching = compute_switching_loglikelihood(
+                rom,
+                fom,
+                hard_mask=hard_mask_array,
+                gate_probs=gate_probs_array,
+                config=switching_config,
+            )
+            return switching.total
+
+        return lax.cond(
+            first_order_result.converged,
+            _success,
+            lambda _: failure_value,
+            first_order_result,
+        )
+
+    def _valid_loglikelihood(parameters: jax.Array) -> jax.Array:
+        if explicit_steady_state is not None:
+            return _loglikelihood_from_full_steady_state(explicit_steady_state, parameters)
+
+        steady_state_result = model.solve_steady_state_jax(
+            parameter_values=parameters,
+            initial_guess=steady_state_initial_guess,
+            tol=steady_state_tol,
+            max_iter=steady_state_max_iter,
+        )
+        return lax.cond(
+            steady_state_result.converged,
+            lambda result: _loglikelihood_from_full_steady_state(
+                result.steady_state,
+                parameters,
+            ),
+            lambda _: failure_value,
+            steady_state_result,
+        )
+
+    within_bounds = jnp.all(
+        (parameter_vector >= lower_bounds_array) & (parameter_vector <= upper_bounds_array)
+    )
+    return lax.cond(
+        within_bounds,
+        _valid_loglikelihood,
+        lambda _: failure_value,
+        parameter_vector,
+    )
+
+
 def build_numpyro_kalman_model(
     model: MacroModel,
     observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
@@ -470,6 +684,83 @@ def build_numpyro_kalman_model_jax(
     return numpyro_model
 
 
+def build_numpyro_switching_model_jax(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    priors: Mapping[str, Any],
+    *,
+    gate_probs: Optional[Sequence[float]] = None,
+    hard_mask: Optional[Sequence[bool]] = None,
+    fom_algorithm: str = "first_order",
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    observables: Optional[Sequence[str] | str] = None,
+    base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    presample_periods: int = 0,
+    jitter: float = 1e-9,
+    on_failure_loglikelihood: float = -np.inf,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+):
+    numpyro, _, _ = _require_numpyro()
+
+    prior_names = tuple(priors)
+    if not prior_names:
+        raise ValueError("priors must contain at least one parameter prior.")
+    unknown = tuple(sorted(set(prior_names).difference(model.parameter_names)))
+    if unknown:
+        raise ValueError(
+            "Unknown parameter names in `priors`: "
+            + ", ".join(unknown)
+            + "."
+        )
+    base_parameters = _coerce_base_parameter_vector(model, base_parameter_values)
+
+    def numpyro_model() -> None:
+        sampled_values = {
+            name: numpyro.sample(name, priors[name])
+            for name in prior_names
+        }
+        parameter_vector = assemble_parameter_vector(
+            model,
+            sampled_values,
+            base_parameter_values=base_parameters,
+        )
+        loglikelihood = switching_loglikelihood_from_model_jax(
+            model,
+            observations,
+            gate_probs=gate_probs,
+            hard_mask=hard_mask,
+            fom_algorithm=fom_algorithm,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            observables=observables,
+            parameter_values=parameter_vector,
+            initial_covariance_strategy=initial_covariance_strategy,
+            measurement_error_scale=measurement_error_scale,
+            measurement_error_covariance=measurement_error_covariance,
+            presample_periods=presample_periods,
+            jitter=jitter,
+            on_failure_loglikelihood=on_failure_loglikelihood,
+            qme_algorithm=qme_algorithm,
+            initial_state=initial_state,
+            switching_config=switching_config,
+        )
+        numpyro.deterministic("parameter_vector", parameter_vector)
+        numpyro.deterministic("loglikelihood", loglikelihood)
+        numpyro.factor("switching_loglikelihood", loglikelihood)
+
+    return numpyro_model
+
+
 def evaluate_numpyro_kalman_log_density(
     model: MacroModel,
     observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
@@ -508,6 +799,59 @@ def evaluate_numpyro_kalman_log_density(
         jitter=jitter,
         on_failure_loglikelihood=on_failure_loglikelihood,
         qme_algorithm=qme_algorithm,
+    )
+    log_joint, _ = log_density(numpyro_model, (), {}, parameter_samples)
+    return jnp.asarray(log_joint, dtype=jnp.float64)
+
+
+def evaluate_numpyro_switching_log_density_jax(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    priors: Mapping[str, Any],
+    parameter_samples: Mapping[str, Any],
+    *,
+    gate_probs: Optional[Sequence[float]] = None,
+    hard_mask: Optional[Sequence[bool]] = None,
+    fom_algorithm: str = "first_order",
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    observables: Optional[Sequence[str] | str] = None,
+    base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    presample_periods: int = 0,
+    jitter: float = 1e-9,
+    on_failure_loglikelihood: float = -np.inf,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+) -> jax.Array:
+    _, _, log_density = _require_numpyro()
+    numpyro_model = build_numpyro_switching_model_jax(
+        model,
+        observations,
+        priors,
+        gate_probs=gate_probs,
+        hard_mask=hard_mask,
+        fom_algorithm=fom_algorithm,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        observables=observables,
+        base_parameter_values=base_parameter_values,
+        initial_covariance_strategy=initial_covariance_strategy,
+        measurement_error_scale=measurement_error_scale,
+        measurement_error_covariance=measurement_error_covariance,
+        presample_periods=presample_periods,
+        jitter=jitter,
+        on_failure_loglikelihood=on_failure_loglikelihood,
+        qme_algorithm=qme_algorithm,
+        initial_state=initial_state,
+        switching_config=switching_config,
     )
     log_joint, _ = log_density(numpyro_model, (), {}, parameter_samples)
     return jnp.asarray(log_joint, dtype=jnp.float64)
