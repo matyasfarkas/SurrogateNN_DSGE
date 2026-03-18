@@ -629,6 +629,21 @@ Python/JAX status:
 - this is intentionally narrower than the older concrete switching bridge: the compiled path is first-order only and expects the regime weights to be supplied, rather than computing gates internally from a non-JAX filter helper
 - tests verify JIT parity against the existing parsed switching bridge on a toy model, NumPyro log-density parity, and an actual compiled `NUTS` run on the Schur-based switching likelihood
 
+### 41. Compiled supplied-shock linear gate statistics
+
+Julia reference:
+
+- `src/regime_switching/get_functions.jl`
+- `src/regime_switching/filtering_helpers.jl`
+
+Python/JAX status:
+
+- `compute_gate_stat_series_jax` is implemented as a vectorized JAX kernel with the same observable-error and structural-shock normalization semantics as the earlier NumPy helper
+- `compute_linear_gate_stats_from_shocks_model_jax` is implemented for parsed first-order models, reusing the compiled JAX steady-state solve, Schur/doubling first-order solution path, and first-order rollout machinery
+- the compiled supplied-shock path supports explicit steady states or automatic JAX steady-state solves, parameter subsets via `base_parameter_values`, named observable and shock sigma inputs, explicit `initial_state`, and the same `qme_algorithm` switch as the other compiled first-order helpers
+- this narrows the switching gap on the JAX side materially: fixed-gate switching likelihoods and supplied-shock gate diagnostics are now traceable, while filter-derived gate construction is still on the older NumPy helper path
+- tests verify low-level JAX gate-stat parity plus `jax.jit` coverage and parsed-model parity against the existing concrete `RBC_CME` supplied-shock gate-stat helper
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -643,7 +658,7 @@ Python/JAX status:
 - Parsed-model `get_irf` and `simulate_model` are now available, but the full Julia runtime surface is still broader, especially `simulate(..., shocks = :simulate)` random-shock semantics, the richer shock/variable selection API, and the exact first-order OBC artificial-shock enforcement path.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
-- The switching layer now has a compiled first-order likelihood and NumPyro wrapper for fixed gates, but the older high-level switching/filter helper surface is still not fully JAX-traceable and still contains NumPy-based paths for gate construction and filtered-state extraction.
+- The switching layer now has a compiled first-order likelihood for fixed gates plus a compiled supplied-shock gate-stat path, but the older high-level switching/filter helper surface is still not fully JAX-traceable and still contains NumPy-based paths for filter-derived gate construction and filtered-state extraction.
 - The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, and branch-frozen subgradient Jacobians for parsed OBC models on the Gauss-Hermite path, but the remaining sparse-tree-specific Jacobian/runtime optimizations and broader OBC-specific subdifferential SEP machinery are still unported.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.

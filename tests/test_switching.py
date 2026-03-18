@@ -7,6 +7,8 @@ import numpy as np
 from surrogatenn_dsge import (
     SwitchingLikelihoodConfig,
     compute_switching_loglikelihood,
+    compute_gate_stat_series,
+    compute_gate_stat_series_jax,
     inversion_loglikelihood_per_period_from_model,
     kalman_loglikelihood_per_period_from_model,
     mix_loglikelihood,
@@ -107,6 +109,48 @@ def test_compute_switching_loglikelihood_is_jittable() -> None:
         rtol=1e-12,
         atol=1e-12,
     )
+
+
+def test_compute_gate_stat_series_jax_matches_numpy_and_jits() -> None:
+    observations = jnp.asarray(
+        [[1.0, 0.8, 1.2], [0.4, 0.1, -0.2]],
+        dtype=jnp.float64,
+    )
+    linear_observations = jnp.asarray(
+        [[0.9, 0.7, 1.1], [0.2, 0.0, -0.1]],
+        dtype=jnp.float64,
+    )
+    shocks = jnp.asarray(
+        [[0.05, -0.03, 0.01], [0.0, 0.0, 0.0], [0.02, -0.01, 0.04]],
+        dtype=jnp.float64,
+    )
+    observation_sigma = jnp.asarray([0.25, 0.5], dtype=jnp.float64)
+    shock_sigma = jnp.asarray([0.1, 0.0, 0.2], dtype=jnp.float64)
+
+    compiled = jax.jit(
+        lambda obs, lin, eps: compute_gate_stat_series_jax(
+            obs,
+            lin,
+            eps,
+            observation_sigma,
+            shock_sigma,
+            shock_norm="linf",
+            error_norm="l2",
+        )
+    )
+    e_stat, f_stat = compiled(observations, linear_observations, shocks)
+    expected_e, expected_f = compute_gate_stat_series(
+        np.asarray(observations),
+        np.asarray(linear_observations),
+        np.asarray(shocks),
+        np.asarray(observation_sigma),
+        np.asarray(shock_sigma),
+        shock_norm="linf",
+        error_norm="l2",
+    )
+
+    np.testing.assert_allclose(e_stat, expected_e, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(f_stat, expected_f, rtol=1e-12, atol=1e-12)
 
 
 def test_model_switching_bridge_matches_manual_component_mix() -> None:

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import NamedTuple, Optional, Sequence
 
 import jax
+from jax import lax
 import jax.numpy as jnp
 import numpy as np
 
@@ -138,6 +139,14 @@ def _gate_norm(values: np.ndarray, mode: str) -> float:
     raise ValueError(f"Unknown norm mode {mode!r}. Use 'l2' or 'linf'.")
 
 
+def _gate_norm_jax(values: jax.Array, mode: str, *, axis: int) -> jax.Array:
+    if mode == "l2":
+        return jnp.linalg.norm(values, ord=2, axis=axis)
+    if mode == "linf":
+        return jnp.linalg.norm(values, ord=jnp.inf, axis=axis)
+    raise ValueError(f"Unknown norm mode {mode!r}. Use 'l2' or 'linf'.")
+
+
 def compute_gate_stat_series(
     obs_data: Sequence[Sequence[float]] | np.ndarray,
     lin_obs: Sequence[Sequence[float]] | np.ndarray,
@@ -210,6 +219,80 @@ def compute_gate_stat_series(
                 shock_matrix[structural, period] / shock_sigma[structural],
                 shock_norm,
             )
+    return e_stat, f_stat
+
+
+def compute_gate_stat_series_jax(
+    obs_data: Sequence[Sequence[float]] | jax.Array | np.ndarray,
+    lin_obs: Sequence[Sequence[float]] | jax.Array | np.ndarray,
+    shocks: Sequence[Sequence[float]] | jax.Array | np.ndarray,
+    obs_sigma: Sequence[float] | jax.Array | np.ndarray,
+    shock_sigmas: Sequence[float] | jax.Array | np.ndarray,
+    *,
+    structural_idx: Optional[Sequence[int] | np.ndarray] = None,
+    shock_norm: str = "l2",
+    error_norm: str = "l2",
+) -> tuple[jax.Array, jax.Array]:
+    observations = jnp.asarray(obs_data, dtype=jnp.float64)
+    linear_observations = jnp.asarray(lin_obs, dtype=jnp.float64)
+    shock_matrix = jnp.asarray(shocks, dtype=jnp.float64)
+    observation_sigma = jnp.asarray(obs_sigma, dtype=jnp.float64)
+    shock_sigma = jnp.asarray(shock_sigmas, dtype=jnp.float64)
+
+    if observations.shape != linear_observations.shape:
+        raise ValueError(
+            "obs_data and lin_obs size mismatch: "
+            f"{observations.shape} vs {linear_observations.shape}."
+        )
+    if shock_matrix.ndim != 2 or observations.ndim != 2:
+        raise ValueError("obs_data, lin_obs, and shocks must be rank-2.")
+    if shock_matrix.shape[1] != observations.shape[1]:
+        raise ValueError(
+            "Shock matrix length mismatch: got "
+            f"{shock_matrix.shape[1]} periods, expected {observations.shape[1]}."
+        )
+    if observation_sigma.shape != (observations.shape[0],):
+        raise ValueError(
+            "obs_sigma length mismatch: got "
+            f"{observation_sigma.shape}, expected ({observations.shape[0]},)."
+        )
+    if shock_sigma.shape != (shock_matrix.shape[0],):
+        raise ValueError(
+            "shock_sigmas length mismatch: got "
+            f"{shock_sigma.shape}, expected ({shock_matrix.shape[0]},)."
+        )
+
+    if structural_idx is None:
+        structural_mask = shock_sigma > 0.0
+    else:
+        structural = np.asarray(structural_idx, dtype=np.int64)
+        if structural.ndim != 1:
+            raise ValueError("structural_idx must be rank-1 when provided.")
+        if structural.size and (
+            np.min(structural) < 0 or np.max(structural) >= shock_matrix.shape[0]
+        ):
+            raise ValueError("structural_idx contains an out-of-bounds index.")
+        mask = np.zeros((shock_matrix.shape[0],), dtype=bool)
+        mask[structural] = True
+        structural_mask = jnp.asarray(mask, dtype=jnp.bool_)
+
+    standardized_errors = (
+        observations - linear_observations
+    ) / observation_sigma[:, None]
+    f_stat = _gate_norm_jax(standardized_errors, error_norm, axis=0)
+
+    safe_shock_sigma = jnp.where(structural_mask, shock_sigma, 1.0)
+    standardized_shocks = jnp.where(
+        structural_mask[:, None],
+        shock_matrix / safe_shock_sigma[:, None],
+        0.0,
+    )
+    e_stat = lax.cond(
+        jnp.any(structural_mask),
+        lambda values: _gate_norm_jax(values, shock_norm, axis=0),
+        lambda values: jnp.zeros((values.shape[1],), dtype=values.dtype),
+        standardized_shocks,
+    )
     return e_stat, f_stat
 
 

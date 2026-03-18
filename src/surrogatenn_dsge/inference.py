@@ -8,7 +8,7 @@ from jax import lax
 import jax.numpy as jnp
 import numpy as np
 
-from .dsge import solve_first_order_dsge_solution_jax
+from .dsge import rollout_first_order_solution, solve_first_order_dsge_solution_jax
 from .inversion import first_order_inversion_loglikelihood_per_period
 from .linalg import solve_discrete_lyapunov_direct
 from .model import MacroModel, kalman_loglikelihood_from_model
@@ -17,7 +17,12 @@ from .statespace import (
     kalman_loglikelihood as _statespace_kalman_loglikelihood,
     kalman_loglikelihood_per_period as _statespace_kalman_loglikelihood_per_period,
 )
-from .switching import SwitchingLikelihoodConfig, compute_switching_loglikelihood
+from .switching import (
+    LinearGateStatsResult,
+    SwitchingLikelihoodConfig,
+    compute_gate_stat_series_jax,
+    compute_switching_loglikelihood,
+)
 
 
 def _require_numpyro() -> tuple[Any, Any, Any]:
@@ -537,6 +542,221 @@ def switching_loglikelihood_from_model_jax(
         within_bounds,
         _valid_loglikelihood,
         lambda _: failure_value,
+        parameter_vector,
+    )
+
+
+def compute_linear_gate_stats_from_shocks_model_jax(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    shocks: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    obs_sigma: Sequence[float] | Mapping[str, float],
+    shock_sigmas: Sequence[float] | Mapping[str, float],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    parameter_values: Optional[Sequence[float] | Mapping[str, Any]] = None,
+    base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    shock_norm: str = "l2",
+    error_norm: str = "l2",
+    on_failure_fill_value: float = np.nan,
+) -> LinearGateStatsResult:
+    observable_names, observation_data = model._coerce_observations(
+        observations,
+        observables=observables,
+    )
+    observable_indices = model.resolve_observable_indices(observable_names)
+    observable_index_array = jnp.asarray(observable_indices, dtype=jnp.int32)
+    observations_array = jnp.asarray(observation_data, dtype=jnp.float64)
+    periods = int(observations_array.shape[1])
+
+    shock_values = model._coerce_sep_deterministic_shocks(
+        shocks,
+        periods=periods,
+    )
+    if shock_values is None:
+        raise ValueError("shocks must be provided for linear gate statistics.")
+    shock_matrix = jnp.asarray(shock_values, dtype=jnp.float64).T
+    obs_sigma_vector = jnp.asarray(
+        model._coerce_named_values(
+            obs_sigma,
+            observable_names,
+            label="obs_sigma",
+        ),
+        dtype=jnp.float64,
+    )
+    shock_sigma_vector = jnp.asarray(
+        model._coerce_named_values(
+            shock_sigmas,
+            model.timings.exo,
+            label="shock_sigmas",
+        ),
+        dtype=jnp.float64,
+    )
+
+    lower_bounds, upper_bounds = model._bounds_vector(model.parameter_names)
+    lower_bounds_array = jnp.asarray(lower_bounds, dtype=jnp.float64)
+    upper_bounds_array = jnp.asarray(upper_bounds, dtype=jnp.float64)
+    parameter_vector = _coerce_parameter_vector_for_jax(
+        model,
+        parameter_values,
+        base_parameter_values=base_parameter_values,
+    )
+    future_index_array = jnp.asarray(
+        model.timings.future_not_past_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+    past_index_array = jnp.asarray(
+        model.timings.past_not_future_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+    state_index_array = jnp.asarray(
+        model.timings.past_not_future_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+    explicit_steady_state = (
+        None
+        if steady_state is None
+        else jnp.asarray(model._coerce_full_steady_state(steady_state), dtype=jnp.float64)
+    )
+    explicit_initial_state = (
+        None
+        if initial_state is None
+        else jnp.asarray(
+            model._coerce_dynamic_state_vector(initial_state, label="initial_state"),
+            dtype=jnp.float64,
+        )
+    )
+    fill_value = jnp.asarray(on_failure_fill_value, dtype=jnp.float64)
+
+    def _failure_result(_: Any) -> LinearGateStatsResult:
+        return LinearGateStatsResult(
+            linear_observations=jnp.full(
+                observations_array.shape,
+                fill_value,
+                dtype=jnp.float64,
+            ),
+            shocks=shock_matrix,
+            e_stat=jnp.full((periods,), fill_value, dtype=jnp.float64),
+            f_stat=jnp.full((periods,), fill_value, dtype=jnp.float64),
+        )
+
+    def _stats_from_full_steady_state(
+        full_steady_state: jax.Array,
+        parameters: jax.Array,
+    ) -> LinearGateStatsResult:
+        steady_reference_values = model._steady_reference_values_jax(full_steady_state)
+        dynamic_point = jnp.concatenate(
+            [
+                full_steady_state[future_index_array],
+                full_steady_state,
+                full_steady_state[past_index_array],
+                jnp.zeros((model.timings.nExo,), dtype=jnp.float64),
+            ]
+        )
+
+        def residual_from_dynamic_vector(dynamic_vector: jax.Array) -> jax.Array:
+            lead_state = full_steady_state.at[future_index_array].set(
+                dynamic_vector[: model.timings.nFuture_not_past_and_mixed]
+            )
+            current_start = model.timings.nFuture_not_past_and_mixed
+            current_end = current_start + model.timings.nVars
+            current_state = dynamic_vector[current_start:current_end]
+            lag_state = full_steady_state.at[past_index_array].set(
+                dynamic_vector[
+                    current_end : current_end + model.timings.nPast_not_future_and_mixed
+                ]
+            )
+            shock = dynamic_vector[current_end + model.timings.nPast_not_future_and_mixed :]
+            return model._evaluate_dynamic_residual_with_context(
+                lag_state,
+                current_state,
+                lead_state,
+                shock,
+                parameter_values=parameters,
+                steady_reference_values=steady_reference_values,
+            )
+
+        jacobian = jax.jacrev(residual_from_dynamic_vector)(dynamic_point)
+        first_order_result = solve_first_order_dsge_solution_jax(
+            jacobian,
+            model.timings,
+            qme_algorithm=qme_algorithm,
+        )
+
+        def _success(result: Any) -> LinearGateStatsResult:
+            initial_state_values = (
+                full_steady_state
+                if explicit_initial_state is None
+                else explicit_initial_state
+            )
+            reduced_initial_state = (
+                initial_state_values[state_index_array] - full_steady_state[state_index_array]
+            )
+            linear_deviations = rollout_first_order_solution(
+                result.solution_matrix,
+                model.timings,
+                shock_matrix,
+                initial_reduced_state=reduced_initial_state,
+            )
+            linear_observations = linear_deviations[observable_index_array, :] + (
+                full_steady_state[observable_index_array][:, None]
+            )
+            e_stat, f_stat = compute_gate_stat_series_jax(
+                observations_array,
+                linear_observations,
+                shock_matrix,
+                obs_sigma_vector,
+                shock_sigma_vector,
+                shock_norm=shock_norm,
+                error_norm=error_norm,
+            )
+            return LinearGateStatsResult(
+                linear_observations=linear_observations,
+                shocks=shock_matrix,
+                e_stat=e_stat,
+                f_stat=f_stat,
+            )
+
+        return lax.cond(
+            first_order_result.converged,
+            _success,
+            _failure_result,
+            first_order_result,
+        )
+
+    def _valid_stats(parameters: jax.Array) -> LinearGateStatsResult:
+        if explicit_steady_state is not None:
+            return _stats_from_full_steady_state(explicit_steady_state, parameters)
+
+        steady_state_result = model.solve_steady_state_jax(
+            parameter_values=parameters,
+            initial_guess=steady_state_initial_guess,
+            tol=steady_state_tol,
+            max_iter=steady_state_max_iter,
+        )
+        return lax.cond(
+            steady_state_result.converged,
+            lambda result: _stats_from_full_steady_state(
+                result.steady_state,
+                parameters,
+            ),
+            _failure_result,
+            steady_state_result,
+        )
+
+    within_bounds = jnp.all(
+        (parameter_vector >= lower_bounds_array) & (parameter_vector <= upper_bounds_array)
+    )
+    return lax.cond(
+        within_bounds,
+        _valid_stats,
+        _failure_result,
         parameter_vector,
     )
 
