@@ -40,6 +40,34 @@ end
 """
 
 
+OBC_BINDING_MAX_SOURCE = """
+@model obc_binding begin
+    r[0] = max(r_star[0], zlb)
+    r_star[0] = rho * r_star[-1] + (1-rho) * mu + eps_r[x]
+end
+
+@parameters obc_binding begin
+    rho = 0.8
+    mu = 1.0
+    zlb = 1.0
+end
+"""
+
+
+OBC_BINDING_MIN_SOURCE = """
+@model obc_binding_cap begin
+    q[0] = min(q_star[0], q_cap)
+    q_star[0] = rho * q_star[-1] + (1-rho) * mu + eps_q[x]
+end
+
+@parameters obc_binding_cap begin
+    rho = 0.7
+    mu = 1.0
+    q_cap = 1.0
+end
+"""
+
+
 def test_parse_macro_model_flags_obc_and_evaluates_max_residual() -> None:
     model = parse_macro_model(OBC_MAX_SOURCE)
 
@@ -104,3 +132,47 @@ def test_obc_model_sep_enforces_max_constraint_along_path() -> None:
     r_path = np.asarray(result.solution.mean_path[r_index, 1:], dtype=np.float64)
     assert np.all(r_path >= 1.0 - 1e-8)
     assert np.any(np.isclose(r_path, 1.0, atol=1e-4))
+
+
+def test_obc_binding_max_linearization_freezes_constraint_branch() -> None:
+    model = parse_macro_model(OBC_BINDING_MAX_SOURCE)
+    first_order = solve_first_order_model(
+        model,
+        steady_state_initial_guess={"r": 1.0, "r_star": 1.0},
+    )
+
+    assert first_order.solution.converged
+    np.testing.assert_allclose(first_order.steady_state, [1.0, 1.0], rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(first_order.jacobian[0], dtype=np.float64),
+        [1.0, 0.0, 0.0, 0.0],
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(first_order.solution.solution_matrix[0], dtype=np.float64),
+        [0.0, 0.0],
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_obc_binding_min_linearization_freezes_constraint_branch() -> None:
+    model = parse_macro_model(OBC_BINDING_MIN_SOURCE)
+    steady_state = solve_steady_state(
+        model,
+        initial_guess={"q": 1.0, "q_star": 1.0},
+    )
+    jacobian = model.calculate_jacobian(
+        steady_state=steady_state.steady_state,
+        parameter_values=steady_state.parameter_values,
+    )
+
+    assert steady_state.converged
+    np.testing.assert_allclose(steady_state.steady_state, [1.0, 1.0], rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(jacobian[0], dtype=np.float64),
+        [1.0, 0.0, 0.0, 0.0],
+        rtol=0.0,
+        atol=1e-12,
+    )

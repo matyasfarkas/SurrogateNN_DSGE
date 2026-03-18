@@ -553,6 +553,20 @@ Python/JAX status:
 - tests now cover parsed-model `max` and `min` residual evaluation, simple OBC steady states, inactive-branch first-order solves away from the kink, and a parsed-model SEP path where a lower bound becomes active under a large negative deterministic shock
 - this does not claim full Julia OBC parity; it only narrows the boundary from “syntax unsupported” to “basic syntax works, while OBC-specific enforcement around kinks is still missing”
 
+### 36. Branch-frozen OBC linearization at the steady state
+
+Julia reference:
+
+- `src/MacroModelling.jl` (`replace_min_max`, steady-state min/max elimination)
+
+Python/JAX status:
+
+- derivative extraction for parsed OBC models now freezes `sp.Max` / `sp.Min` branches at the evaluation point before differentiating, instead of accepting SymPy's generic kink derivative
+- ties at the steady state now prefer the branch with fewer dynamic steady-state symbols, which correctly pins standard bound formulations like `max(r_star, zlb)` and `min(q_star, q_cap)` to the constant constraint branch when they bind
+- non-JAX steady-state and joint steady-state/calibration Newton solves now use the same branch-frozen Jacobians for OBC models, so first-order solution prep does not linearize with the previous spurious `0.5` derivatives at binding points
+- first-, second-, and third-order parsed derivative extraction now inherit the same branch-frozen OBC handling because `calculate_jacobian`, `calculate_hessian`, and `calculate_third_order_derivatives` resolve min/max branches before symbolic differentiation when `model.has_obc`
+- tests cover binding `max` and `min` steady states where the constrained variable stays fixed in the linearization, including regression coverage that the first equation Jacobian row is `[1, 0, 0, 0]` instead of a half-weighted kink derivative
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -563,7 +577,7 @@ Python/JAX status:
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
 - The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
-- The current parsed front end now supports basic `max` / `min` OBC syntax, but the Julia-specific enforcement layer around kinks, including subdifferential Newton options and the broader OBC runtime surface, is still unported.
+- The current parsed front end now supports basic `max` / `min` OBC syntax plus branch-frozen linearization around the active steady-state branch, but the Julia-specific enforcement layer around kinks, including subdifferential Newton options and the broader OBC runtime surface, is still unported.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, and the HMC backend across both low-level callback APIs plus parsed-model solves, but the remaining sparse-tree-specific Jacobian/runtime optimizations and OBC-specific subdifferential SEP machinery are still unported.

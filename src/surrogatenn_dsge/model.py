@@ -820,12 +820,19 @@ class MacroModel:
             jacobian_fns = (
                 lambda x: np.concatenate(
                     [
-                        np.asarray(
-                            self._steady_state_parameter_jacobian_fn(
-                                *base_steady_state,
-                                *x,
-                            ),
-                            dtype=np.float64,
+                        (
+                            self._evaluate_steady_state_obc_parameter_jacobian(
+                                base_steady_state,
+                                x,
+                            )
+                            if self.has_obc
+                            else np.asarray(
+                                self._steady_state_parameter_jacobian_fn(
+                                    *base_steady_state,
+                                    *x,
+                                ),
+                                dtype=np.float64,
+                            )
                         ),
                         np.asarray(
                             self._parameter_equation_jacobian_fn(*base_steady_state, *x),
@@ -950,6 +957,8 @@ class MacroModel:
                 ).reshape(-1)
 
             def jacobian_fn(x: np.ndarray) -> np.ndarray:
+                if self.has_obc:
+                    return self._evaluate_joint_steady_state_obc_jacobian(x)
                 return np.asarray(
                     self._joint_steady_state_jacobian_fn(*x),
                     dtype=np.float64,
@@ -986,6 +995,11 @@ class MacroModel:
                 ).reshape(-1)
 
             def jacobian_fn(x: np.ndarray) -> np.ndarray:
+                if self.has_obc:
+                    return self._evaluate_steady_state_obc_jacobian(
+                        x,
+                        resolved_parameters,
+                    )
                 return np.asarray(
                     self._steady_state_jacobian_fn(*x, *resolved_parameters),
                     dtype=np.float64,
@@ -2577,6 +2591,133 @@ class MacroModel:
         args.extend(float(x) for x in parameter_values)
         return args
 
+    def _steady_state_symbol_value_map(
+        self,
+        base_steady_state: Sequence[float],
+        parameter_values: Sequence[float],
+    ) -> dict[sp.Symbol, float]:
+        values = list(base_steady_state) + list(parameter_values)
+        symbols = list(self._steady_state_symbols) + list(self._parameter_symbols)
+        return {
+            symbol: float(value)
+            for symbol, value in zip(symbols, values)
+        }
+
+    def _resolve_steady_state_obc_expressions(
+        self,
+        base_steady_state: Sequence[float],
+        parameter_values: Sequence[float],
+    ) -> tuple[sp.Expr, ...]:
+        symbol_values = self._steady_state_symbol_value_map(
+            base_steady_state,
+            parameter_values,
+        )
+        preferred_symbols = frozenset(self._steady_state_symbols)
+        return tuple(
+            _freeze_obc_expression(
+                expr,
+                symbol_values=symbol_values,
+                preferred_symbols=preferred_symbols,
+            )
+            for expr in self._steady_state_expressions
+        )
+
+    def _evaluate_steady_state_obc_jacobian(
+        self,
+        base_steady_state: Sequence[float],
+        parameter_values: Sequence[float],
+    ) -> np.ndarray:
+        resolved = self._resolve_steady_state_obc_expressions(
+            base_steady_state,
+            parameter_values,
+        )
+        matrix = sp.Matrix(resolved).jacobian(self._steady_state_symbols)
+        values = list(base_steady_state) + list(parameter_values)
+        symbols = list(self._steady_state_symbols) + list(self._parameter_symbols)
+        return _evaluate_symbolic_matrix(matrix, symbols, values)
+
+    def _evaluate_steady_state_obc_parameter_jacobian(
+        self,
+        base_steady_state: Sequence[float],
+        parameter_values: Sequence[float],
+    ) -> np.ndarray:
+        resolved = self._resolve_steady_state_obc_expressions(
+            base_steady_state,
+            parameter_values,
+        )
+        matrix = sp.Matrix(resolved).jacobian(self._parameter_symbols)
+        values = list(base_steady_state) + list(parameter_values)
+        symbols = list(self._steady_state_symbols) + list(self._parameter_symbols)
+        return _evaluate_symbolic_matrix(matrix, symbols, values)
+
+    def _evaluate_joint_steady_state_obc_jacobian(
+        self,
+        joint_values: Sequence[float],
+    ) -> np.ndarray:
+        n_steady = len(self._steady_state_symbols)
+        base_steady_state = joint_values[:n_steady]
+        parameter_values = joint_values[n_steady:]
+        resolved = self._resolve_steady_state_obc_expressions(
+            base_steady_state,
+            parameter_values,
+        )
+        matrix = sp.Matrix(list(resolved) + list(self._parameter_expressions)).jacobian(
+            self._joint_unknown_symbols
+        )
+        return _evaluate_symbolic_matrix(matrix, self._joint_unknown_symbols, joint_values)
+
+    def _resolve_dynamic_obc_expressions(
+        self,
+        full_steady_state: Sequence[float],
+        parameter_values: Sequence[float],
+    ) -> tuple[sp.Expr, ...]:
+        evaluation_args = self._dynamic_evaluation_args(
+            np.asarray(full_steady_state, dtype=np.float64),
+            np.asarray(parameter_values, dtype=np.float64),
+        )
+        symbol_values = {
+            symbol: float(value)
+            for symbol, value in zip(self._dynamic_input_symbols, evaluation_args)
+        }
+        preferred_symbols = frozenset(self._dynamic_symbols)
+        return tuple(
+            _freeze_obc_expression(
+                expr,
+                symbol_values=symbol_values,
+                preferred_symbols=preferred_symbols,
+            )
+            for expr in self._dynamic_expressions
+        )
+
+    def _evaluate_dynamic_obc_derivatives(
+        self,
+        full_steady_state: Sequence[float],
+        parameter_values: Sequence[float],
+        *,
+        order: int,
+    ) -> np.ndarray:
+        full_state = np.asarray(full_steady_state, dtype=np.float64)
+        parameters = np.asarray(parameter_values, dtype=np.float64)
+        evaluation_args = self._dynamic_evaluation_args(full_state, parameters)
+        resolved = self._resolve_dynamic_obc_expressions(full_state, parameters)
+        if order == 1:
+            matrix = sp.Matrix(resolved).jacobian(self._dynamic_symbols)
+        elif order == 2:
+            matrix = sp.Matrix(
+                [_flatten_hessian(expr, self._dynamic_symbols) for expr in resolved]
+            )
+        elif order == 3:
+            matrix = sp.Matrix(
+                [_flatten_third_order(expr, self._dynamic_symbols) for expr in resolved]
+            )
+        else:
+            raise ValueError(f"Unsupported derivative order `{order}`.")
+        return _evaluate_symbolic_matrix(
+            matrix,
+            self._dynamic_input_symbols,
+            evaluation_args,
+        )
+
     def calculate_jacobian(
         self,
         *,
@@ -2600,6 +2741,13 @@ class MacroModel:
                     dtype=np.float64,
                 )
             )
+        if self.has_obc:
+            values = self._evaluate_dynamic_obc_derivatives(
+                full_steady_state,
+                resolved_parameters,
+                order=1,
+            )
+            return jnp.asarray(values, dtype=jnp.float64)
         values = np.asarray(
             self._dynamic_jacobian_fn(
                 *self._dynamic_evaluation_args(full_steady_state, resolved_parameters)
@@ -2631,6 +2779,13 @@ class MacroModel:
                     dtype=np.float64,
                 )
             )
+        if self.has_obc:
+            values = self._evaluate_dynamic_obc_derivatives(
+                full_steady_state,
+                resolved_parameters,
+                order=2,
+            )
+            return jnp.asarray(values, dtype=jnp.float64)
         values = np.asarray(
             self._dynamic_hessian_fn(
                 *self._dynamic_evaluation_args(full_steady_state, resolved_parameters)
@@ -2662,6 +2817,13 @@ class MacroModel:
                     dtype=np.float64,
                 )
             )
+        if self.has_obc:
+            values = self._evaluate_dynamic_obc_derivatives(
+                full_steady_state,
+                resolved_parameters,
+                order=3,
+            )
+            return jnp.asarray(values, dtype=jnp.float64)
         values = np.asarray(
             self._dynamic_third_order_fn(
                 *self._dynamic_evaluation_args(full_steady_state, resolved_parameters)
@@ -4910,6 +5072,83 @@ def _parse_bound_value(text: str) -> float:
 
 def _expression_contains_obc(expr: sp.Expr) -> bool:
     return bool(expr.has(sp.Max, sp.Min))
+
+
+def _obc_branch_preference_score(
+    expr: sp.Expr,
+    preferred_symbols: frozenset[sp.Symbol],
+) -> tuple[int, int, int, str]:
+    free_symbols = expr.free_symbols
+    preferred_count = sum(1 for symbol in free_symbols if symbol in preferred_symbols)
+    return (
+        preferred_count,
+        len(free_symbols),
+        int(sp.count_ops(expr, visual=False)),
+        str(expr),
+    )
+
+
+def _evaluate_obc_expression_value(
+    expr: sp.Expr,
+    symbol_values: Mapping[sp.Symbol, float],
+) -> float:
+    numeric = complex(sp.N(expr.subs(symbol_values)))
+    if not np.isfinite(numeric.real) or abs(numeric.imag) > 1e-10:
+        raise ValueError(f"OBC branch expression did not evaluate to a finite real value: {expr}")
+    return float(numeric.real)
+
+
+def _freeze_obc_expression(
+    expr: sp.Expr,
+    *,
+    symbol_values: Mapping[sp.Symbol, float],
+    preferred_symbols: frozenset[sp.Symbol],
+    tie_tolerance: float = 1e-10,
+) -> sp.Expr:
+    if not isinstance(expr, sp.Basic) or not expr.args:
+        return expr
+
+    resolved_args = tuple(
+        _freeze_obc_expression(
+            arg,
+            symbol_values=symbol_values,
+            preferred_symbols=preferred_symbols,
+            tie_tolerance=tie_tolerance,
+        )
+        if isinstance(arg, sp.Basic)
+        else arg
+        for arg in expr.args
+    )
+    resolved_expr = expr.func(*resolved_args)
+    if resolved_expr.func not in (sp.Max, sp.Min):
+        return resolved_expr
+
+    numeric_values = [
+        _evaluate_obc_expression_value(arg, symbol_values) for arg in resolved_args
+    ]
+    target_value = (
+        max(numeric_values) if resolved_expr.func is sp.Max else min(numeric_values)
+    )
+    candidate_args = [
+        arg
+        for arg, value in zip(resolved_args, numeric_values)
+        if abs(value - target_value) <= tie_tolerance
+    ]
+    if len(candidate_args) == 1:
+        return candidate_args[0]
+    return min(
+        candidate_args,
+        key=lambda arg: _obc_branch_preference_score(arg, preferred_symbols),
+    )
+
+
+def _evaluate_symbolic_matrix(
+    matrix: sp.Matrix,
+    symbols: Sequence[sp.Symbol],
+    values: Sequence[float],
+) -> np.ndarray:
+    fn = sp.lambdify(symbols, matrix, modules=_numpy_lambdify_modules())
+    return np.asarray(fn(*values), dtype=np.float64)
 
 
 def _bound_from_comparison(
