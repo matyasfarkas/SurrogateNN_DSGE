@@ -586,11 +586,6 @@ def _solve_stochastic_extended_path_impl(
         raise ValueError(
             "Either `residual_fn` or `conditional_residual_fn` must be provided."
         )
-    if config.expectation_method == "hmc" and conditional_residual_fn is None:
-        raise ValueError(
-            "SEPConfig.expectation_method='hmc' is currently supported only for "
-            "`solve_stochastic_extended_path_residual_expectation`."
-        )
 
     if deterministic_shocks is None:
         deterministic = jnp.zeros((config.periods, shock_dim), dtype=jnp.float64)
@@ -714,6 +709,37 @@ def _solve_stochastic_extended_path_impl(
                 current_shock = deterministic_shock + stochastic_shock
 
                 if conditional_residual_fn is None:
+                    if use_hmc and t < config.periods and t <= config.branching_order and shock_dim > 0:
+                        next_state = next_states[0]
+
+                        def sample_residual(sampled_shock: jax.Array) -> jax.Array:
+                            expected_term = expectation_fn(
+                                next_state,
+                                deterministic[t] + sampled_shock,
+                                params,
+                            )
+                            return residual_fn(
+                                prev_state,
+                                current_states[g],
+                                expected_term,
+                                current_shock,
+                                params,
+                            )
+
+                        sample_key = jax.random.PRNGKey(config.hmc_seed)
+                        sample_key = jax.random.fold_in(sample_key, t)
+                        sample_key = jax.random.fold_in(sample_key, g)
+                        sample_key = jax.random.fold_in(sample_key, 17)
+                        residuals.append(
+                            _hmc_expectation_mean(
+                                sample_residual,
+                                shock_dim=shock_dim,
+                                config=config,
+                                key=sample_key,
+                            )
+                        )
+                        continue
+
                     if t == config.periods:
                         expected_term = terminal_expectation
                     else:

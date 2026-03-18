@@ -371,19 +371,78 @@ def test_sep_hmc_parallel_tempering_runs() -> None:
     assert np.all(np.isfinite(solution.mean_path))
 
 
-def test_sep_hmc_rejects_non_conditional_api() -> None:
+def test_sep_hmc_legacy_expectation_api_runs_deterministically() -> None:
+    deterministic_shocks = jnp.asarray([[0.15], [0.0], [0.0]], dtype=jnp.float64)
+
     def residual(y_prev, y_curr, expected_next, shock, params):
         return y_curr - (0.4 * y_prev + 0.2 * expected_next + shock)
 
-    with np.testing.assert_raises_regex(ValueError, "currently supported only"):
-        solve_stochastic_extended_path(
-            residual,
-            initial_state=[0.0],
-            terminal_state=[0.0],
-            shock_dim=1,
-            config=SEPConfig(
-                periods=3,
-                branching_order=1,
-                expectation_method="hmc",
-            ),
-        )
+    def expectation(next_state, next_shock, params):
+        del next_state, next_shock, params
+        return jnp.asarray([0.5], dtype=jnp.float64)
+
+    gh_solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            nnodes=3,
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+        expectation_fn=expectation,
+    )
+    hmc_1 = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            expectation_method="hmc",
+            hmc_samples=16,
+            hmc_warmup=8,
+            hmc_leapfrog_steps=6,
+            hmc_step_size=0.07,
+            hmc_seed=19,
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+        expectation_fn=expectation,
+    )
+    hmc_2 = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            expectation_method="hmc",
+            hmc_samples=16,
+            hmc_warmup=8,
+            hmc_leapfrog_steps=6,
+            hmc_step_size=0.07,
+            hmc_seed=19,
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+        expectation_fn=expectation,
+    )
+
+    assert gh_solution.converged
+    assert hmc_1.converged
+    assert hmc_2.converged
+    assert hmc_1.group_counts == (1, 1, 1, 1)
+    np.testing.assert_allclose(hmc_1.mean_path, hmc_2.mean_path, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(hmc_1.mean_path, gh_solution.mean_path, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(
+        hmc_1.stacked_states,
+        np.asarray(hmc_1.mean_path[:, 1:], dtype=np.float64).reshape(-1),
+        rtol=1e-12,
+        atol=1e-12,
+    )
