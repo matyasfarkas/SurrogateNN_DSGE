@@ -58,6 +58,7 @@ Implemented:
 - generic callback-based stochastic extended path solver with Gauss-Hermite branching
 - sparse fishbone stochastic extended path branching for callback-based and parsed-model SEP solves, including real `sep_sparse_tree` runtime support in the inversion bridge
 - adaptive Levenberg-Marquardt damping, explicit SEP config validation, and checked warm-start support for more robust nonlinear SEP solves
+- HMC expectation backend for the residual-expectation SEP path, including parsed-model SEP solves and optional parallel tempering
 - parsed-model stochastic extended path solve path with JAX dynamic residual evaluation and residual-expectation averaging over future branches
 - focused tests for residuals, symmetry, fallback behavior, JIT, autodiff, parser parity, inversion filtering, switching likelihoods, gate calibration, and multi-model JAX compile smoke across upstream model files
 
@@ -67,7 +68,7 @@ Not implemented yet:
 - ambiguous multi-family calibration-equation broadcasting remains guarded rather than inferred
 - the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds
 - occasionally binding constraint parsing from the Julia macro layer
-- Julia HMC SEP variants, the remaining sparse-tree-specific Jacobian/runtime optimizations, and OBC-specific SEP machinery
+- HMC on the older `residual_fn` / `expectation_fn` SEP API, the remaining sparse-tree-specific Jacobian/runtime optimizations, and OBC-specific SEP machinery
 - fully GPU-native generalized QZ / ordered-QZ primitives; the current JAX-facing `schur` QME path uses a SciPy host callback in the primal solve because JAX does not yet expose generalized `qz` / `ordqz`
 - the public first-order default now matches Julia and uses `schur`; request `qme_algorithm=\"doubling\"` explicitly if you want to stay on the fully JAX-native doubling path
 - the new determinacy diagnostics are currently tied to the Schur/QZ path; the doubling path still solves the QME but does not provide a comparable stable-root decomposition report

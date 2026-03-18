@@ -285,3 +285,105 @@ def test_sep_validates_bad_config_values() -> None:
                 line_search_factor=1.0,
             ),
         )
+
+
+def test_sep_hmc_residual_expectation_is_deterministic_for_fixed_seed() -> None:
+    deterministic_shocks = jnp.asarray([[0.1], [0.0], [0.0]], dtype=jnp.float64)
+
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        return y_curr - (0.3 * y_prev + 0.25 * y_next + shock)
+
+    hmc_1 = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            expectation_method="hmc",
+            hmc_samples=16,
+            hmc_warmup=8,
+            hmc_leapfrog_steps=6,
+            hmc_step_size=0.07,
+            hmc_seed=7,
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+    hmc_2 = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            expectation_method="hmc",
+            hmc_samples=16,
+            hmc_warmup=8,
+            hmc_leapfrog_steps=6,
+            hmc_step_size=0.07,
+            hmc_seed=7,
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+
+    assert hmc_1.converged
+    assert hmc_2.converged
+    assert hmc_1.group_counts == (1, 1, 1, 1)
+    np.testing.assert_allclose(
+        hmc_1.mean_path,
+        hmc_2.mean_path,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_sep_hmc_parallel_tempering_runs() -> None:
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        return y_curr - (0.2 * y_prev + 0.15 * y_next**2 + shock)
+
+    solution = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            expectation_method="hmc",
+            hmc_samples=12,
+            hmc_warmup=6,
+            hmc_leapfrog_steps=5,
+            hmc_step_size=0.06,
+            hmc_use_tempering=True,
+            hmc_temperatures=(1.0, 0.5, 0.25),
+            hmc_swap_interval=4,
+            hmc_seed=3,
+            tol=1e-8,
+        ),
+        deterministic_shocks=[[0.15], [0.0], [0.0]],
+    )
+
+    assert solution.converged
+    assert np.all(np.isfinite(solution.mean_path))
+
+
+def test_sep_hmc_rejects_non_conditional_api() -> None:
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        return y_curr - (0.4 * y_prev + 0.2 * expected_next + shock)
+
+    with np.testing.assert_raises_regex(ValueError, "currently supported only"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(
+                periods=3,
+                branching_order=1,
+                expectation_method="hmc",
+            ),
+        )

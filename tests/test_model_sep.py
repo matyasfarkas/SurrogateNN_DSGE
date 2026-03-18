@@ -90,3 +90,25 @@ def test_parsed_model_sep_matches_manual_conditional_residual_solver() -> None:
         rtol=1e-10,
         atol=1e-10,
     )
+
+
+def test_parsed_model_sep_hmc_backend_runs() -> None:
+    model = parse_macro_model(NONLINEAR_SEP_SOURCE)
+    solution = solve_stochastic_extended_path_model(
+        model,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            expectation_method="hmc",
+            hmc_samples=16,
+            hmc_warmup=8,
+            hmc_leapfrog_steps=6,
+            hmc_step_size=0.07,
+            hmc_seed=11,
+            tol=1e-8,
+        ),
+        deterministic_shocks={"u": [0.2, 0.0, 0.0]},
+    )
+
+    assert solution.solution.converged
+    assert np.all(np.isfinite(solution.solution.mean_path))

@@ -37,6 +37,15 @@ class SEPConfig:
     nnodes: int = 3
     shock_scale: float = 1.0
     sparse_tree: bool = False
+    expectation_method: str = "gauss_hermite"
+    hmc_samples: int = 100
+    hmc_warmup: int = 50
+    hmc_leapfrog_steps: int = 10
+    hmc_step_size: float = 0.1
+    hmc_use_tempering: bool = False
+    hmc_temperatures: tuple[float, ...] = (1.0, 0.5, 0.25)
+    hmc_swap_interval: int = 10
+    hmc_seed: int = 0
     max_iter: int = 80
     tol: float = 1e-7
     line_search_factor: float = 0.5
@@ -60,6 +69,34 @@ def _validate_sep_config(config: SEPConfig, *, shock_dim: int) -> None:
         raise ValueError(
             f"SEPConfig.shock_scale must be > 0, got {config.shock_scale}."
         )
+    if config.expectation_method not in {"gauss_hermite", "hmc"}:
+        raise ValueError(
+            "SEPConfig.expectation_method must be 'gauss_hermite' or 'hmc', "
+            f"got {config.expectation_method!r}."
+        )
+    if config.hmc_samples < 1:
+        raise ValueError(
+            f"SEPConfig.hmc_samples must be >= 1, got {config.hmc_samples}."
+        )
+    if config.hmc_warmup < 0:
+        raise ValueError(
+            f"SEPConfig.hmc_warmup must be >= 0, got {config.hmc_warmup}."
+        )
+    if config.hmc_leapfrog_steps < 1:
+        raise ValueError(
+            "SEPConfig.hmc_leapfrog_steps must be >= 1, "
+            f"got {config.hmc_leapfrog_steps}."
+        )
+    if config.hmc_step_size <= 0.0:
+        raise ValueError(
+            f"SEPConfig.hmc_step_size must be > 0, got {config.hmc_step_size}."
+        )
+    if config.hmc_swap_interval < 1:
+        raise ValueError(
+            f"SEPConfig.hmc_swap_interval must be >= 1, got {config.hmc_swap_interval}."
+        )
+    if any(temp <= 0.0 for temp in config.hmc_temperatures):
+        raise ValueError("SEPConfig.hmc_temperatures must be strictly positive.")
     if config.max_iter < 1:
         raise ValueError(f"SEPConfig.max_iter must be >= 1, got {config.max_iter}.")
     if config.tol <= 0.0:
@@ -312,6 +349,169 @@ def _child_groups(
     return (group,)
 
 
+def _hmc_step(
+    epsilon: jax.Array,
+    *,
+    key: jax.Array,
+    energy_fn: Callable[[jax.Array], jax.Array],
+    variance: float,
+    leapfrog_steps: int,
+    step_size: float,
+    temperature: float = 1.0,
+) -> tuple[jax.Array, bool]:
+    key_momentum, key_accept = jax.random.split(key)
+    scaled_variance = variance * temperature
+    inv_scaled_variance = 1.0 / scaled_variance
+    momentum = jax.random.normal(
+        key_momentum,
+        shape=epsilon.shape,
+        dtype=jnp.float64,
+    ) * jnp.sqrt(inv_scaled_variance)
+
+    def tempered_energy(position: jax.Array) -> jax.Array:
+        return energy_fn(position) / temperature
+
+    energy_and_grad = jax.value_and_grad(tempered_energy)
+    old_energy = tempered_energy(epsilon) + 0.5 * scaled_variance * jnp.vdot(momentum, momentum)
+
+    eps_new = epsilon
+    mom_new = momentum
+    energy_value, grad_value = energy_and_grad(eps_new)
+    if not bool(jnp.isfinite(energy_value)) or not bool(jnp.all(jnp.isfinite(grad_value))):
+        return epsilon, False
+    mom_new = mom_new - 0.5 * step_size * grad_value
+
+    for _ in range(max(leapfrog_steps - 1, 0)):
+        eps_new = eps_new + step_size * scaled_variance * mom_new
+        energy_value, grad_value = energy_and_grad(eps_new)
+        if not bool(jnp.isfinite(energy_value)) or not bool(jnp.all(jnp.isfinite(grad_value))):
+            return epsilon, False
+        mom_new = mom_new - step_size * grad_value
+
+    eps_new = eps_new + step_size * scaled_variance * mom_new
+    energy_value, grad_value = energy_and_grad(eps_new)
+    if not bool(jnp.isfinite(energy_value)) or not bool(jnp.all(jnp.isfinite(grad_value))):
+        return epsilon, False
+    mom_new = mom_new - 0.5 * step_size * grad_value
+
+    new_energy = tempered_energy(eps_new) + 0.5 * scaled_variance * jnp.vdot(mom_new, mom_new)
+    log_accept_ratio = old_energy - new_energy
+    accept_probability = jnp.where(
+        jnp.isfinite(log_accept_ratio),
+        jnp.exp(jnp.minimum(log_accept_ratio, 0.0)),
+        0.0,
+    )
+    accepted = bool(
+        np.asarray(
+            jax.random.uniform(key_accept, (), dtype=jnp.float64) < accept_probability
+        )
+    )
+    return (eps_new if accepted else epsilon), accepted
+
+
+def _hmc_expectation_mean(
+    sample_fn: Callable[[jax.Array], jax.Array],
+    *,
+    shock_dim: int,
+    config: SEPConfig,
+    key: jax.Array,
+) -> jax.Array:
+    if shock_dim == 0:
+        return sample_fn(jnp.zeros((0,), dtype=jnp.float64))
+
+    variance = float(config.shock_scale**2)
+
+    def energy_fn(epsilon: jax.Array) -> jax.Array:
+        sample = sample_fn(epsilon)
+        if not bool(jnp.all(jnp.isfinite(sample))):
+            return jnp.asarray(jnp.inf, dtype=jnp.float64)
+        return 0.5 * jnp.vdot(sample, sample)
+
+    total_draws = config.hmc_samples + config.hmc_warmup
+
+    if not config.hmc_use_tempering:
+        chain = jnp.zeros((shock_dim,), dtype=jnp.float64)
+        samples: list[jax.Array] = []
+        for draw_index in range(total_draws):
+            draw_key = jax.random.fold_in(key, draw_index)
+            chain, _ = _hmc_step(
+                chain,
+                key=draw_key,
+                energy_fn=energy_fn,
+                variance=variance,
+                leapfrog_steps=config.hmc_leapfrog_steps,
+                step_size=config.hmc_step_size,
+            )
+            if draw_index >= config.hmc_warmup:
+                samples.append(sample_fn(chain))
+        return jnp.mean(jnp.stack(samples, axis=0), axis=0)
+
+    temperatures = tuple(float(temp) for temp in config.hmc_temperatures)
+    chains = [
+        jnp.zeros((shock_dim,), dtype=jnp.float64)
+        for _ in range(len(temperatures))
+    ]
+    cold_samples: list[jax.Array] = []
+    for draw_index in range(total_draws):
+        for chain_index, temperature in enumerate(temperatures):
+            draw_key = jax.random.fold_in(key, draw_index * len(temperatures) + chain_index)
+            chains[chain_index], _ = _hmc_step(
+                chains[chain_index],
+                key=draw_key,
+                energy_fn=energy_fn,
+                variance=variance,
+                leapfrog_steps=config.hmc_leapfrog_steps,
+                step_size=config.hmc_step_size,
+                temperature=temperature,
+            )
+        if (draw_index + 1) % config.hmc_swap_interval == 0:
+            for chain_index in range(len(temperatures) - 1):
+                key_swap = jax.random.fold_in(
+                    key,
+                    total_draws * len(temperatures) + draw_index * len(temperatures) + chain_index,
+                )
+                energy_i = float(np.asarray(energy_fn(chains[chain_index])))
+                energy_j = float(np.asarray(energy_fn(chains[chain_index + 1])))
+                temp_i = temperatures[chain_index]
+                temp_j = temperatures[chain_index + 1]
+                delta = (1.0 / temp_j - 1.0 / temp_i) * (energy_j - energy_i)
+                if np.isfinite(delta):
+                    accept_swap = bool(
+                        np.asarray(
+                            jax.random.uniform(key_swap, (), dtype=jnp.float64)
+                            < np.exp(min(delta, 0.0))
+                        )
+                    )
+                    if accept_swap:
+                        chains[chain_index], chains[chain_index + 1] = (
+                            chains[chain_index + 1],
+                            chains[chain_index],
+                        )
+        if draw_index >= config.hmc_warmup:
+            cold_samples.append(sample_fn(chains[-1]))
+    return jnp.mean(jnp.stack(cold_samples, axis=0), axis=0)
+
+
+def _finite_difference_jacobian(
+    residual_fn: Callable[[jax.Array], jax.Array],
+    x: jax.Array,
+) -> jax.Array:
+    x_array = np.asarray(x, dtype=np.float64)
+    base = np.asarray(residual_fn(jnp.asarray(x_array, dtype=jnp.float64)), dtype=np.float64)
+    jacobian = np.zeros((base.size, x_array.size), dtype=np.float64)
+    for idx in range(x_array.size):
+        step_scale = max(1.0, abs(float(x_array[idx])))
+        step_size = max(np.sqrt(np.finfo(np.float64).eps) * step_scale, 1e-7)
+        perturbed = x_array.copy()
+        perturbed[idx] += step_size
+        shifted = np.asarray(
+            residual_fn(jnp.asarray(perturbed, dtype=jnp.float64)),
+            dtype=np.float64,
+        )
+        jacobian[:, idx] = (shifted - base) / step_size
+    return jnp.asarray(jacobian, dtype=jnp.float64)
+
+
 def solve_stochastic_extended_path(
     residual_fn: SEPResidualFn,
     *,
@@ -386,6 +586,11 @@ def _solve_stochastic_extended_path_impl(
         raise ValueError(
             "Either `residual_fn` or `conditional_residual_fn` must be provided."
         )
+    if config.expectation_method == "hmc" and conditional_residual_fn is None:
+        raise ValueError(
+            "SEPConfig.expectation_method='hmc' is currently supported only for "
+            "`solve_stochastic_extended_path_residual_expectation`."
+        )
 
     if deterministic_shocks is None:
         deterministic = jnp.zeros((config.periods, shock_dim), dtype=jnp.float64)
@@ -397,23 +602,31 @@ def _solve_stochastic_extended_path_impl(
                 f"({config.periods}, {shock_dim}), got {deterministic.shape}."
             )
 
+    use_hmc = config.expectation_method == "hmc"
     rule = (
-        _gauss_hermite_sparse_rule(config.nnodes, shock_dim, config.shock_scale)
-        if config.sparse_tree
-        else gauss_hermite_rule(config.nnodes, shock_dim, config.shock_scale)
+        GaussHermiteRule(
+            nodes=jnp.zeros((1, shock_dim), dtype=jnp.float64),
+            weights=jnp.ones((1,), dtype=jnp.float64),
+        )
+        if use_hmc
+        else (
+            _gauss_hermite_sparse_rule(config.nnodes, shock_dim, config.shock_scale)
+            if config.sparse_tree
+            else gauss_hermite_rule(config.nnodes, shock_dim, config.shock_scale)
+        )
     )
     num_nodes = int(rule.weights.shape[0])
     counts = _group_counts(
         config.periods,
-        config.branching_order,
+        0 if use_hmc else config.branching_order,
         num_nodes,
-        sparse_tree=config.sparse_tree,
+        sparse_tree=(config.sparse_tree and not use_hmc),
     )
     probabilities = _group_probabilities(
         rule,
         config.periods,
-        config.branching_order,
-        sparse_tree=config.sparse_tree,
+        0 if use_hmc else config.branching_order,
+        sparse_tree=(config.sparse_tree and not use_hmc),
     )
 
     if expectation_fn is None and conditional_residual_fn is None:
@@ -484,6 +697,8 @@ def _solve_stochastic_extended_path_impl(
                     if config.sparse_tree
                     else config.branching_order
                 )
+                if use_hmc:
+                    stochastic_time_limit = config.branching_order
                 stochastic_shock = (
                     _group_shock_at_time(
                         rule,
@@ -491,9 +706,9 @@ def _solve_stochastic_extended_path_impl(
                         t,
                         config.branching_order,
                         num_nodes,
-                        sparse_tree=config.sparse_tree,
+                        sparse_tree=(config.sparse_tree and not use_hmc),
                     )
-                    if t <= stochastic_time_limit and shock_dim > 0
+                    if (not use_hmc) and t <= stochastic_time_limit and shock_dim > 0
                     else zero_shock
                 )
                 current_shock = deterministic_shock + stochastic_shock
@@ -507,7 +722,7 @@ def _solve_stochastic_extended_path_impl(
                             t,
                             config.branching_order,
                             num_nodes,
-                            sparse_tree=config.sparse_tree,
+                            sparse_tree=(config.sparse_tree and not use_hmc),
                         )
                         if len(child_groups) == 1:
                             child_shock = (
@@ -519,7 +734,7 @@ def _solve_stochastic_extended_path_impl(
                                         t + 1,
                                         config.branching_order,
                                         num_nodes,
-                                        sparse_tree=config.sparse_tree,
+                                        sparse_tree=(config.sparse_tree and not use_hmc),
                                     )
                                     if t + 1 <= stochastic_time_limit
                                     else zero_shock
@@ -539,7 +754,7 @@ def _solve_stochastic_extended_path_impl(
                                     t + 1,
                                     config.branching_order,
                                     num_nodes,
-                                    sparse_tree=config.sparse_tree,
+                                    sparse_tree=(config.sparse_tree and not use_hmc),
                                 )
                                 child_terms.append(
                                     rule.weights[local_idx]
@@ -561,6 +776,31 @@ def _solve_stochastic_extended_path_impl(
                     )
                     continue
 
+                if use_hmc and t <= config.branching_order and shock_dim > 0:
+                    next_state = terminal_state_arr if t == config.periods else next_states[0]
+
+                    def sample_residual(sampled_shock: jax.Array) -> jax.Array:
+                        return conditional_residual_fn(
+                            prev_state,
+                            current_states[g],
+                            next_state,
+                            deterministic_shock + sampled_shock,
+                            params,
+                        )
+
+                    sample_key = jax.random.PRNGKey(config.hmc_seed)
+                    sample_key = jax.random.fold_in(sample_key, t)
+                    sample_key = jax.random.fold_in(sample_key, g)
+                    residuals.append(
+                        _hmc_expectation_mean(
+                            sample_residual,
+                            shock_dim=shock_dim,
+                            config=config,
+                            key=sample_key,
+                        )
+                    )
+                    continue
+
                 if t == config.periods:
                     residuals.append(
                         conditional_residual_fn(
@@ -578,7 +818,7 @@ def _solve_stochastic_extended_path_impl(
                     t,
                     config.branching_order,
                     num_nodes,
-                    sparse_tree=config.sparse_tree,
+                    sparse_tree=(config.sparse_tree and not use_hmc),
                 )
                 if len(child_groups) == 1:
                     residuals.append(
@@ -621,7 +861,11 @@ def _solve_stochastic_extended_path_impl(
             iterations = iteration - 1
             break
 
-        jacobian = jax.jacobian(residual_vector)(current)
+        jacobian = (
+            _finite_difference_jacobian(residual_vector, current)
+            if use_hmc
+            else jax.jacobian(residual_vector)(current)
+        )
         normal_matrix = jacobian.T @ jacobian
         gradient = jacobian.T @ residual
         eye = jnp.eye(normal_matrix.shape[0], dtype=normal_matrix.dtype)

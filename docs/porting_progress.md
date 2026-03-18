@@ -523,6 +523,22 @@ Python/JAX status:
 - exact warm starts from prior `stacked_states` now short-circuit cleanly with zero additional iterations when the supplied solution already satisfies the nonlinear system
 - tests cover warm-start exact reuse, invalid warm-start shape errors, sparse-tree `nnodes` validation, bad line-search configuration rejection, plus regression checks that parsed-model SEP and SEP inversion still pass on top of the hardened core
 
+### 34. HMC expectation backend for SEP
+
+Julia reference:
+
+- `src/hmc_sep.jl`
+- `src/sep_solver.jl` (`sep_expectation_method = :hmc`)
+
+Python/JAX status:
+
+- `SEPConfig` now exposes `expectation_method="gauss_hermite" | "hmc"` together with HMC controls for sample count, warmup, leapfrog steps, step size, tempering, temperatures, swap interval, and seed
+- the residual-expectation SEP path now supports an HMC expectation backend that replaces Gauss-Hermite branching with adaptive shock sampling and uses a finite-difference Newton Jacobian, which is closer to the Julia HMC SEP strategy than tracing through the sampler
+- optional parallel tempering is implemented for the HMC backend and can be enabled with `hmc_use_tempering=True`
+- parsed-model SEP solves now inherit the same HMC backend automatically when `solve_stochastic_extended_path_model` is called with `SEPConfig(expectation_method="hmc", ...)`
+- the older `solve_stochastic_extended_path` API based on `residual_fn` plus `expectation_fn` is still explicitly GH-only; HMC currently targets the residual-expectation callback/model path where the Julia port maps cleanly
+- tests cover deterministic fixed-seed HMC behavior, HMC tempering smoke, rejection of the unsupported legacy API combination, and parsed-model HMC SEP smoke
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -536,7 +552,7 @@ Python/JAX status:
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
-- The parsed SEP path now covers both the full-tree Gauss-Hermite residual-expectation solver and the sparse fishbone tree, but Julia HMC expectations, the remaining sparse-tree-specific Jacobian/runtime optimizations, and OBC-specific subdifferential SEP machinery are still not ported.
+- The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, and the HMC residual-expectation backend, but HMC is still not ported on the older `residual_fn` / `expectation_fn` API, and the remaining sparse-tree-specific Jacobian/runtime optimizations plus OBC-specific subdifferential SEP machinery are still unported.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed SEP path with both full-tree and sparse fishbone branching.
