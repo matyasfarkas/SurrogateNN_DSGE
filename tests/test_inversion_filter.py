@@ -227,3 +227,31 @@ def test_sep_inversion_accepts_runtime_overrides() -> None:
     assert diagnostics["sep_nnodes"] == 3
     assert diagnostics["sep_sparse_tree"] is True
     assert diagnostics["sep_inv_maxit"] == 8
+
+
+def test_sep_inversion_honors_sparse_tree_in_config() -> None:
+    model, _, levels = _sep_inversion_fixture()
+    config = SEPConfig(
+        periods=4,
+        branching_order=1,
+        nnodes=3,
+        sparse_tree=True,
+        tol=1e-7,
+    )
+
+    reset_sep_inversion_last_diagnostics()
+    value = inversion_loglikelihood_from_model(
+        model,
+        levels,
+        observables=("y",),
+        algorithm="stochastic_extended_path",
+        config=config,
+        on_failure_loglikelihood=-1e12,
+    )
+    diagnostics = get_sep_inversion_last_diagnostics()
+
+    assert np.isfinite(value)
+    assert diagnostics is not None
+    assert diagnostics["status"] == "ok"
+    assert diagnostics["sep_sparse_tree"] is True
+    assert diagnostics["sep_periods"] == 4

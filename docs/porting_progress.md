@@ -494,6 +494,21 @@ Python/JAX status:
 - `chunk_stats` now extracts acceptance, divergence, and step-size diagnostics from finished NumPyro runs when those diagnostics are available, while also honoring lightweight synthetic/checkpoint payloads for downstream summaries
 - tests cover raw sample-mapping parity, epsilon-site parsing and mismatch warnings, and real NumPyro `MCMC` extraction for both draw matrices and chunk statistics
 
+### 32. Sparse fishbone SEP tree
+
+Julia reference:
+
+- `src/sep_solver.jl` (`SEPLayout`, `parent_group_sparse`, `child_groups_sparse`, `branch_info_sparse`, `build_sparse_shock_nodes`)
+
+Python/JAX status:
+
+- the generic SEP core now implements a real sparse fishbone tree instead of treating `sep_sparse_tree` as an API-compatibility no-op
+- `SEPConfig` now includes `sparse_tree`, and the low-level solver now switches between the full tensor-product Gauss-Hermite tree and a monomial sparse-tree rule with Julia-style fishbone branching semantics
+- sparse-tree group counts, branch identities, parent/child navigation, probabilities, and one-period node shocks now follow the Julia convention where only the trunk branches and new side branches appear from period 2 onward
+- the parsed-model SEP solve path uses the same sparse-tree core automatically when `SEPConfig(sparse_tree=True)` is supplied
+- the SEP inversion filter now honors sparse-tree configuration both through `SEPConfig(sparse_tree=True)` and the Julia-style `sep_sparse_tree` runtime override, instead of always forcing the full tree
+- tests verify the sparse fishbone group-count layout directly, confirm that sparse and full trees deliver the same linear mean path under zero-mean shocks, and verify that the parsed SEP inversion bridge now preserves `config.sparse_tree`
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -507,10 +522,10 @@ Python/JAX status:
 - The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
-- The parsed SEP path currently covers the full-tree Gauss-Hermite residual-expectation solver only; the current SEP inversion bridge accepts `sep_sparse_tree` for API compatibility but still runs the full-tree solver underneath because Julia sparse-tree/fishbone layouts, HMC expectations, and OBC-specific subdifferential SEP machinery are not ported yet.
+- The parsed SEP path now covers both the full-tree Gauss-Hermite residual-expectation solver and the sparse fishbone tree, but Julia HMC expectations, the remaining sparse-tree-specific Jacobian/runtime optimizations, and OBC-specific subdifferential SEP machinery are still not ported.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
-- No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed full-tree SEP path.
+- No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed SEP path with both full-tree and sparse fishbone branching.
 
 ## Environment note
 

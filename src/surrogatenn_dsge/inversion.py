@@ -398,6 +398,7 @@ def _coerce_sep_runtime_config(
     sep_periods: Optional[int] = None,
     sep_order: Optional[int] = None,
     sep_nnodes: Optional[int] = None,
+    sep_sparse_tree: Optional[bool] = None,
     sep_maxit: Optional[int] = None,
     sep_tol: Optional[float] = None,
     sep_shock_scale: Optional[float] = None,
@@ -409,6 +410,8 @@ def _coerce_sep_runtime_config(
         updated = replace(updated, branching_order=int(sep_order))
     if sep_nnodes is not None:
         updated = replace(updated, nnodes=int(sep_nnodes))
+    if sep_sparse_tree is not None:
+        updated = replace(updated, sparse_tree=bool(sep_sparse_tree))
     if sep_maxit is not None:
         updated = replace(updated, max_iter=int(sep_maxit))
     if sep_tol is not None:
@@ -562,7 +565,7 @@ def _run_sep_inversion_filter(
     sep_periods: Optional[int] = None,
     sep_order: Optional[int] = None,
     sep_nnodes: Optional[int] = None,
-    sep_sparse_tree: bool = False,
+    sep_sparse_tree: Optional[bool] = None,
     sep_maxit: Optional[int] = None,
     sep_tol: Optional[float] = None,
     sep_accept_tol: float = 1e-3,
@@ -617,6 +620,7 @@ def _run_sep_inversion_filter(
         sep_periods=sep_periods,
         sep_order=sep_order,
         sep_nnodes=sep_nnodes,
+        sep_sparse_tree=sep_sparse_tree,
         sep_maxit=sep_maxit,
         sep_tol=sep_tol,
         sep_shock_scale=sep_shock_scale,
@@ -673,7 +677,7 @@ def _run_sep_inversion_filter(
             "sep_periods": runtime_config.periods,
             "sep_order": runtime_config.branching_order,
             "sep_nnodes": runtime_config.nnodes,
-            "sep_sparse_tree": bool(sep_sparse_tree),
+            "sep_sparse_tree": bool(runtime_config.sparse_tree),
             "sep_maxit": runtime_config.max_iter,
             "sep_tol": runtime_config.tol,
             "sep_accept_tol": float(sep_accept_tol),
@@ -897,7 +901,7 @@ def _run_sep_inversion_filter(
             "sep_periods": runtime_config.periods,
             "sep_order": runtime_config.branching_order,
             "sep_nnodes": runtime_config.nnodes,
-            "sep_sparse_tree": bool(sep_sparse_tree),
+            "sep_sparse_tree": bool(runtime_config.sparse_tree),
             "sep_maxit": runtime_config.max_iter,
             "sep_tol": runtime_config.tol,
             "sep_accept_tol": float(sep_accept_tol),
@@ -926,7 +930,7 @@ def sep_inversion_loglikelihood(
     sep_periods: Optional[int] = None,
     sep_order: Optional[int] = None,
     sep_nnodes: Optional[int] = None,
-    sep_sparse_tree: bool = False,
+    sep_sparse_tree: Optional[bool] = None,
     sep_maxit: Optional[int] = None,
     sep_tol: Optional[float] = None,
     sep_accept_tol: float = 1e-3,
@@ -980,7 +984,7 @@ def sep_inversion_loglikelihood_per_period(
     sep_periods: Optional[int] = None,
     sep_order: Optional[int] = None,
     sep_nnodes: Optional[int] = None,
-    sep_sparse_tree: bool = False,
+    sep_sparse_tree: Optional[bool] = None,
     sep_maxit: Optional[int] = None,
     sep_tol: Optional[float] = None,
     sep_accept_tol: float = 1e-3,

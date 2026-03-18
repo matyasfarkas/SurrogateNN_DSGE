@@ -132,3 +132,71 @@ def test_sep_conditional_residual_mode_matches_expectation_api_when_equivalent()
         rtol=1e-10,
         atol=1e-10,
     )
+
+
+def test_sep_sparse_tree_uses_fishbone_group_counts() -> None:
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        return y_curr - (0.3 * y_prev + 0.2 * expected_next + jnp.sum(shock))
+
+    solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=2,
+        config=SEPConfig(
+            periods=4,
+            branching_order=2,
+            nnodes=3,
+            sparse_tree=True,
+            tol=1e-10,
+        ),
+    )
+
+    assert solution.converged
+    assert solution.group_counts == (1, 1, 6, 11, 11)
+
+
+def test_sep_sparse_tree_matches_full_tree_mean_path_for_linear_zero_mean_shocks() -> None:
+    deterministic_shocks = jnp.asarray(
+        [[0.4, -0.2], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
+        dtype=jnp.float64,
+    )
+
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        return y_curr - (
+            0.35 * y_prev + 0.15 * expected_next + shock[0] - 0.5 * shock[1]
+        )
+
+    full_solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=2,
+        config=SEPConfig(periods=4, branching_order=2, nnodes=3, tol=1e-10),
+        deterministic_shocks=deterministic_shocks,
+    )
+    sparse_solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=2,
+        config=SEPConfig(
+            periods=4,
+            branching_order=2,
+            nnodes=3,
+            sparse_tree=True,
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+
+    assert full_solution.converged
+    assert sparse_solution.converged
+    assert sparse_solution.group_counts[1] == 1
+    assert full_solution.group_counts[1] == 9
+    np.testing.assert_allclose(
+        sparse_solution.mean_path,
+        full_solution.mean_path,
+        rtol=1e-10,
+        atol=1e-10,
+    )
