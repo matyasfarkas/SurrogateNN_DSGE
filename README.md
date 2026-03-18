@@ -34,6 +34,7 @@ Implemented:
 - optional NumPyro inference helpers for subset priors, parameter-vector assembly, and concrete log-density evaluation on top of the parsed-model Kalman likelihood
 - JAX first-order structural likelihood and NumPyro wrappers that can run compiled kernels like `NUTS` on the parsed-model first-order path with either an explicit steady state or automatic JAX steady-state and calibration-equation solves
 - JAX first-order switching likelihood and NumPyro wrappers for fixed gate probabilities or hard masks, so ROM Kalman and FOM inversion can now be mixed on the compiled first-order path as well
+- compiled first-order switching likelihoods and NumPyro wrappers with automatic filter-derived gates, so the first-order switching-order estimation path can now run inside JAX/NumPyro without supplying gate probabilities by hand
 - quadratic matrix equation doubling solver plus a generalized Schur / ordered-QZ solver for the Julia `:schur` path
 - explicit Schur / ordered-QZ determinacy diagnostics for first-order models, including stable-root counts, unique/indeterminate/no-stable classification, and parsed-model wrappers to inspect the Schur branch directly
 - parsed-model state-space, likelihood, filtering, gate-stat, and concrete/compiled NumPyro helpers now expose `qme_algorithm` so first-order workflows can explicitly choose between the doubling and Schur/QZ solution branches
@@ -82,7 +83,7 @@ Not implemented yet:
 - the public first-order default now matches Julia and uses `schur`; request `qme_algorithm=\"doubling\"` explicitly if you want to stay on the fully JAX-native doubling path
 - the new determinacy diagnostics are currently tied to the Schur/QZ path; the doubling path still solves the QME but does not provide a comparable stable-root decomposition report
 - fully JAX-traceable parsed-model structural likelihoods beyond the first-order path, including higher-order estimation edges for compiled NumPyro kernels like `NUTS` and `HMC`
-- the older high-level parsed-model switching/filter bridge in `model.py` still exists for concrete NumPy-oriented use, but the first-order switching-order filter ingredients now have compiled JAX counterparts; the remaining gaps are mainly higher-order/nonlinear switching surfaces rather than the first-order filter gate path
+- the older high-level parsed-model switching/filter bridge in `model.py` still exists for concrete NumPy-oriented use, but the first-order switching-order estimation path now has compiled JAX counterparts end to end; the remaining gaps are mainly higher-order and nonlinear switching surfaces rather than the first-order filter gate path
 - the broader regime-switching estimation harness beyond the currently ported likelihood mixer and gate/regime utilities
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).

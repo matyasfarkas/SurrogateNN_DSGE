@@ -21,9 +21,11 @@ from .statespace import (
 )
 from .switching import (
     LinearGateStatsResult,
+    RegimeSwitchConfig,
     SwitchingLikelihoodConfig,
     compute_gate_stat_series_jax,
     compute_switching_loglikelihood,
+    gate_probabilities_jax,
 )
 
 
@@ -1363,6 +1365,98 @@ def compute_linear_gate_stats_from_filter_model_jax(
     return gate_stats
 
 
+def switching_loglikelihood_from_model_filter_gates_jax(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    obs_sigma: Sequence[float] | Mapping[str, float],
+    shock_sigmas: Sequence[float] | Mapping[str, float],
+    *,
+    regime_switch_config: RegimeSwitchConfig,
+    state_names: Optional[Sequence[str] | str] = None,
+    periods: Optional[int] = None,
+    gate_filter: str = "kalman",
+    gate_algorithm: str = "first_order",
+    gate_smooth: bool = False,
+    fom_algorithm: str = "first_order",
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    observables: Optional[Sequence[str] | str] = None,
+    parameter_values: Optional[Sequence[float] | Mapping[str, Any]] = None,
+    base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    presample_periods: int = 0,
+    jitter: float = 1e-9,
+    on_failure_loglikelihood: float = -np.inf,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+) -> jax.Array:
+    gate_stats = compute_linear_gate_stats_from_filter_model_jax(
+        model,
+        observations,
+        obs_sigma,
+        shock_sigmas,
+        state_names,
+        observables=observables,
+        periods=periods,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        parameter_values=parameter_values,
+        base_parameter_values=base_parameter_values,
+        qme_algorithm=qme_algorithm,
+        filter=gate_filter,
+        algorithm=gate_algorithm,
+        smooth=gate_smooth,
+        initial_covariance_strategy=initial_covariance_strategy,
+        jitter=jitter,
+        on_failure_fill_value=np.nan,
+    )
+    gate_probs = gate_probabilities_jax(
+        gate_stats.e_stat,
+        gate_stats.f_stat,
+        regime_switch_config,
+    )
+    failure_value = jnp.asarray(on_failure_loglikelihood, dtype=jnp.float64)
+    valid_gate_probs = jnp.all(jnp.isfinite(gate_probs))
+
+    def _success(probs: jax.Array) -> jax.Array:
+        return switching_loglikelihood_from_model_jax(
+            model,
+            observations,
+            gate_probs=probs,
+            fom_algorithm=fom_algorithm,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            observables=observables,
+            parameter_values=parameter_values,
+            base_parameter_values=base_parameter_values,
+            initial_covariance_strategy=initial_covariance_strategy,
+            measurement_error_scale=measurement_error_scale,
+            measurement_error_covariance=measurement_error_covariance,
+            presample_periods=presample_periods,
+            jitter=jitter,
+            on_failure_loglikelihood=on_failure_loglikelihood,
+            qme_algorithm=qme_algorithm,
+            initial_state=initial_state,
+            switching_config=switching_config,
+        )
+
+    return lax.cond(
+        valid_gate_probs,
+        _success,
+        lambda _: failure_value,
+        gate_probs,
+    )
+
+
 def compute_linear_gate_stats_from_shocks_model_jax(
     model: MacroModel,
     observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
@@ -1798,6 +1892,95 @@ def build_numpyro_switching_model_jax(
     return numpyro_model
 
 
+def build_numpyro_switching_filter_model_jax(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    priors: Mapping[str, Any],
+    obs_sigma: Sequence[float] | Mapping[str, float],
+    shock_sigmas: Sequence[float] | Mapping[str, float],
+    *,
+    regime_switch_config: RegimeSwitchConfig,
+    state_names: Optional[Sequence[str] | str] = None,
+    periods: Optional[int] = None,
+    gate_filter: str = "kalman",
+    gate_algorithm: str = "first_order",
+    gate_smooth: bool = False,
+    fom_algorithm: str = "first_order",
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    observables: Optional[Sequence[str] | str] = None,
+    base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    presample_periods: int = 0,
+    jitter: float = 1e-9,
+    on_failure_loglikelihood: float = -np.inf,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+):
+    numpyro, _, _ = _require_numpyro()
+
+    prior_names = tuple(priors)
+    if not prior_names:
+        raise ValueError("priors must contain at least one parameter prior.")
+    unknown = tuple(sorted(set(prior_names).difference(model.parameter_names)))
+    if unknown:
+        raise ValueError(
+            "Unknown parameter names in `priors`: "
+            + ", ".join(unknown)
+            + "."
+        )
+    base_parameters = _coerce_base_parameter_vector(model, base_parameter_values)
+
+    def numpyro_model() -> None:
+        sampled_values = {
+            name: numpyro.sample(name, priors[name])
+            for name in prior_names
+        }
+        parameter_vector = assemble_parameter_vector(
+            model,
+            sampled_values,
+            base_parameter_values=base_parameters,
+        )
+        loglikelihood = switching_loglikelihood_from_model_filter_gates_jax(
+            model,
+            observations,
+            obs_sigma,
+            shock_sigmas,
+            regime_switch_config=regime_switch_config,
+            state_names=state_names,
+            periods=periods,
+            gate_filter=gate_filter,
+            gate_algorithm=gate_algorithm,
+            gate_smooth=gate_smooth,
+            fom_algorithm=fom_algorithm,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            observables=observables,
+            parameter_values=parameter_vector,
+            initial_covariance_strategy=initial_covariance_strategy,
+            measurement_error_scale=measurement_error_scale,
+            measurement_error_covariance=measurement_error_covariance,
+            presample_periods=presample_periods,
+            jitter=jitter,
+            on_failure_loglikelihood=on_failure_loglikelihood,
+            qme_algorithm=qme_algorithm,
+            initial_state=initial_state,
+            switching_config=switching_config,
+        )
+        numpyro.deterministic("parameter_vector", parameter_vector)
+        numpyro.deterministic("loglikelihood", loglikelihood)
+        numpyro.factor("switching_loglikelihood", loglikelihood)
+
+    return numpyro_model
+
+
 def evaluate_numpyro_kalman_log_density(
     model: MacroModel,
     observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
@@ -1873,6 +2056,71 @@ def evaluate_numpyro_switching_log_density_jax(
         priors,
         gate_probs=gate_probs,
         hard_mask=hard_mask,
+        fom_algorithm=fom_algorithm,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        observables=observables,
+        base_parameter_values=base_parameter_values,
+        initial_covariance_strategy=initial_covariance_strategy,
+        measurement_error_scale=measurement_error_scale,
+        measurement_error_covariance=measurement_error_covariance,
+        presample_periods=presample_periods,
+        jitter=jitter,
+        on_failure_loglikelihood=on_failure_loglikelihood,
+        qme_algorithm=qme_algorithm,
+        initial_state=initial_state,
+        switching_config=switching_config,
+    )
+    log_joint, _ = log_density(numpyro_model, (), {}, parameter_samples)
+    return jnp.asarray(log_joint, dtype=jnp.float64)
+
+
+def evaluate_numpyro_switching_filter_log_density_jax(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    priors: Mapping[str, Any],
+    parameter_samples: Mapping[str, Any],
+    obs_sigma: Sequence[float] | Mapping[str, float],
+    shock_sigmas: Sequence[float] | Mapping[str, float],
+    *,
+    regime_switch_config: RegimeSwitchConfig,
+    state_names: Optional[Sequence[str] | str] = None,
+    periods: Optional[int] = None,
+    gate_filter: str = "kalman",
+    gate_algorithm: str = "first_order",
+    gate_smooth: bool = False,
+    fom_algorithm: str = "first_order",
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    observables: Optional[Sequence[str] | str] = None,
+    base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    presample_periods: int = 0,
+    jitter: float = 1e-9,
+    on_failure_loglikelihood: float = -np.inf,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+) -> jax.Array:
+    _, _, log_density = _require_numpyro()
+    numpyro_model = build_numpyro_switching_filter_model_jax(
+        model,
+        observations,
+        priors,
+        obs_sigma,
+        shock_sigmas,
+        regime_switch_config=regime_switch_config,
+        state_names=state_names,
+        periods=periods,
+        gate_filter=gate_filter,
+        gate_algorithm=gate_algorithm,
+        gate_smooth=gate_smooth,
         fom_algorithm=fom_algorithm,
         steady_state=steady_state,
         steady_state_initial_guess=steady_state_initial_guess,

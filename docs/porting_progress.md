@@ -660,6 +660,22 @@ Python/JAX status:
 - this closes the previously explicit first-order switching/filter gap: the core first-order switching-order filter workflow is now JAX-traceable, and the new tests compose the compiled filter-derived gate construction directly with `switching_loglikelihood_from_model_jax`
 - tests verify JAX parity plus `jax.jit` coverage against the concrete inversion and Kalman filter helpers, including filtered/smoothed state extraction, filter-derived gate statistics, hard/soft gate probabilities, and an end-to-end composed switching likelihood
 
+### 43. Automatic filter-gated switching likelihoods and NumPyro wrappers
+
+Julia reference:
+
+- `src/regime_switching/likelihood.jl`
+- `src/regime_switching/filtering_helpers.jl`
+- `scripts/hlt_sep_surrogate_synthetic_estimation.jl`
+
+Python/JAX status:
+
+- `switching_loglikelihood_from_model_filter_gates_jax` is implemented, composing the compiled first-order filter-derived gate statistics, JAX gate-probability construction, and the compiled first-order switching likelihood in one wrapper
+- `build_numpyro_switching_filter_model_jax` and `evaluate_numpyro_switching_filter_log_density_jax` are implemented, so the first-order switching-order estimation path can now run in NumPyro without precomputing `gate_probs` outside the trace
+- the new automatic-gating wrapper supports both inversion and Kalman gate filters, the same Schur/doubling first-order solution choice, automatic JAX steady-state/calibration solves, and the existing switching mixture controls
+- this narrows the switching-estimation gap materially: for the first-order path, fixed-gate and automatic filter-gated estimation are now both available in compiled JAX form
+- tests verify parity against the composed concrete path, NumPyro log-density parity, and an actual compiled `NUTS` run on the automatic Kalman-gated switching wrapper
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -674,7 +690,7 @@ Python/JAX status:
 - Parsed-model `get_irf` and `simulate_model` are now available, but the full Julia runtime surface is still broader, especially `simulate(..., shocks = :simulate)` random-shock semantics, the richer shock/variable selection API, and the exact first-order OBC artificial-shock enforcement path.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
-- The switching layer now has compiled first-order likelihoods, supplied-shock gate statistics, first-order filter reconstruction, and filter-derived gate construction. The remaining gaps are the broader higher-order/nonlinear switching-estimation harness and the older concrete helper surface in `model.py`, not the core first-order switching-order filter path itself.
+- The switching layer now has compiled first-order likelihoods, supplied-shock gate statistics, first-order filter reconstruction, filter-derived gate construction, and automatic filter-gated NumPyro wrappers. The remaining gaps are the broader higher-order/nonlinear switching-estimation harness and the older concrete helper surface in `model.py`, not the core first-order switching-order path itself.
 - The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, and branch-frozen subgradient Jacobians for parsed OBC models on the Gauss-Hermite path, but the remaining sparse-tree-specific Jacobian/runtime optimizations and broader OBC-specific subdifferential SEP machinery are still unported.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
