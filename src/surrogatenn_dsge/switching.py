@@ -468,6 +468,60 @@ def apply_gate_padding(
     return adjusted
 
 
+def apply_gate_padding_jax(
+    mask: Sequence[bool] | jax.Array | np.ndarray,
+    k_pre: int,
+    k_post: int,
+    min_len: int,
+) -> jax.Array:
+    base = jnp.asarray(mask, dtype=jnp.bool_).reshape(-1)
+    periods = base.shape[0]
+    if periods == 0:
+        return base
+
+    idx = jnp.arange(periods, dtype=jnp.int32)
+    expanded = jnp.any(
+        base[None, :]
+        & (idx[:, None] >= (idx[None, :] - int(k_pre)))
+        & (idx[:, None] <= (idx[None, :] + int(k_post))),
+        axis=1,
+    )
+    if int(min_len) <= 1:
+        return expanded
+
+    prev_expanded = jnp.concatenate(
+        [jnp.asarray([False], dtype=jnp.bool_), expanded[:-1]],
+        axis=0,
+    )
+    next_expanded = jnp.concatenate(
+        [expanded[1:], jnp.asarray([False], dtype=jnp.bool_)],
+        axis=0,
+    )
+    start_flags = expanded & ~prev_expanded
+    end_flags = expanded & ~next_expanded
+    stop_candidates = jnp.where(
+        (idx[None, :] >= idx[:, None]) & end_flags[None, :],
+        idx[None, :],
+        periods,
+    )
+    stop_idx = jnp.min(stop_candidates, axis=1)
+    run_length = stop_idx - idx + 1
+    extra = jnp.maximum(int(min_len) - run_length, 0)
+    add_right = jnp.minimum(extra, periods - stop_idx - 1)
+    add_left = extra - add_right
+    new_start = jnp.maximum(0, idx - add_left)
+    new_stop = jnp.minimum(periods - 1, stop_idx + add_right)
+    current_len = new_stop - new_start + 1
+    new_start = jnp.maximum(0, new_start - jnp.maximum(int(min_len) - current_len, 0))
+    adjusted = jnp.any(
+        start_flags[:, None]
+        & (idx[None, :] >= new_start[:, None])
+        & (idx[None, :] <= new_stop[:, None]),
+        axis=0,
+    )
+    return adjusted
+
+
 def assign_regimes(
     e_stat: Sequence[float] | np.ndarray,
     f_stat: Sequence[float] | np.ndarray,
@@ -506,6 +560,50 @@ def assign_regimes(
     return apply_gate_padding(base, k_pre, k_post, min_len)
 
 
+def assign_regimes_jax(
+    e_stat: Sequence[float] | jax.Array | np.ndarray,
+    f_stat: Sequence[float] | jax.Array | np.ndarray,
+    tau_eps_or_config: float | RegimeSwitchConfig,
+    tau_y: Optional[float] = None,
+    *,
+    use_eps: bool = True,
+    use_y: bool = True,
+    k_pre: int = 0,
+    k_post: int = 0,
+    min_len: int = 1,
+) -> jax.Array:
+    if isinstance(tau_eps_or_config, RegimeSwitchConfig):
+        config = tau_eps_or_config
+        return assign_regimes_jax(
+            e_stat,
+            f_stat,
+            config.tau_eps,
+            config.tau_y,
+            use_eps=config.use_eps,
+            use_y=config.use_y,
+            k_pre=config.k_pre,
+            k_post=config.k_post,
+            min_len=config.min_len,
+        )
+    if tau_y is None:
+        raise ValueError("tau_y must be provided when using explicit thresholds.")
+    eps = jnp.asarray(e_stat, dtype=jnp.float64).reshape(-1)
+    err = jnp.asarray(f_stat, dtype=jnp.float64).reshape(-1)
+    if eps.shape != err.shape:
+        raise ValueError(
+            f"Gate statistics length mismatch: {eps.shape} and {err.shape}."
+        )
+    if not (use_eps or use_y):
+        raise ValueError("At least one of use_eps/use_y must be true.")
+
+    base = jnp.zeros_like(eps, dtype=jnp.bool_)
+    if use_eps:
+        base = base | (eps > float(tau_eps_or_config))
+    if use_y:
+        base = base | (err > float(tau_y))
+    return apply_gate_padding_jax(base, k_pre, k_post, min_len)
+
+
 def logistic(x: float | np.ndarray) -> float | np.ndarray:
     values = np.asarray(x, dtype=np.float64)
     positive = values >= 0.0
@@ -516,6 +614,16 @@ def logistic(x: float | np.ndarray) -> float | np.ndarray:
     if np.isscalar(x):
         return float(result)
     return result
+
+
+def logistic_jax(x: float | jax.Array | np.ndarray) -> jax.Array:
+    values = jnp.asarray(x, dtype=jnp.float64)
+    positive = values >= 0.0
+    return jnp.where(
+        positive,
+        1.0 / (1.0 + jnp.exp(-values)),
+        jnp.exp(values) / (1.0 + jnp.exp(values)),
+    )
 
 
 def logit(p: float) -> float:
@@ -563,6 +671,35 @@ def gate_probabilities(
         hard = probs >= config.hard_threshold
         if config.k_pre > 0 or config.k_post > 0 or config.min_len > 1:
             _ = apply_gate_padding(hard, config.k_pre, config.k_post, config.min_len)
+        return probs
+    raise ValueError(
+        f"Unknown gate_mode={config.gate_mode!r}. Use 'hard' or 'soft'."
+    )
+
+
+def gate_probabilities_jax(
+    e_stat: Sequence[float] | jax.Array | np.ndarray,
+    f_stat: Sequence[float] | jax.Array | np.ndarray,
+    config: RegimeSwitchConfig,
+) -> jax.Array:
+    eps = jnp.asarray(e_stat, dtype=jnp.float64).reshape(-1)
+    err = jnp.asarray(f_stat, dtype=jnp.float64).reshape(-1)
+    if eps.shape != err.shape:
+        raise ValueError(
+            f"Gate statistics length mismatch: {eps.shape} and {err.shape}."
+        )
+    if config.gate_mode == "hard":
+        hard = assign_regimes_jax(eps, err, config)
+        probs = hard.astype(jnp.float64)
+        return jnp.clip(probs, config.prob_floor, config.prob_ceiling)
+    if config.gate_mode == "soft":
+        scores = jnp.zeros_like(eps, dtype=jnp.float64)
+        if config.use_eps:
+            scores = scores + config.beta_eps * (eps - config.tau_eps)
+        if config.use_y:
+            scores = scores + config.beta_y * (err - config.tau_y)
+        probs = logistic_jax(config.bias + scores)
+        probs = jnp.clip(probs, config.prob_floor, config.prob_ceiling)
         return probs
     raise ValueError(
         f"Unknown gate_mode={config.gate_mode!r}. Use 'hard' or 'soft'."

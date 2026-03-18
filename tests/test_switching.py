@@ -6,9 +6,16 @@ import numpy as np
 
 from surrogatenn_dsge import (
     SwitchingLikelihoodConfig,
+    RegimeSwitchConfig,
+    apply_gate_padding,
+    apply_gate_padding_jax,
+    assign_regimes,
+    assign_regimes_jax,
     compute_switching_loglikelihood,
     compute_gate_stat_series,
     compute_gate_stat_series_jax,
+    gate_probabilities,
+    gate_probabilities_jax,
     inversion_loglikelihood_per_period_from_model,
     kalman_loglikelihood_per_period_from_model,
     mix_loglikelihood,
@@ -151,6 +158,51 @@ def test_compute_gate_stat_series_jax_matches_numpy_and_jits() -> None:
 
     np.testing.assert_allclose(e_stat, expected_e, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(f_stat, expected_f, rtol=1e-12, atol=1e-12)
+
+
+def test_gate_probability_helpers_match_numpy_and_jit() -> None:
+    e_stat = jnp.asarray([0.1, 0.5, 1.0, 1.5], dtype=jnp.float64)
+    f_stat = jnp.asarray([0.2, 0.4, 0.8, 1.2], dtype=jnp.float64)
+    hard_cfg = RegimeSwitchConfig(
+        gate_mode="hard",
+        tau_eps=0.75,
+        tau_y=0.75,
+        prob_floor=0.05,
+        prob_ceiling=0.95,
+        k_pre=1,
+        k_post=0,
+        min_len=2,
+    )
+    soft_cfg = RegimeSwitchConfig(
+        gate_mode="soft",
+        tau_eps=0.75,
+        tau_y=0.75,
+        beta_eps=2.0,
+        beta_y=1.5,
+        bias=-0.1,
+        prob_floor=0.05,
+        prob_ceiling=0.95,
+    )
+
+    compiled = jax.jit(
+        lambda eps, err: (
+            apply_gate_padding_jax(eps > 0.75, 1, 0, 2),
+            assign_regimes_jax(eps, err, hard_cfg),
+            gate_probabilities_jax(eps, err, hard_cfg),
+            gate_probabilities_jax(eps, err, soft_cfg),
+        )
+    )
+    padded_jax, assigned_jax, hard_jax, soft_jax = compiled(e_stat, f_stat)
+
+    padded_np = apply_gate_padding(np.asarray(e_stat > 0.75), 1, 0, 2)
+    assigned_np = assign_regimes(np.asarray(e_stat), np.asarray(f_stat), hard_cfg)
+    hard_np = gate_probabilities(np.asarray(e_stat), np.asarray(f_stat), hard_cfg)
+    soft_np = gate_probabilities(np.asarray(e_stat), np.asarray(f_stat), soft_cfg)
+
+    np.testing.assert_array_equal(padded_jax, padded_np)
+    np.testing.assert_array_equal(assigned_jax, assigned_np)
+    np.testing.assert_allclose(hard_jax, hard_np, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(soft_jax, soft_np, rtol=1e-12, atol=1e-12)
 
 
 def test_model_switching_bridge_matches_manual_component_mix() -> None:

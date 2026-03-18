@@ -26,6 +26,7 @@ Implemented:
 - gate-stat computation, threshold calibration, probability mapping, padding, and automatic hard-regime assignment utilities for the switching layer
 - first-order rollout helpers and parsed-model linear gate-stat computation from supplied shock paths, including named observable/shock sigma inputs
 - JAX-native gate-stat kernels and a compiled parsed-model first-order supplied-shock gate-stat helper, so linear gate diagnostics can now be built under `jax.jit` from solved first-order paths as well
+- compiled first-order filter helpers for observed-shock reconstruction, filtered/smoothed state extraction, filter-derived gate statistics, and JAX-native gate-probability construction, so the switching-order first-order filter workflow can now stay inside JAX as well
 - Julia-style first-order observed-shock / observed-variable estimation helpers, linear filter state extractors, and filter-based linear gate-stat workflows for both Kalman and inversion filters
 - switching diagnostics and comparison helpers for gated episodes, loglikelihood decompositions, and runtime summaries
 - callback-based switching likelihood helpers including named-parameter selection/override, conditional and additive-residual loglikelihood utilities, generic inversion-step helpers, linear-reference likelihood comparison helpers, Julia-style shock reconstruction from epsilon means, and chunked-sampling orchestration
@@ -81,7 +82,7 @@ Not implemented yet:
 - the public first-order default now matches Julia and uses `schur`; request `qme_algorithm=\"doubling\"` explicitly if you want to stay on the fully JAX-native doubling path
 - the new determinacy diagnostics are currently tied to the Schur/QZ path; the doubling path still solves the QME but does not provide a comparable stable-root decomposition report
 - fully JAX-traceable parsed-model structural likelihoods beyond the first-order path, including higher-order estimation edges for compiled NumPyro kernels like `NUTS` and `HMC`
-- fully JAX-traceable parsed-model switching and filtering helpers beyond the new compiled first-order switching likelihood and supplied-shock gate-stat path; filter-derived gate construction and the older high-level switching/filter bridge still contain NumPy-based paths and are not end-to-end traceable yet
+- the older high-level parsed-model switching/filter bridge in `model.py` still exists for concrete NumPy-oriented use, but the first-order switching-order filter ingredients now have compiled JAX counterparts; the remaining gaps are mainly higher-order/nonlinear switching surfaces rather than the first-order filter gate path
 - the broader regime-switching estimation harness beyond the currently ported likelihood mixer and gate/regime utilities
 
 Progress is tracked in [docs/porting_progress.md](docs/porting_progress.md).

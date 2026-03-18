@@ -2,19 +2,32 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from surrogatenn_dsge import (
+    RegimeSwitchConfig,
+    SwitchingLikelihoodConfig,
     compute_linear_gate_stats_from_filter,
     compute_linear_gate_stats_from_shocks,
+    compute_linear_gate_stats_from_filter_model_jax,
     estimate_observed_shocks_matrix,
+    estimate_observed_shocks_matrix_jax,
     estimate_observed_variables_matrix,
+    estimate_observed_variables_matrix_jax,
+    gate_probabilities,
+    gate_probabilities_jax,
     linear_filter_full_state_initial,
+    linear_filter_full_state_initial_jax,
     linear_filter_initial_state,
+    linear_filter_initial_state_jax,
     parse_macro_model,
     rollout_first_order_solution,
     solve_first_order_model,
+    switching_loglikelihood_from_model,
+    switching_loglikelihood_from_model_jax,
 )
 
 
@@ -299,6 +312,239 @@ def test_filter_helpers_accept_schur_qme_algorithm_without_explicit_first_order_
     np.testing.assert_allclose(estimated_variables, levels, rtol=1e-12, atol=1e-12)
     assert variable_names == ("y",)
     np.testing.assert_allclose(gate_stats.shocks, shocks, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("filter_name", "smooth", "rtol", "atol"),
+    (
+        pytest.param("inversion", False, 1e-12, 1e-12, id="inversion"),
+        pytest.param("kalman", False, 1e-6, 1e-6, id="kalman"),
+        pytest.param("kalman", True, 1e-6, 1e-6, id="kalman_smoothed"),
+    ),
+)
+def test_jax_filter_helpers_match_concrete_paths(
+    filter_name: str,
+    smooth: bool,
+    rtol: float,
+    atol: float,
+) -> None:
+    model, first_order_result, shock_name, shocks, levels = _linear_filter_fixture()
+    steady_state = np.asarray(first_order_result.steady_state, dtype=np.float64)
+
+    expected_shocks = estimate_observed_shocks_matrix(
+        model,
+        levels,
+        observables=("y",),
+        first_order_result=first_order_result,
+        filter=filter_name,
+        smooth=smooth,
+    )
+    expected_variables, _ = estimate_observed_variables_matrix(
+        model,
+        levels,
+        observables=("y",),
+        first_order_result=first_order_result,
+        filter=filter_name,
+        smooth=smooth,
+    )
+    expected_terminal = linear_filter_initial_state(
+        model,
+        levels,
+        ("y",),
+        observables=("y",),
+        first_order_result=first_order_result,
+        filter=filter_name,
+        smooth=smooth,
+    )
+    expected_initial = linear_filter_full_state_initial(
+        model,
+        levels,
+        observables=("y",),
+        first_order_result=first_order_result,
+        filter=filter_name,
+        smooth=smooth,
+    )
+    expected_gate_stats = compute_linear_gate_stats_from_filter(
+        model,
+        levels,
+        {"y": 0.1},
+        {shock_name: 0.5},
+        ("y",),
+        observables=("y",),
+        first_order_result=first_order_result,
+        filter=filter_name,
+        smooth=smooth,
+    )
+
+    compiled_shocks = jax.jit(
+        lambda theta: estimate_observed_shocks_matrix_jax(
+            model,
+            levels,
+            observables=("y",),
+            parameter_values=theta,
+            steady_state=steady_state,
+            qme_algorithm="schur",
+            filter=filter_name,
+            smooth=smooth,
+        )
+    )
+    compiled_variables = jax.jit(
+        lambda theta: estimate_observed_variables_matrix_jax(
+            model,
+            levels,
+            observables=("y",),
+            parameter_values=theta,
+            steady_state=steady_state,
+            qme_algorithm="schur",
+            filter=filter_name,
+            smooth=smooth,
+        )
+    )
+    compiled_terminal = jax.jit(
+        lambda theta: linear_filter_initial_state_jax(
+            model,
+            levels,
+            ("y",),
+            observables=("y",),
+            parameter_values=theta,
+            steady_state=steady_state,
+            qme_algorithm="schur",
+            filter=filter_name,
+            smooth=smooth,
+        )
+    )
+    compiled_initial = jax.jit(
+        lambda theta: linear_filter_full_state_initial_jax(
+            model,
+            levels,
+            observables=("y",),
+            parameter_values=theta,
+            steady_state=steady_state,
+            qme_algorithm="schur",
+            filter=filter_name,
+            smooth=smooth,
+        )
+    )
+    compiled_gate_stats = jax.jit(
+        lambda theta: compute_linear_gate_stats_from_filter_model_jax(
+            model,
+            levels,
+            {"y": 0.1},
+            {shock_name: 0.5},
+            ("y",),
+            observables=("y",),
+            parameter_values=theta,
+            steady_state=steady_state,
+            qme_algorithm="schur",
+            filter=filter_name,
+            smooth=smooth,
+        )
+    )
+    theta = jnp.asarray(model.parameter_values, dtype=jnp.float64)
+
+    estimated_shocks = compiled_shocks(theta)
+    estimated_variables = compiled_variables(theta)
+    terminal_state = compiled_terminal(theta)
+    initial_state = compiled_initial(theta)
+    gate_stats = compiled_gate_stats(theta)
+
+    np.testing.assert_allclose(estimated_shocks, expected_shocks, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(
+        estimated_variables,
+        expected_variables,
+        rtol=rtol,
+        atol=atol,
+    )
+    np.testing.assert_allclose(terminal_state, expected_terminal, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(initial_state, expected_initial, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(
+        gate_stats.linear_observations,
+        expected_gate_stats.linear_observations,
+        rtol=rtol,
+        atol=atol,
+    )
+    np.testing.assert_allclose(gate_stats.shocks, expected_gate_stats.shocks, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(gate_stats.e_stat, expected_gate_stats.e_stat, rtol=rtol, atol=atol)
+    np.testing.assert_allclose(gate_stats.f_stat, expected_gate_stats.f_stat, rtol=rtol, atol=atol)
+
+
+def test_jax_filter_gate_construction_composes_with_switching_likelihood() -> None:
+    model, first_order_result, _, _, levels = _linear_filter_fixture()
+    steady_state = np.asarray(first_order_result.steady_state, dtype=np.float64)
+    regime_config = RegimeSwitchConfig(
+        gate_mode="soft",
+        tau_eps=0.05,
+        tau_y=0.05,
+        beta_eps=2.0,
+        beta_y=1.5,
+        bias=-0.1,
+        prob_floor=1e-4,
+        prob_ceiling=1.0 - 1e-4,
+    )
+    switching_config = SwitchingLikelihoodConfig(soft_mixture="logsumexp")
+
+    expected_stats = compute_linear_gate_stats_from_filter(
+        model,
+        levels,
+        {"y": 0.1},
+        {model.timings.exo[0]: 0.5},
+        ("y",),
+        observables=("y",),
+        first_order_result=first_order_result,
+        filter="inversion",
+    )
+    expected_gate_probs = gate_probabilities(
+        np.asarray(expected_stats.e_stat, dtype=np.float64),
+        np.asarray(expected_stats.f_stat, dtype=np.float64),
+        regime_config,
+    )
+    expected_loglikelihood = switching_loglikelihood_from_model(
+        model,
+        levels,
+        observables=("y",),
+        gate_probs=expected_gate_probs,
+        fom_algorithm="first_order",
+        first_order_result=first_order_result,
+        measurement_error_scale=0.0,
+        switching_config=switching_config,
+    ).total
+
+    compiled = jax.jit(
+        lambda theta: switching_loglikelihood_from_model_jax(
+            model,
+            levels,
+            observables=("y",),
+            gate_probs=gate_probabilities_jax(
+                *compute_linear_gate_stats_from_filter_model_jax(
+                    model,
+                    levels,
+                    {"y": 0.1},
+                    {model.timings.exo[0]: 0.5},
+                    ("y",),
+                    observables=("y",),
+                    parameter_values=theta,
+                    steady_state=steady_state,
+                    qme_algorithm="schur",
+                    filter="inversion",
+                )[2:4],
+                regime_config,
+            ),
+            fom_algorithm="first_order",
+            parameter_values=theta,
+            steady_state=steady_state,
+            measurement_error_scale=0.0,
+            qme_algorithm="schur",
+            switching_config=switching_config,
+        )
+    )
+    loglikelihood = compiled(jnp.asarray(model.parameter_values, dtype=jnp.float64))
+
+    np.testing.assert_allclose(
+        loglikelihood,
+        expected_loglikelihood,
+        rtol=1e-10,
+        atol=1e-10,
+    )
 
 
 @pytest.mark.parametrize(
