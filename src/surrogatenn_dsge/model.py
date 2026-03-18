@@ -148,6 +148,12 @@ class ParsedModelSEPResult(NamedTuple):
     solution: SEPSolution
 
 
+class OBCViolationPathResult(NamedTuple):
+    state_path: jax.Array
+    shocks: jax.Array
+    violations: jax.Array
+
+
 class ParsedParameterBlock(NamedTuple):
     target_names: tuple[str, ...]
     calibrated_target_names: tuple[str, ...]
@@ -406,6 +412,19 @@ class MacroModel:
             self._dynamic_third,
             modules=_numpy_lambdify_modules(),
         )
+
+    @cached_property
+    def _obc_violation_expressions(self) -> tuple[sp.Expr, ...]:
+        if not self.has_obc:
+            return ()
+        expressions: list[sp.Expr] = []
+        for expr in self._dynamic_expressions:
+            expressions.extend(_transform_obc_residual_to_violation_expressions(expr))
+        return tuple(expressions)
+
+    @cached_property
+    def _obc_violation_matrix(self) -> sp.Matrix:
+        return sp.Matrix(self._obc_violation_expressions)
 
     def _coerce_parameter_values(
         self,
@@ -740,9 +759,10 @@ class MacroModel:
             steady_reference_values=steady_reference_values,
         )
         if self.has_obc:
+            numeric_args = _coerce_symbolic_numeric_args(args)
             symbol_values = {
-                symbol: float(np.asarray(value, dtype=np.float64))
-                for symbol, value in zip(self._dynamic_input_symbols, args)
+                symbol: value
+                for symbol, value in zip(self._dynamic_input_symbols, numeric_args)
             }
             preferred_symbols = frozenset(self._dynamic_symbols)
             resolved = tuple(
@@ -757,13 +777,11 @@ class MacroModel:
             values = _evaluate_symbolic_matrix(
                 matrix,
                 self._dynamic_input_symbols,
-                [float(np.asarray(value, dtype=np.float64)) for value in args],
+                numeric_args,
             )
             return jnp.asarray(values, dtype=jnp.float64)
         values = np.asarray(
-            self._dynamic_jacobian_fn(
-                *[float(np.asarray(value, dtype=np.float64)) for value in args]
-            ),
+            self._dynamic_jacobian_fn(*_coerce_symbolic_numeric_args(args)),
             dtype=np.float64,
         )
         return jnp.asarray(values, dtype=jnp.float64)
@@ -832,6 +850,159 @@ class MacroModel:
                 dtype=jnp.float64,
             ),
         )
+
+    def evaluate_obc_violations(
+        self,
+        lag_state: Sequence[float],
+        current_state: Sequence[float],
+        lead_state: Sequence[float],
+        *,
+        shock: Optional[Sequence[float]] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+    ) -> jax.Array:
+        if not self.has_obc:
+            return jnp.zeros((0,), dtype=jnp.float64)
+
+        lag = self._coerce_dynamic_state_vector(lag_state, label="lag_state")
+        current = self._coerce_dynamic_state_vector(current_state, label="current_state")
+        lead = self._coerce_dynamic_state_vector(lead_state, label="lead_state")
+        if shock is None:
+            shock_values = jnp.zeros((self.timings.nExo,), dtype=jnp.float64)
+        else:
+            shock_array = np.asarray(shock, dtype=np.float64)
+            if shock_array.shape != (self.timings.nExo,):
+                raise ValueError(
+                    "shock must have shape "
+                    f"({self.timings.nExo},), got {shock_array.shape}."
+                )
+            shock_values = jnp.asarray(shock_array, dtype=jnp.float64)
+
+        if steady_state is None:
+            steady_state_result = self.solve_steady_state(parameter_values=parameter_values)
+            full_steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
+        else:
+            full_steady_state = self._coerce_full_steady_state(
+                steady_state,
+                parameter_values=parameter_values,
+            )
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
+            )
+
+        args = self._dynamic_input_args_from_context(
+            lag,
+            current,
+            lead,
+            shock_values,
+            parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
+            steady_reference_values=jnp.asarray(
+                self._steady_reference_values(full_steady_state),
+                dtype=jnp.float64,
+            ),
+        )
+        values = _evaluate_symbolic_matrix(
+            self._obc_violation_matrix,
+            self._dynamic_input_symbols,
+            _coerce_symbolic_numeric_args(args),
+        ).reshape(-1)
+        return jnp.asarray(values, dtype=jnp.float64)
+
+    def evaluate_obc_violations_along_path(
+        self,
+        state_path: Sequence[Sequence[float]],
+        *,
+        shocks: Optional[Sequence[Sequence[float]] | Mapping[str, Sequence[float]]] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+    ) -> jax.Array:
+        if not self.has_obc:
+            path = np.asarray(state_path, dtype=np.float64)
+            periods = path.shape[1] - 1 if path.ndim == 2 and path.shape[1] > 0 else 0
+            return jnp.zeros((0, max(periods, 0)), dtype=jnp.float64)
+
+        states = np.asarray(state_path, dtype=np.float64)
+        if states.ndim != 2:
+            raise ValueError(f"state_path must be rank-2, got shape {states.shape}.")
+        if states.shape[0] == self.timings.nVars:
+            state_matrix = states
+        elif states.shape[1] == self.timings.nVars:
+            state_matrix = states.T
+        else:
+            raise ValueError(
+                "state_path must have one axis equal to the number of present variables "
+                f"({self.timings.nVars}), got {states.shape}."
+            )
+        if state_matrix.shape[1] < 2:
+            raise ValueError(
+                "state_path must contain at least two time points (initial plus one period)."
+            )
+
+        periods = state_matrix.shape[1] - 1
+        shock_matrix = self._coerce_sep_deterministic_shocks(shocks, periods=periods)
+        if shock_matrix is None:
+            shock_values = np.zeros((periods, self.timings.nExo), dtype=np.float64)
+        else:
+            shock_values = np.asarray(shock_matrix, dtype=np.float64)
+
+        if steady_state is None:
+            steady_state_result = self.solve_steady_state(parameter_values=parameter_values)
+            full_steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
+        else:
+            full_steady_state = self._coerce_full_steady_state(
+                steady_state,
+                parameter_values=parameter_values,
+            )
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
+            )
+        terminal_state_values = (
+            full_steady_state
+            if terminal_state is None
+            else np.asarray(
+                self._coerce_dynamic_state_vector(terminal_state, label="terminal_state"),
+                dtype=np.float64,
+            )
+        )
+
+        violations = np.zeros((len(self._obc_violation_expressions), periods), dtype=np.float64)
+        for t in range(periods):
+            lead_state = (
+                state_matrix[:, t + 2]
+                if t + 2 < state_matrix.shape[1]
+                else terminal_state_values
+            )
+            violations[:, t] = np.asarray(
+                self.evaluate_obc_violations(
+                    state_matrix[:, t],
+                    state_matrix[:, t + 1],
+                    lead_state,
+                    shock=shock_values[t],
+                    parameter_values=resolved_parameters,
+                    steady_state=full_steady_state,
+                ),
+                dtype=np.float64,
+            )
+        return jnp.asarray(violations, dtype=jnp.float64)
 
     def resolve_parameter_values(
         self,
@@ -2627,6 +2798,95 @@ class MacroModel:
             f_stat=jnp.asarray(f_stat, dtype=jnp.float64),
         )
 
+    def compute_first_order_obc_violation_path(
+        self,
+        shocks: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        qme_algorithm: str = "schur",
+        initial_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+    ) -> OBCViolationPathResult:
+        periods = None
+        if isinstance(shocks, Mapping):
+            if shocks:
+                periods = len(next(iter(shocks.values())))
+        else:
+            shock_array = np.asarray(shocks, dtype=np.float64)
+            if shock_array.ndim != 2:
+                raise ValueError(f"shocks must be rank-2, got shape {shock_array.shape}.")
+            periods = shock_array.shape[1] if shock_array.shape[0] == self.timings.nExo else shock_array.shape[0]
+        if periods is None:
+            raise ValueError("shocks must contain at least one period.")
+
+        shock_values = self._coerce_sep_deterministic_shocks(shocks, periods=periods)
+        if shock_values is None:
+            raise ValueError("shocks must contain at least one period.")
+        shock_matrix = np.asarray(shock_values, dtype=np.float64).T
+
+        parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            qme_algorithm=qme_algorithm,
+        )
+        if parsed_result is None or full_steady_state is None:
+            raise ValueError(
+                "Could not prepare a converged first-order solution for OBC violations."
+            )
+
+        initial_state_values = (
+            np.asarray(full_steady_state, dtype=np.float64)
+            if initial_state is None
+            else np.asarray(
+                self._coerce_dynamic_state_vector(initial_state, label="initial_state"),
+                dtype=np.float64,
+            )
+        )
+        state_indices = np.asarray(
+            self.timings.past_not_future_and_mixed_idx,
+            dtype=np.int64,
+        )
+        reduced_initial_state = (
+            initial_state_values[state_indices] - full_steady_state[state_indices]
+        )
+        linear_deviations = np.asarray(
+            rollout_first_order_solution(
+                parsed_result.solution.solution_matrix,
+                self.timings,
+                shock_matrix,
+                initial_reduced_state=reduced_initial_state,
+            ),
+            dtype=np.float64,
+        )
+        state_path = np.concatenate(
+            [
+                initial_state_values[:, None],
+                linear_deviations + full_steady_state[:, None],
+            ],
+            axis=1,
+        )
+        violations = self.evaluate_obc_violations_along_path(
+            state_path,
+            shocks=shock_matrix,
+            parameter_values=np.asarray(parsed_result.parameter_values, dtype=np.float64),
+            steady_state=full_steady_state,
+            terminal_state=terminal_state,
+        )
+        return OBCViolationPathResult(
+            state_path=jnp.asarray(state_path, dtype=jnp.float64),
+            shocks=jnp.asarray(shock_matrix, dtype=jnp.float64),
+            violations=violations,
+        )
+
     def _apply_default_calibrated_parameter_guess(
         self,
         parameter_values: np.ndarray,
@@ -3841,6 +4101,44 @@ def evaluate_dynamic_residual(
     )
 
 
+def evaluate_obc_violations(
+    model: MacroModel,
+    lag_state: Sequence[float],
+    current_state: Sequence[float],
+    lead_state: Sequence[float],
+    *,
+    shock: Optional[Sequence[float]] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+) -> jax.Array:
+    return model.evaluate_obc_violations(
+        lag_state,
+        current_state,
+        lead_state,
+        shock=shock,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+    )
+
+
+def evaluate_obc_violations_along_path(
+    model: MacroModel,
+    state_path: Sequence[Sequence[float]],
+    *,
+    shocks: Optional[Sequence[Sequence[float]] | Mapping[str, Sequence[float]]] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+) -> jax.Array:
+    return model.evaluate_obc_violations_along_path(
+        state_path,
+        shocks=shocks,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        terminal_state=terminal_state,
+    )
+
+
 def resolve_observable_indices(
     model: MacroModel,
     observables: Sequence[str] | str,
@@ -4231,6 +4529,34 @@ def compute_linear_gate_stats_from_shocks(
         initial_state=initial_state,
         shock_norm=shock_norm,
         error_norm=error_norm,
+    )
+
+
+def compute_first_order_obc_violation_path(
+    model: MacroModel,
+    shocks: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+) -> OBCViolationPathResult:
+    return model.compute_first_order_obc_violation_path(
+        shocks,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        qme_algorithm=qme_algorithm,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
     )
 
 
@@ -5360,6 +5686,45 @@ def _expression_contains_obc(expr: sp.Expr) -> bool:
     return bool(expr.has(sp.Max, sp.Min))
 
 
+def _obc_calls_in_expression(expr: sp.Expr) -> tuple[sp.Expr, ...]:
+    return tuple(
+        node
+        for node in sp.preorder_traversal(expr)
+        if isinstance(node, sp.Expr) and node.func in (sp.Max, sp.Min)
+    )
+
+
+def _transform_obc_residual_to_violation_expressions(
+    expr: sp.Expr,
+) -> tuple[sp.Expr, ...]:
+    obc_calls = _obc_calls_in_expression(expr)
+    if not obc_calls:
+        return ()
+    if len(obc_calls) > 1:
+        raise NotImplementedError(
+            "OBC violation evaluation currently supports at most one min/max call per equation."
+        )
+    obc_call = obc_calls[0]
+    if len(obc_call.args) != 2:
+        raise NotImplementedError(
+            "OBC violation evaluation currently supports binary min/max constraints only."
+        )
+    placeholder = sp.Symbol("__obc_placeholder__", real=True)
+    substituted = expr.xreplace({obc_call: placeholder})
+    solutions = sp.solve(sp.Eq(substituted, 0), placeholder)
+    if not solutions:
+        raise ValueError(
+            f"Could not transform OBC residual into violation expressions: {expr}"
+        )
+    solution = sp.simplify(solutions[0])
+    left = sp.simplify(obc_call.args[0] - solution)
+    right = sp.simplify(obc_call.args[1] - solution)
+    product = sp.simplify(left * right)
+    if obc_call.func is sp.Max:
+        return (product, left, right)
+    return (product, sp.simplify(-left), sp.simplify(-right))
+
+
 def _obc_branch_preference_score(
     expr: sp.Expr,
     preferred_symbols: frozenset[sp.Symbol],
@@ -5435,6 +5800,10 @@ def _evaluate_symbolic_matrix(
 ) -> np.ndarray:
     fn = sp.lambdify(symbols, matrix, modules=_numpy_lambdify_modules())
     return np.asarray(fn(*values), dtype=np.float64)
+
+
+def _coerce_symbolic_numeric_args(values: Sequence[object]) -> list[float]:
+    return [float(np.asarray(value, dtype=np.float64)) for value in values]
 
 
 def _bound_from_comparison(

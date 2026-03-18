@@ -583,6 +583,21 @@ Python/JAX status:
 - the parsed-model OBC subgradient Jacobian is assembled from branch-frozen dynamic Jacobians at each SEP node, which is materially closer to the Julia subdifferential Newton idea than the earlier pure finite-difference fallback
 - smooth-model tests verify that finite-difference and autodiff Jacobians agree on the same SEP path, and parsed OBC SEP tests now assert that the automatic subgradient path is engaged and matches the finite-difference solve on the same bound model
 
+### 38. Parsed-model OBC violation diagnostics
+
+Julia reference:
+
+- `src/MacroModelling.jl` (`transform_obc`, `set_up_obc_violation_function!`, `write_obc_violation_equations`)
+- `src/get_functions.jl`
+
+Python/JAX status:
+
+- parsed models now expose `evaluate_obc_violations` for single-period OBC complementarity diagnostics on `max` / `min` equations, using transformed branch-gap expressions rather than only checking the raw dynamic residual
+- `evaluate_obc_violations_along_path` is implemented for full state paths plus named deterministic shocks, so parsed-model OBC paths can be checked period by period after SEP or other runtime solves
+- `compute_first_order_obc_violation_path` is implemented for first-order rollouts, which makes it possible to quantify where the linearized solution breaches an occasionally binding constraint before engaging a nonlinear/OBC solver
+- the current transformation supports one binary `min` or `max` call per equation, which is enough for the tested simple bound formulations but does not yet claim the full Julia OBC transformation surface
+- tests verify inactive-branch steady-state violations are nonpositive, deterministic SEP paths satisfy the transformed OBC diagnostics along the whole path, and the first-order linear rollout correctly flags a large-shock lower-bound breach
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -593,7 +608,7 @@ Python/JAX status:
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
 - The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
-- The current parsed front end now supports basic `max` / `min` OBC syntax plus branch-frozen linearization around the active steady-state branch, but the Julia-specific enforcement layer around kinks, including subdifferential Newton options and the broader OBC runtime surface, is still unported.
+- The current parsed front end now supports basic `max` / `min` OBC syntax, branch-frozen linearization around the active steady-state branch, and parsed-model OBC violation diagnostics, but the Julia-specific enforcement layer around kinks, including explicit OBC shock-sequence optimization, subdifferential Newton options, and the broader OBC runtime surface, is still unported.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, and branch-frozen subgradient Jacobians for parsed OBC models on the Gauss-Hermite path, but the remaining sparse-tree-specific Jacobian/runtime optimizations and broader OBC-specific subdifferential SEP machinery are still unported.

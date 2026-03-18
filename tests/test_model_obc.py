@@ -3,8 +3,11 @@ from __future__ import annotations
 import numpy as np
 
 from surrogatenn_dsge import (
+    compute_first_order_obc_violation_path,
     SEPConfig,
     evaluate_dynamic_residual,
+    evaluate_obc_violations,
+    evaluate_obc_violations_along_path,
     parse_macro_model,
     solve_first_order_model,
     solve_steady_state,
@@ -81,6 +84,15 @@ def test_parse_macro_model_flags_obc_and_evaluates_max_residual() -> None:
         steady_state=[1.2, 1.2],
     )
     np.testing.assert_allclose(residual, 0.0, rtol=0.0, atol=1e-12)
+    violations = evaluate_obc_violations(
+        model,
+        lag_state=[1.2, 1.2],
+        current_state=[1.2, 1.2],
+        lead_state=[1.2, 1.2],
+        shock=[0.0],
+        steady_state=[1.2, 1.2],
+    )
+    assert np.all(np.asarray(violations, dtype=np.float64) <= 1e-12)
 
 
 def test_parse_macro_model_flags_min_obc() -> None:
@@ -133,6 +145,28 @@ def test_obc_model_sep_enforces_max_constraint_along_path() -> None:
     r_path = np.asarray(result.solution.mean_path[r_index, 1:], dtype=np.float64)
     assert np.all(r_path >= 1.0 - 1e-8)
     assert np.any(np.isclose(r_path, 1.0, atol=1e-4))
+
+
+def test_obc_violation_diagnostics_hold_on_deterministic_sep_path() -> None:
+    model = parse_macro_model(OBC_MAX_SOURCE)
+    result = solve_stochastic_extended_path_model(
+        model,
+        steady_state=[1.2, 1.2],
+        initial_state=[1.2, 1.2],
+        terminal_state=[1.2, 1.2],
+        config=SEPConfig(periods=3, branching_order=0, tol=1e-8),
+        deterministic_shocks={"eps_r": [-2.0, 0.0, 0.0]},
+    )
+
+    assert result.solution.converged
+    violations = evaluate_obc_violations_along_path(
+        model,
+        result.solution.mean_path.T,
+        shocks={"eps_r": [-2.0, 0.0, 0.0]},
+        steady_state=[1.2, 1.2],
+        terminal_state=[1.2, 1.2],
+    )
+    assert np.all(np.asarray(violations, dtype=np.float64) <= 1e-8)
 
 
 def test_obc_binding_max_linearization_freezes_constraint_branch() -> None:
@@ -218,3 +252,21 @@ def test_obc_model_sep_subgradient_matches_finite_difference() -> None:
         rtol=1e-8,
         atol=1e-8,
     )
+
+
+def test_first_order_obc_violation_path_detects_linear_constraint_breach() -> None:
+    model = parse_macro_model(OBC_MAX_SOURCE)
+    first_order = solve_first_order_model(
+        model,
+        steady_state_initial_guess={"r": 1.2, "r_star": 1.2},
+    )
+    violation_path = compute_first_order_obc_violation_path(
+        model,
+        {"eps_r": [-2.0, 0.0, 0.0]},
+        first_order_result=first_order,
+        steady_state=[1.2, 1.2],
+    )
+
+    assert violation_path.state_path.shape == (2, 4)
+    assert violation_path.violations.shape[1] == 3
+    assert np.max(np.asarray(violation_path.violations, dtype=np.float64)) > 1e-3
