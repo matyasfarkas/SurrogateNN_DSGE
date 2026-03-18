@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -75,6 +76,34 @@ def test_compute_switching_loglikelihood_matches_manual_formulas() -> None:
     np.testing.assert_allclose(
         hard.per_period,
         np.asarray([-2.0, -2.5, -0.25], dtype=np.float64),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_compute_switching_loglikelihood_is_jittable() -> None:
+    compiled = jax.jit(
+        lambda rom, fom, probs: compute_switching_loglikelihood(
+            rom,
+            fom,
+            gate_probs=probs,
+            config=SwitchingLikelihoodConfig(soft_mixture="logsumexp"),
+        ).total
+    )
+
+    total = compiled(
+        jnp.asarray([-2.0, -1.5, -0.5], dtype=jnp.float64),
+        jnp.asarray([-1.0, -2.5, -0.25], dtype=jnp.float64),
+        jnp.asarray([0.2, 0.7, 0.5], dtype=jnp.float64),
+    )
+
+    np.testing.assert_allclose(
+        total,
+        mix_loglikelihood(
+            jnp.asarray([-1.0, -2.5, -0.25], dtype=jnp.float64),
+            jnp.asarray([-2.0, -1.5, -0.5], dtype=jnp.float64),
+            jnp.asarray([0.2, 0.7, 0.5], dtype=jnp.float64),
+        ),
         rtol=1e-12,
         atol=1e-12,
     )

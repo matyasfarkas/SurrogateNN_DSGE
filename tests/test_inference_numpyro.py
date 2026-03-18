@@ -442,6 +442,26 @@ def test_jax_wrapper_runs_nuts_with_auto_steady_state() -> None:
     assert samples["rho_y"].shape == (4,)
 
 
+def test_jax_wrapper_runs_nuts_with_auto_steady_state_and_schur() -> None:
+    model, _, observables, levels, priors = _numpyro_fixture()
+    numpyro_model = build_numpyro_kalman_model_jax(
+        model,
+        levels,
+        priors,
+        observables=observables,
+        steady_state_initial_guess={"a": 1.5, "y": 2.0},
+        qme_algorithm="schur",
+    )
+    kernel = NUTS(numpyro_model)
+    mcmc = MCMC(kernel, num_warmup=4, num_samples=4, num_chains=1, progress_bar=False)
+
+    mcmc.run(jax.random.PRNGKey(22))
+    samples = mcmc.get_samples()
+
+    assert samples["rho_a"].shape == (4,)
+    assert samples["rho_y"].shape == (4,)
+
+
 def test_jax_calibrated_auto_steady_state_loglikelihood_matches_high_level_path() -> None:
     model, _, observables, levels, _ = _calibrated_numpyro_fixture()
     parameter_vector = assemble_parameter_vector(
