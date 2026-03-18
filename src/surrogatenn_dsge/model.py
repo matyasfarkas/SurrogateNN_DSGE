@@ -43,8 +43,14 @@ from .inversion import (
     sep_inversion_loglikelihood_per_period,
 )
 from .sep import (
+    _child_groups,
+    _gauss_hermite_sparse_rule,
+    _group_counts,
+    _group_shock_at_time,
+    _parent_group,
     SEPConfig,
     SEPSolution,
+    gauss_hermite_rule,
     solve_stochastic_extended_path_residual_expectation,
 )
 from .statespace import (
@@ -676,18 +682,91 @@ class MacroModel:
         parameter_values: jax.Array,
         steady_reference_values: jax.Array,
     ) -> jax.Array:
-        args = (
-            tuple(lead_state[idx] for idx in self.timings.future_not_past_and_mixed_idx)
-            + tuple(current_state[idx] for idx in range(self.timings.nVars))
-            + tuple(lag_state[idx] for idx in self.timings.past_not_future_and_mixed_idx)
-            + tuple(shock[idx] for idx in range(self.timings.nExo))
-            + tuple(
-                steady_reference_values[idx]
-                for idx in range(len(self.steady_state_reference_names))
-            )
-            + tuple(parameter_values[idx] for idx in range(len(self.parameter_names)))
+        args = self._dynamic_input_args_from_context(
+            lag_state,
+            current_state,
+            lead_state,
+            shock,
+            parameter_values=parameter_values,
+            steady_reference_values=steady_reference_values,
         )
         return jnp.asarray(self._dynamic_residual_fn(*args), dtype=jnp.float64).reshape(-1)
+
+    def _dynamic_input_args_from_context(
+        self,
+        lag_state: Sequence[float],
+        current_state: Sequence[float],
+        lead_state: Sequence[float],
+        shock: Sequence[float],
+        *,
+        parameter_values: Sequence[float],
+        steady_reference_values: Sequence[float],
+    ) -> tuple[float, ...]:
+        lag = jnp.asarray(lag_state, dtype=jnp.float64)
+        current = jnp.asarray(current_state, dtype=jnp.float64)
+        lead = jnp.asarray(lead_state, dtype=jnp.float64)
+        shock_values = jnp.asarray(shock, dtype=jnp.float64)
+        parameters = jnp.asarray(parameter_values, dtype=jnp.float64)
+        steady_refs = jnp.asarray(steady_reference_values, dtype=jnp.float64)
+        args = (
+            tuple(lead[idx] for idx in self.timings.future_not_past_and_mixed_idx)
+            + tuple(current[idx] for idx in range(self.timings.nVars))
+            + tuple(lag[idx] for idx in self.timings.past_not_future_and_mixed_idx)
+            + tuple(shock_values[idx] for idx in range(self.timings.nExo))
+            + tuple(
+                steady_refs[idx]
+                for idx in range(len(self.steady_state_reference_names))
+            )
+            + tuple(parameters[idx] for idx in range(len(self.parameter_names)))
+        )
+        return args
+
+    def _evaluate_dynamic_jacobian_with_context(
+        self,
+        lag_state: Sequence[float],
+        current_state: Sequence[float],
+        lead_state: Sequence[float],
+        shock: Sequence[float],
+        *,
+        parameter_values: Sequence[float],
+        steady_reference_values: Sequence[float],
+    ) -> jax.Array:
+        args = self._dynamic_input_args_from_context(
+            lag_state,
+            current_state,
+            lead_state,
+            shock,
+            parameter_values=parameter_values,
+            steady_reference_values=steady_reference_values,
+        )
+        if self.has_obc:
+            symbol_values = {
+                symbol: float(np.asarray(value, dtype=np.float64))
+                for symbol, value in zip(self._dynamic_input_symbols, args)
+            }
+            preferred_symbols = frozenset(self._dynamic_symbols)
+            resolved = tuple(
+                _freeze_obc_expression(
+                    expr,
+                    symbol_values=symbol_values,
+                    preferred_symbols=preferred_symbols,
+                )
+                for expr in self._dynamic_expressions
+            )
+            matrix = sp.Matrix(resolved).jacobian(self._dynamic_symbols)
+            values = _evaluate_symbolic_matrix(
+                matrix,
+                self._dynamic_input_symbols,
+                [float(np.asarray(value, dtype=np.float64)) for value in args],
+            )
+            return jnp.asarray(values, dtype=jnp.float64)
+        values = np.asarray(
+            self._dynamic_jacobian_fn(
+                *[float(np.asarray(value, dtype=np.float64)) for value in args]
+            ),
+            dtype=np.float64,
+        )
+        return jnp.asarray(values, dtype=jnp.float64)
 
     def evaluate_dynamic_residual(
         self,
@@ -2718,6 +2797,189 @@ class MacroModel:
             evaluation_args,
         )
 
+    def _build_sep_subgradient_jacobian(
+        self,
+        *,
+        initial_state: Sequence[float],
+        terminal_state: Sequence[float],
+        parameter_values: Sequence[float],
+        steady_reference_values: Sequence[float],
+        config: SEPConfig,
+        deterministic_shocks: Optional[jax.Array],
+    ) -> callable:
+        if config.expectation_method != "gauss_hermite":
+            raise ValueError(
+                "Parsed-model SEP subgradient Jacobians currently support only "
+                "expectation_method='gauss_hermite'."
+            )
+
+        state_dim = self.timings.nVars
+        initial_state_arr = jnp.asarray(initial_state, dtype=jnp.float64)
+        terminal_state_arr = jnp.asarray(terminal_state, dtype=jnp.float64)
+        parameter_array = jnp.asarray(parameter_values, dtype=jnp.float64)
+        steady_refs = jnp.asarray(steady_reference_values, dtype=jnp.float64)
+        if deterministic_shocks is None:
+            deterministic = jnp.zeros((config.periods, self.timings.nExo), dtype=jnp.float64)
+        else:
+            deterministic = jnp.asarray(deterministic_shocks, dtype=jnp.float64)
+
+        rule = (
+            _gauss_hermite_sparse_rule(config.nnodes, self.timings.nExo, config.shock_scale)
+            if config.sparse_tree
+            else gauss_hermite_rule(config.nnodes, self.timings.nExo, config.shock_scale)
+        )
+        num_nodes = int(rule.weights.shape[0])
+        counts = _group_counts(
+            config.periods,
+            config.branching_order,
+            num_nodes,
+            sparse_tree=config.sparse_tree,
+        )
+        time_offsets = [0]
+        for t in range(1, config.periods + 1):
+            time_offsets.append(time_offsets[-1] + counts[t] * state_dim)
+
+        future_dim = len(self.timings.future_not_past_and_mixed_idx)
+        past_dim = len(self.timings.past_not_future_and_mixed_idx)
+
+        def unflatten(stacked: jax.Array) -> tuple[jax.Array, ...]:
+            values = []
+            for t in range(1, config.periods + 1):
+                start = time_offsets[t - 1]
+                end = time_offsets[t]
+                values.append(jnp.reshape(stacked[start:end], (counts[t], state_dim)))
+            return tuple(values)
+
+        def block_start(time_index: int, group_index: int) -> int:
+            return time_offsets[time_index - 1] + group_index * state_dim
+
+        def jacobian_fn(stacked: jax.Array) -> jax.Array:
+            states_by_time = unflatten(stacked)
+            zero_shock = jnp.zeros((self.timings.nExo,), dtype=jnp.float64)
+            jacobian = np.zeros((time_offsets[-1], time_offsets[-1]), dtype=np.float64)
+            row_cursor = 0
+            for t in range(1, config.periods + 1):
+                current_states = states_by_time[t - 1]
+                prev_states = (
+                    jnp.expand_dims(initial_state_arr, axis=0)
+                    if t == 1
+                    else states_by_time[t - 2]
+                )
+                next_states = None if t == config.periods else states_by_time[t]
+                for g in range(counts[t]):
+                    if t == 1:
+                        prev_state = prev_states[0]
+                        parent = None
+                    else:
+                        parent = _parent_group(
+                            g,
+                            t,
+                            config.branching_order,
+                            num_nodes,
+                            sparse_tree=config.sparse_tree,
+                        )
+                        prev_state = prev_states[parent]
+
+                    deterministic_shock = deterministic[t - 1]
+                    stochastic_time_limit = (
+                        config.branching_order + 1
+                        if config.sparse_tree
+                        else config.branching_order
+                    )
+                    stochastic_shock = (
+                        _group_shock_at_time(
+                            rule,
+                            g,
+                            t,
+                            config.branching_order,
+                            num_nodes,
+                            sparse_tree=config.sparse_tree,
+                        )
+                        if t <= stochastic_time_limit and self.timings.nExo > 0
+                        else zero_shock
+                    )
+                    current_shock = deterministic_shock + stochastic_shock
+                    row_slice = slice(row_cursor, row_cursor + state_dim)
+                    current_start = block_start(t, g)
+
+                    def accumulate_block(
+                        *,
+                        weight: float,
+                        lead_state: jax.Array,
+                        lead_group: Optional[int],
+                    ) -> None:
+                        dynamic_jacobian = np.asarray(
+                            self._evaluate_dynamic_jacobian_with_context(
+                                prev_state,
+                                current_states[g],
+                                lead_state,
+                                current_shock,
+                                parameter_values=parameter_array,
+                                steady_reference_values=steady_refs,
+                            ),
+                            dtype=np.float64,
+                        )
+                        current_block = dynamic_jacobian[
+                            :,
+                            future_dim : future_dim + state_dim,
+                        ]
+                        jacobian[row_slice, current_start : current_start + state_dim] += (
+                            weight * current_block
+                        )
+
+                        if t > 1 and parent is not None and past_dim > 0:
+                            lag_block = dynamic_jacobian[
+                                :,
+                                future_dim + state_dim : future_dim + state_dim + past_dim,
+                            ]
+                            prev_start = block_start(t - 1, parent)
+                            for local_idx, var_idx in enumerate(
+                                self.timings.past_not_future_and_mixed_idx
+                            ):
+                                jacobian[row_slice, prev_start + var_idx] += (
+                                    weight * lag_block[:, local_idx]
+                                )
+
+                        if lead_group is not None and future_dim > 0:
+                            lead_block = dynamic_jacobian[:, :future_dim]
+                            lead_start = block_start(t + 1, lead_group)
+                            for local_idx, var_idx in enumerate(
+                                self.timings.future_not_past_and_mixed_idx
+                            ):
+                                jacobian[row_slice, lead_start + var_idx] += (
+                                    weight * lead_block[:, local_idx]
+                                )
+
+                    if t == config.periods:
+                        accumulate_block(weight=1.0, lead_state=terminal_state_arr, lead_group=None)
+                    else:
+                        child_groups = _child_groups(
+                            g,
+                            t,
+                            config.branching_order,
+                            num_nodes,
+                            sparse_tree=config.sparse_tree,
+                        )
+                        if len(child_groups) == 1:
+                            child = child_groups[0]
+                            accumulate_block(
+                                weight=1.0,
+                                lead_state=next_states[child],
+                                lead_group=child,
+                            )
+                        else:
+                            for local_idx, child in enumerate(child_groups):
+                                accumulate_block(
+                                    weight=float(rule.weights[local_idx]),
+                                    lead_state=next_states[child],
+                                    lead_group=child,
+                                )
+
+                    row_cursor += state_dim
+            return jnp.asarray(jacobian, dtype=jnp.float64)
+
+        return jacobian_fn
+
     def calculate_jacobian(
         self,
         *,
@@ -2911,12 +3173,28 @@ class MacroModel:
             dtype=jnp.float64,
         )
         effective_config = config
-        if self.has_obc and config.jacobian_method == "auto":
-            # Avoid autodiff through max/min kinks on parsed OBC models.
-            effective_config = dataclass_replace(
-                config,
-                jacobian_method="finite_difference",
-            )
+        sep_jacobian_fn = None
+        if self.has_obc:
+            if config.expectation_method == "gauss_hermite":
+                if config.jacobian_method == "auto":
+                    effective_config = dataclass_replace(
+                        config,
+                        jacobian_method="subgradient",
+                    )
+                if effective_config.jacobian_method == "subgradient":
+                    sep_jacobian_fn = self._build_sep_subgradient_jacobian(
+                        initial_state=initial_state_values,
+                        terminal_state=terminal_state_values,
+                        parameter_values=parameter_array,
+                        steady_reference_values=steady_reference_values,
+                        config=effective_config,
+                        deterministic_shocks=deterministic_shock_values,
+                    )
+            elif config.jacobian_method == "auto":
+                effective_config = dataclass_replace(
+                    config,
+                    jacobian_method="finite_difference",
+                )
 
         def conditional_residual(
             lag_state: jax.Array,
@@ -2942,6 +3220,7 @@ class MacroModel:
             config=effective_config,
             deterministic_shocks=deterministic_shock_values,
             initial_guess=initial_guess,
+            jacobian_fn=sep_jacobian_fn,
         )
 
         return ParsedModelSEPResult(

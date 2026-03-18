@@ -567,7 +567,7 @@ Python/JAX status:
 - first-, second-, and third-order parsed derivative extraction now inherit the same branch-frozen OBC handling because `calculate_jacobian`, `calculate_hessian`, and `calculate_third_order_derivatives` resolve min/max branches before symbolic differentiation when `model.has_obc`
 - tests cover binding `max` and `min` steady states where the constrained variable stays fixed in the linearization, including regression coverage that the first equation Jacobian row is `[1, 0, 0, 0]` instead of a half-weighted kink derivative
 
-### 37. SEP Jacobian selection and OBC finite-difference fallback
+### 37. SEP Jacobian selection and OBC Jacobian safeguards
 
 Julia reference:
 
@@ -576,11 +576,12 @@ Julia reference:
 
 Python/JAX status:
 
-- `SEPConfig` now exposes `jacobian_method="auto" | "autodiff" | "finite_difference"` so SEP Newton steps can choose between traced Jacobians and explicit finite differences
+- `SEPConfig` now exposes `jacobian_method="auto" | "autodiff" | "finite_difference" | "subgradient"` so SEP Newton steps can choose between traced Jacobians, explicit finite differences, and caller-supplied generalized Jacobians
 - the low-level SEP solver now reports the effective choice in `SEPSolution.jacobian_method`, which makes runtime behavior inspectable in tests and inversion wrappers
-- `expectation_method="hmc"` now rejects `jacobian_method="autodiff"` explicitly and keeps the existing finite-difference requirement for sampled expectations
-- parsed-model SEP solves now switch `jacobian_method="auto"` to `"finite_difference"` automatically when `model.has_obc`, avoiding autodiff through `sp.Max` / `sp.Min` kinks during nonlinear path solves
-- smooth-model tests verify that finite-difference and autodiff Jacobians agree on the same SEP path, and parsed OBC SEP tests now assert that the automatic fallback is actually engaged
+- `expectation_method="hmc"` now rejects `jacobian_method="autodiff"` and `"subgradient"` explicitly and keeps the existing finite-difference requirement for sampled expectations
+- parsed-model SEP solves now switch `jacobian_method="auto"` to a branch-frozen subgradient Jacobian when `model.has_obc` and the expectation path is Gauss-Hermite, while keeping the finite-difference fallback on HMC paths
+- the parsed-model OBC subgradient Jacobian is assembled from branch-frozen dynamic Jacobians at each SEP node, which is materially closer to the Julia subdifferential Newton idea than the earlier pure finite-difference fallback
+- smooth-model tests verify that finite-difference and autodiff Jacobians agree on the same SEP path, and parsed OBC SEP tests now assert that the automatic subgradient path is engaged and matches the finite-difference solve on the same bound model
 
 ## Explicit gaps
 
@@ -595,7 +596,7 @@ Python/JAX status:
 - The current parsed front end now supports basic `max` / `min` OBC syntax plus branch-frozen linearization around the active steady-state branch, but the Julia-specific enforcement layer around kinks, including subdifferential Newton options and the broader OBC runtime surface, is still unported.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
-- The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, and an automatic finite-difference Jacobian fallback for parsed OBC models, but the remaining sparse-tree-specific Jacobian/runtime optimizations and broader OBC-specific subdifferential SEP machinery are still unported.
+- The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, and branch-frozen subgradient Jacobians for parsed OBC models on the Gauss-Hermite path, but the remaining sparse-tree-specific Jacobian/runtime optimizations and broader OBC-specific subdifferential SEP machinery are still unported.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed SEP path with both full-tree and sparse fishbone branching.

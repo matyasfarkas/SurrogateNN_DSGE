@@ -416,6 +416,24 @@ def test_sep_finite_difference_jacobian_matches_autodiff_on_smooth_model() -> No
     )
 
 
+def test_sep_subgradient_requires_custom_jacobian() -> None:
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        return y_curr - (0.2 * y_prev + 0.15 * y_next**2 + shock)
+
+    with np.testing.assert_raises_regex(ValueError, "requires a jacobian_fn"):
+        solve_stochastic_extended_path_residual_expectation(
+            conditional_residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(
+                periods=3,
+                branching_order=1,
+                jacobian_method="subgradient",
+            ),
+        )
+
+
 def test_sep_hmc_legacy_expectation_api_runs_deterministically() -> None:
     deterministic_shocks = jnp.asarray([[0.15], [0.0], [0.0]], dtype=jnp.float64)
 
@@ -497,7 +515,10 @@ def test_sep_rejects_autodiff_jacobian_for_hmc() -> None:
     def conditional_residual(y_prev, y_curr, y_next, shock, params):
         return y_curr - (0.2 * y_prev + 0.15 * y_next**2 + shock)
 
-    with np.testing.assert_raises_regex(ValueError, "incompatible with expectation_method='hmc'"):
+    with np.testing.assert_raises_regex(
+        ValueError,
+        "must not be 'autodiff' or 'subgradient' when expectation_method='hmc'",
+    ):
         solve_stochastic_extended_path_residual_expectation(
             conditional_residual,
             initial_state=[0.0],

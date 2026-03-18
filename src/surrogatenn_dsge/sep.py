@@ -14,6 +14,7 @@ SEPConditionalResidualFn = Callable[
     [jax.Array, jax.Array, jax.Array, jax.Array, object],
     jax.Array,
 ]
+SEPJacobianFn = Callable[[jax.Array], jax.Array]
 
 
 class GaussHermiteRule(NamedTuple):
@@ -76,15 +77,23 @@ def _validate_sep_config(config: SEPConfig, *, shock_dim: int) -> None:
             "SEPConfig.expectation_method must be 'gauss_hermite' or 'hmc', "
             f"got {config.expectation_method!r}."
         )
-    if config.jacobian_method not in {"auto", "autodiff", "finite_difference"}:
+    if config.jacobian_method not in {
+        "auto",
+        "autodiff",
+        "finite_difference",
+        "subgradient",
+    }:
         raise ValueError(
-            "SEPConfig.jacobian_method must be 'auto', 'autodiff', or "
-            f"'finite_difference', got {config.jacobian_method!r}."
+            "SEPConfig.jacobian_method must be 'auto', 'autodiff', "
+            f"'finite_difference', or 'subgradient', got {config.jacobian_method!r}."
         )
-    if config.expectation_method == "hmc" and config.jacobian_method == "autodiff":
+    if config.expectation_method == "hmc" and config.jacobian_method in {
+        "autodiff",
+        "subgradient",
+    }:
         raise ValueError(
-            "SEPConfig.jacobian_method='autodiff' is incompatible with "
-            "expectation_method='hmc'; use 'auto' or 'finite_difference'."
+            "SEPConfig.jacobian_method must not be 'autodiff' or 'subgradient' "
+            "when expectation_method='hmc'; use 'auto' or 'finite_difference'."
         )
     if config.hmc_samples < 1:
         raise ValueError(
@@ -535,6 +544,7 @@ def solve_stochastic_extended_path(
     params: object = None,
     expectation_fn: Optional[SEPExpectationFn] = None,
     initial_guess: Optional[Sequence[Sequence[float]]] = None,
+    jacobian_fn: Optional[SEPJacobianFn] = None,
 ) -> SEPSolution:
     return _solve_stochastic_extended_path_impl(
         initial_state=initial_state,
@@ -547,6 +557,7 @@ def solve_stochastic_extended_path(
         initial_guess=initial_guess,
         residual_fn=residual_fn,
         conditional_residual_fn=None,
+        jacobian_fn=jacobian_fn,
     )
 
 
@@ -560,6 +571,7 @@ def solve_stochastic_extended_path_residual_expectation(
     deterministic_shocks: Optional[Sequence[Sequence[float]]] = None,
     params: object = None,
     initial_guess: Optional[Sequence[Sequence[float]]] = None,
+    jacobian_fn: Optional[SEPJacobianFn] = None,
 ) -> SEPSolution:
     return _solve_stochastic_extended_path_impl(
         initial_state=initial_state,
@@ -572,6 +584,7 @@ def solve_stochastic_extended_path_residual_expectation(
         initial_guess=initial_guess,
         residual_fn=None,
         conditional_residual_fn=conditional_residual_fn,
+        jacobian_fn=jacobian_fn,
     )
 
 
@@ -587,6 +600,7 @@ def _solve_stochastic_extended_path_impl(
     initial_guess: Optional[Sequence[Sequence[float]]],
     residual_fn: Optional[SEPResidualFn],
     conditional_residual_fn: Optional[SEPConditionalResidualFn],
+    jacobian_fn: Optional[SEPJacobianFn],
 ) -> SEPSolution:
     _validate_sep_config(config, shock_dim=shock_dim)
     initial_state_arr = jnp.asarray(initial_state, dtype=jnp.float64)
@@ -612,7 +626,18 @@ def _solve_stochastic_extended_path_impl(
     use_hmc = config.expectation_method == "hmc"
     jacobian_method = config.jacobian_method
     if jacobian_method == "auto":
-        jacobian_method_used = "finite_difference" if use_hmc else "autodiff"
+        if use_hmc:
+            jacobian_method_used = "finite_difference"
+        elif jacobian_fn is not None:
+            jacobian_method_used = "subgradient"
+        else:
+            jacobian_method_used = "autodiff"
+    elif jacobian_method == "subgradient":
+        if jacobian_fn is None:
+            raise ValueError(
+                "SEPConfig.jacobian_method='subgradient' requires a jacobian_fn."
+            )
+        jacobian_method_used = "subgradient"
     else:
         jacobian_method_used = jacobian_method
     rule = (
@@ -904,11 +929,12 @@ def _solve_stochastic_extended_path_impl(
             iterations = iteration - 1
             break
 
-        jacobian = (
-            _finite_difference_jacobian(residual_vector, current)
-            if jacobian_method_used == "finite_difference"
-            else jax.jacobian(residual_vector)(current)
-        )
+        if jacobian_method_used == "finite_difference":
+            jacobian = _finite_difference_jacobian(residual_vector, current)
+        elif jacobian_method_used == "subgradient":
+            jacobian = jnp.asarray(jacobian_fn(current), dtype=jnp.float64)
+        else:
+            jacobian = jax.jacobian(residual_vector)(current)
         normal_matrix = jacobian.T @ jacobian
         gradient = jacobian.T @ residual
         eye = jnp.eye(normal_matrix.shape[0], dtype=normal_matrix.dtype)

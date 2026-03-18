@@ -37,7 +37,7 @@ Implemented:
 - MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
 - basic `max` / `min` OBC syntax parsing with parsed-model `has_obc` detection, steady-state support, inactive-branch first-order solves, and SEP path solves on simple bound models
 - branch-frozen OBC derivative evaluation around active steady-state branches, so binding `max` / `min` constraints no longer linearize with spurious `0.5` derivatives at the kink
-- SEP Jacobian selection via `jacobian_method=\"auto\" | \"autodiff\" | \"finite_difference\"`, with parsed OBC SEP solves automatically switching `auto` to finite differences instead of autodiff through `max` / `min` kinks
+- SEP Jacobian selection via `jacobian_method=\"auto\" | \"autodiff\" | \"finite_difference\" | \"subgradient\"`, with parsed OBC SEP solves automatically switching `auto` to a branch-frozen subgradient Jacobian on the Gauss-Hermite path
 - MacroModelling-style inline time-index `for` loops inside `@model` equations, including additive and `operator = :*` forms
 - explicit curly-brace indexed identifiers such as `y{H}[0]` and `rho{H}{F}` across parsed model and parameter blocks
 - top-level `for`-block expansion in `@model` for explicit identifier lists like `[H, F]`, named source-level collections like `countries = [:H, :F]`, and integer ranges
@@ -71,7 +71,7 @@ Not implemented yet:
 - ambiguous multi-family calibration-equation broadcasting remains guarded rather than inferred
 - the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds
 - full Julia-style occasionally binding constraint enforcement around kinks, including subdifferential Newton machinery, full kink-aware runtime switching, and the broader OBC runtime surface
-- the remaining sparse-tree-specific Jacobian/runtime optimizations and the broader OBC-specific SEP machinery beyond the new finite-difference Jacobian fallback
+- the remaining sparse-tree-specific Jacobian/runtime optimizations and the broader OBC-specific SEP machinery beyond the new subgradient / finite-difference Jacobian safeguards
 - fully GPU-native generalized QZ / ordered-QZ primitives; the current JAX-facing `schur` QME path uses a SciPy host callback in the primal solve because JAX does not yet expose generalized `qz` / `ordqz`
 - the public first-order default now matches Julia and uses `schur`; request `qme_algorithm=\"doubling\"` explicitly if you want to stay on the fully JAX-native doubling path
 - the new determinacy diagnostics are currently tied to the Schur/QZ path; the doubling path still solves the QME but does not provide a comparable stable-root decomposition report

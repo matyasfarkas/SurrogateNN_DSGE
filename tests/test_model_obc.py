@@ -128,7 +128,7 @@ def test_obc_model_sep_enforces_max_constraint_along_path() -> None:
     )
 
     assert result.solution.converged
-    assert result.solution.jacobian_method == "finite_difference"
+    assert result.solution.jacobian_method == "subgradient"
     r_index = model.timings.var.index("r")
     r_path = np.asarray(result.solution.mean_path[r_index, 1:], dtype=np.float64)
     assert np.all(r_path >= 1.0 - 1e-8)
@@ -176,4 +176,45 @@ def test_obc_binding_min_linearization_freezes_constraint_branch() -> None:
         [1.0, 0.0, 0.0, 0.0],
         rtol=0.0,
         atol=1e-12,
+    )
+
+
+def test_obc_model_sep_subgradient_matches_finite_difference() -> None:
+    model = parse_macro_model(OBC_MAX_SOURCE)
+    subgradient = solve_stochastic_extended_path_model(
+        model,
+        steady_state=[1.2, 1.2],
+        initial_state=[1.2, 1.2],
+        terminal_state=[1.2, 1.2],
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            jacobian_method="subgradient",
+            tol=1e-8,
+        ),
+        deterministic_shocks={"eps_r": [-2.0, 0.0, 0.0]},
+    )
+    finite_difference = solve_stochastic_extended_path_model(
+        model,
+        steady_state=[1.2, 1.2],
+        initial_state=[1.2, 1.2],
+        terminal_state=[1.2, 1.2],
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            jacobian_method="finite_difference",
+            tol=1e-8,
+        ),
+        deterministic_shocks={"eps_r": [-2.0, 0.0, 0.0]},
+    )
+
+    assert subgradient.solution.converged
+    assert finite_difference.solution.converged
+    assert subgradient.solution.jacobian_method == "subgradient"
+    assert finite_difference.solution.jacobian_method == "finite_difference"
+    np.testing.assert_allclose(
+        subgradient.solution.mean_path,
+        finite_difference.solution.mean_path,
+        rtol=1e-8,
+        atol=1e-8,
     )
