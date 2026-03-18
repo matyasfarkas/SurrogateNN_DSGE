@@ -539,6 +539,20 @@ Python/JAX status:
 - the older `solve_stochastic_extended_path` API based on `residual_fn` plus `expectation_fn` is still explicitly GH-only; HMC currently targets the residual-expectation callback/model path where the Julia port maps cleanly
 - tests cover deterministic fixed-seed HMC behavior, HMC tempering smoke, rejection of the unsupported legacy API combination, and parsed-model HMC SEP smoke
 
+### 35. Basic OBC syntax coverage
+
+Julia reference:
+
+- `src/macros.jl`
+- `src/MacroModelling.jl` (`check_for_minmax`, `replace_min_max`)
+
+Python/JAX status:
+
+- parsed-model source already supported simple `max` / `min` expressions through the SymPy front end; this slice formalizes that support with explicit tests and parsed-model metadata
+- `MacroModel` now exposes `has_obc`, which is set when dynamic equations contain `sp.Max` or `sp.Min`
+- tests now cover parsed-model `max` and `min` residual evaluation, simple OBC steady states, inactive-branch first-order solves away from the kink, and a parsed-model SEP path where a lower bound becomes active under a large negative deterministic shock
+- this does not claim full Julia OBC parity; it only narrows the boundary from “syntax unsupported” to “basic syntax works, while OBC-specific enforcement around kinks is still missing”
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -549,7 +563,7 @@ Python/JAX status:
 - The current dense Lyapunov fallback is also a direct Kronecker solve.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
 - The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
-- The current parsed front end does not yet port occasionally binding constraint parsing (`max`/`min` OBC machinery) from the Julia macro layer.
+- The current parsed front end now supports basic `max` / `min` OBC syntax, but the Julia-specific enforcement layer around kinks, including subdifferential Newton options and the broader OBC runtime surface, is still unported.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, and the HMC residual-expectation backend, but HMC is still not ported on the older `residual_fn` / `expectation_fn` API, and the remaining sparse-tree-specific Jacobian/runtime optimizations plus OBC-specific subdifferential SEP machinery are still unported.

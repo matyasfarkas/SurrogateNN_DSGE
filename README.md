@@ -35,6 +35,7 @@ Implemented:
 - explicit Schur / ordered-QZ determinacy diagnostics for first-order models, including stable-root counts, unique/indeterminate/no-stable classification, and parsed-model wrappers to inspect the Schur branch directly
 - parsed-model state-space, likelihood, filtering, gate-stat, and concrete/compiled NumPyro helpers now expose `qme_algorithm` so first-order workflows can explicitly choose between the doubling and Schur/QZ solution branches
 - MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
+- basic `max` / `min` OBC syntax parsing with parsed-model `has_obc` detection, steady-state support, inactive-branch first-order solves, and SEP path solves on simple bound models
 - MacroModelling-style inline time-index `for` loops inside `@model` equations, including additive and `operator = :*` forms
 - explicit curly-brace indexed identifiers such as `y{H}[0]` and `rho{H}{F}` across parsed model and parameter blocks
 - top-level `for`-block expansion in `@model` for explicit identifier lists like `[H, F]`, named source-level collections like `countries = [:H, :F]`, and integer ranges
@@ -67,7 +68,7 @@ Not implemented yet:
 - perturbation orders above third
 - ambiguous multi-family calibration-equation broadcasting remains guarded rather than inferred
 - the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds
-- occasionally binding constraint parsing from the Julia macro layer
+- full Julia-style occasionally binding constraint enforcement around kinks, including subdifferential Newton machinery and the broader OBC runtime surface
 - HMC on the older `residual_fn` / `expectation_fn` SEP API, the remaining sparse-tree-specific Jacobian/runtime optimizations, and OBC-specific SEP machinery
 - fully GPU-native generalized QZ / ordered-QZ primitives; the current JAX-facing `schur` QME path uses a SciPy host callback in the primal solve because JAX does not yet expose generalized `qz` / `ordqz`
 - the public first-order default now matches Julia and uses `schur`; request `qme_algorithm=\"doubling\"` explicitly if you want to stay on the fully JAX-native doubling path

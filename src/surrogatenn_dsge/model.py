@@ -168,6 +168,7 @@ class MacroModel:
     calibrated_parameter_names: tuple[str, ...]
     default_initial_guess: dict[str, float]
     bounds: dict[str, tuple[float, float]]
+    has_obc: bool
     timings: DSGETimings
     steady_state_names: tuple[str, ...]
     steady_state_reference_names: tuple[str, ...]
@@ -3240,6 +3241,7 @@ def parse_macro_model(source: str) -> MacroModel:
         steady_state_names=steady_state_names,
         calibrated_parameter_names=parsed_parameter_block.calibrated_target_names,
     )
+    has_obc = any(_expression_contains_obc(expr) for expr in dynamic_exprs)
 
     return MacroModel(
         name=model_block["name"],
@@ -3251,6 +3253,7 @@ def parse_macro_model(source: str) -> MacroModel:
         ),
         default_initial_guess=default_initial_guess,
         bounds=parsed_parameter_block.bounds,
+        has_obc=has_obc,
         timings=timings,
         steady_state_names=steady_state_names,
         steady_state_reference_names=steady_state_reference_names,
@@ -4903,6 +4906,10 @@ def _parse_bound_value(text: str) -> float:
     if not np.isfinite(numeric_value):
         raise ValueError(f"Bound value `{text}` must evaluate to a finite number.")
     return numeric_value
+
+
+def _expression_contains_obc(expr: sp.Expr) -> bool:
+    return bool(expr.has(sp.Max, sp.Min))
 
 
 def _bound_from_comparison(
