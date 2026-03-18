@@ -200,3 +200,88 @@ def test_sep_sparse_tree_matches_full_tree_mean_path_for_linear_zero_mean_shocks
         rtol=1e-10,
         atol=1e-10,
     )
+
+
+def test_sep_warm_start_accepts_previous_solution_and_finishes_immediately() -> None:
+    deterministic_shocks = jnp.asarray([[0.2], [0.0], [0.0]], dtype=jnp.float64)
+
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        return y_curr - (
+            0.25 * y_prev + 0.15 * expected_next - 0.05 * y_curr**2 + shock
+        )
+
+    cold = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(periods=3, branching_order=2, nnodes=3, tol=1e-10),
+        deterministic_shocks=deterministic_shocks,
+    )
+    warm = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(periods=3, branching_order=2, nnodes=3, tol=1e-10),
+        deterministic_shocks=deterministic_shocks,
+        initial_guess=cold.stacked_states,
+    )
+
+    assert cold.converged
+    assert warm.converged
+    assert warm.iterations == 0
+    np.testing.assert_allclose(
+        warm.stacked_states,
+        cold.stacked_states,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+def test_sep_rejects_invalid_warm_start_shape() -> None:
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        return y_curr - (0.4 * y_prev + 0.2 * expected_next + shock)
+
+    with np.testing.assert_raises_regex(ValueError, "initial_guess must flatten"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(periods=3, branching_order=1, nnodes=3),
+            initial_guess=jnp.zeros((5,), dtype=jnp.float64),
+        )
+
+
+def test_sep_validates_sparse_tree_requires_odd_nnodes() -> None:
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        return y_curr - (0.4 * y_prev + 0.2 * expected_next + shock)
+
+    with np.testing.assert_raises_regex(ValueError, "odd nnodes"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(periods=3, branching_order=1, nnodes=2, sparse_tree=True),
+        )
+
+
+def test_sep_validates_bad_config_values() -> None:
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        return y_curr - (0.4 * y_prev + 0.2 * expected_next + shock)
+
+    with np.testing.assert_raises_regex(ValueError, "line_search_factor"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(
+                periods=3,
+                branching_order=1,
+                nnodes=3,
+                line_search_factor=1.0,
+            ),
+        )

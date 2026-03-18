@@ -42,6 +42,61 @@ class SEPConfig:
     line_search_factor: float = 0.5
     line_search_min_alpha: float = 1e-4
     newton_regularization: float = 1e-8
+    lm_lambda_scale: float = 10.0
+    lm_lambda_min: float = 1e-12
+    lm_lambda_max: float = 1e4
+
+
+def _validate_sep_config(config: SEPConfig, *, shock_dim: int) -> None:
+    if config.periods < 1:
+        raise ValueError(f"SEPConfig.periods must be >= 1, got {config.periods}.")
+    if config.branching_order < 0:
+        raise ValueError(
+            f"SEPConfig.branching_order must be >= 0, got {config.branching_order}."
+        )
+    if config.nnodes < 1:
+        raise ValueError(f"SEPConfig.nnodes must be >= 1, got {config.nnodes}.")
+    if config.shock_scale <= 0.0:
+        raise ValueError(
+            f"SEPConfig.shock_scale must be > 0, got {config.shock_scale}."
+        )
+    if config.max_iter < 1:
+        raise ValueError(f"SEPConfig.max_iter must be >= 1, got {config.max_iter}.")
+    if config.tol <= 0.0:
+        raise ValueError(f"SEPConfig.tol must be > 0, got {config.tol}.")
+    if not 0.0 < config.line_search_factor < 1.0:
+        raise ValueError(
+            "SEPConfig.line_search_factor must be in (0, 1), "
+            f"got {config.line_search_factor}."
+        )
+    if not 0.0 < config.line_search_min_alpha <= 1.0:
+        raise ValueError(
+            "SEPConfig.line_search_min_alpha must be in (0, 1], "
+            f"got {config.line_search_min_alpha}."
+        )
+    if config.newton_regularization <= 0.0:
+        raise ValueError(
+            "SEPConfig.newton_regularization must be > 0, "
+            f"got {config.newton_regularization}."
+        )
+    if config.lm_lambda_scale <= 1.0:
+        raise ValueError(
+            f"SEPConfig.lm_lambda_scale must be > 1, got {config.lm_lambda_scale}."
+        )
+    if config.lm_lambda_min <= 0.0:
+        raise ValueError(
+            f"SEPConfig.lm_lambda_min must be > 0, got {config.lm_lambda_min}."
+        )
+    if config.lm_lambda_max < config.newton_regularization:
+        raise ValueError(
+            "SEPConfig.lm_lambda_max must be >= SEPConfig.newton_regularization, "
+            f"got {config.lm_lambda_max} < {config.newton_regularization}."
+        )
+    if config.sparse_tree and shock_dim > 0 and config.nnodes % 2 == 0:
+        raise ValueError(
+            "Sparse-tree SEP requires an odd nnodes value so the trunk can use the "
+            f"zero Gauss-Hermite node, got nnodes={config.nnodes}."
+        )
 
 
 def gauss_hermite_rule(nnodes: int, shock_dim: int, shock_scale: float = 1.0) -> GaussHermiteRule:
@@ -321,6 +376,7 @@ def _solve_stochastic_extended_path_impl(
     residual_fn: Optional[SEPResidualFn],
     conditional_residual_fn: Optional[SEPConditionalResidualFn],
 ) -> SEPSolution:
+    _validate_sep_config(config, shock_dim=shock_dim)
     initial_state_arr = jnp.asarray(initial_state, dtype=jnp.float64)
     terminal_state_arr = jnp.asarray(terminal_state, dtype=jnp.float64)
     state_dim = int(initial_state_arr.shape[0])
@@ -376,6 +432,7 @@ def _solve_stochastic_extended_path_impl(
             values.append(jnp.reshape(stacked[start:end], (counts[t], state_dim)))
         return tuple(values)
 
+    expected_stacked_size = time_offsets[-1]
     if initial_guess is None:
         guess = jnp.concatenate(
             [
@@ -387,6 +444,11 @@ def _solve_stochastic_extended_path_impl(
     else:
         guess_arr = jnp.asarray(initial_guess, dtype=jnp.float64)
         guess = guess_arr.reshape(-1)
+        if guess.shape != (expected_stacked_size,):
+            raise ValueError(
+                "initial_guess must flatten to shape "
+                f"({expected_stacked_size},), got {guess.shape}."
+            )
 
     def residual_vector(stacked: jax.Array) -> jax.Array:
         states_by_time = unflatten(stacked)
@@ -549,6 +611,7 @@ def _solve_stochastic_extended_path_impl(
     converged = residual_norm < config.tol
     iterations = 0
     current = guess
+    current_lambda = float(config.newton_regularization)
 
     for iteration in range(1, config.max_iter + 1):
         residual = residual_vector(current)
@@ -559,19 +622,44 @@ def _solve_stochastic_extended_path_impl(
             break
 
         jacobian = jax.jacobian(residual_vector)(current)
-        regularized = jacobian + config.newton_regularization * jnp.eye(
-            jacobian.shape[0],
-            dtype=jacobian.dtype,
-        )
-        step = jnp.linalg.solve(regularized, -residual)
+        normal_matrix = jacobian.T @ jacobian
+        gradient = jacobian.T @ residual
+        eye = jnp.eye(normal_matrix.shape[0], dtype=normal_matrix.dtype)
 
-        alpha = 1.0
-        candidate = current + alpha * step
-        candidate_norm = float(np.asarray(jnp.linalg.norm(residual_vector(candidate), ord=jnp.inf)))
-        while candidate_norm >= residual_norm and alpha > config.line_search_min_alpha:
-            alpha *= config.line_search_factor
-            candidate = current + alpha * step
-            candidate_norm = float(np.asarray(jnp.linalg.norm(residual_vector(candidate), ord=jnp.inf)))
+        accepted = False
+        candidate = current
+        lambda_value = current_lambda
+        while lambda_value <= config.lm_lambda_max:
+            lm_system = normal_matrix + lambda_value * eye
+            step = jnp.linalg.solve(lm_system, -gradient)
+            if not bool(jnp.all(jnp.isfinite(step))):
+                lambda_value *= config.lm_lambda_scale
+                continue
+
+            alpha = 1.0
+            while True:
+                trial = current + alpha * step
+                trial_residual = residual_vector(trial)
+                trial_norm = float(np.asarray(jnp.linalg.norm(trial_residual, ord=jnp.inf)))
+                if np.isfinite(trial_norm) and trial_norm < residual_norm:
+                    candidate = trial
+                    current_lambda = max(
+                        lambda_value / config.lm_lambda_scale,
+                        config.lm_lambda_min,
+                    )
+                    accepted = True
+                    break
+                if alpha <= config.line_search_min_alpha:
+                    break
+                alpha *= config.line_search_factor
+
+            if accepted:
+                break
+            lambda_value *= config.lm_lambda_scale
+
+        if not accepted:
+            iterations = iteration - 1
+            break
 
         current = candidate
         iterations = iteration

@@ -509,6 +509,20 @@ Python/JAX status:
 - the SEP inversion filter now honors sparse-tree configuration both through `SEPConfig(sparse_tree=True)` and the Julia-style `sep_sparse_tree` runtime override, instead of always forcing the full tree
 - tests verify the sparse fishbone group-count layout directly, confirm that sparse and full trees deliver the same linear mean path under zero-mean shocks, and verify that the parsed SEP inversion bridge now preserves `config.sparse_tree`
 
+### 33. SEP robustness hardening
+
+Julia reference:
+
+- `src/sep_solver.jl` (`line_search`, `lm_lambda`, `lm_lambda_scale`, `lm_lambda_min`, `lm_lambda_max`, warm-start handling)
+
+Python/JAX status:
+
+- the SEP Newton loop now uses adaptive Levenberg-Marquardt damping on the normal equations instead of a fixed diagonal regularization, which materially improves robustness on harder nonlinear solves while staying close to the Julia solver structure
+- `SEPConfig` now validates core runtime invariants up front, including positive tolerances and iteration counts, valid line-search ranges, valid LM bounds, and the sparse-tree requirement that `nnodes` be odd so the trunk can use a true zero Gauss-Hermite node
+- low-level SEP calls now validate `initial_guess` size explicitly instead of silently reshaping mismatched warm starts
+- exact warm starts from prior `stacked_states` now short-circuit cleanly with zero additional iterations when the supplied solution already satisfies the nonlinear system
+- tests cover warm-start exact reuse, invalid warm-start shape errors, sparse-tree `nnodes` validation, bad line-search configuration rejection, plus regression checks that parsed-model SEP and SEP inversion still pass on top of the hardened core
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
