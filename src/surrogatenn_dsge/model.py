@@ -10,6 +10,7 @@ from jax import lax
 import jax.numpy as jnp
 import jax.scipy.special as jsp_special
 import numpy as np
+import scipy.optimize as scipy_optimize
 import scipy.special as scipy_special
 import sympy as sp
 from sympy.parsing.sympy_parser import (
@@ -18,6 +19,7 @@ from sympy.parsing.sympy_parser import (
     parse_expr,
     standard_transformations,
 )
+from sympy.utilities.lambdify import implemented_function
 
 from .dsge import (
     analyze_first_order_dsge_determinacy,
@@ -1307,18 +1309,16 @@ class MacroModel:
                     "`@parameters` block contains calibration equations."
                 )
             base_steady_state = np.ones(len(self.steady_state_names), dtype=np.float64)
-            residual_fns = (
-                lambda x: np.asarray(
+            residual_fn = lambda x: np.asarray(
                     self._parameter_equation_fn(*base_steady_state, *x),
                     dtype=np.float64,
-                ).reshape(-1),
-            )
-            jacobian_fns = (
-                lambda x: np.asarray(
+                ).reshape(-1)
+
+            def symbolic_jacobian_fn(x: np.ndarray) -> np.ndarray:
+                return np.asarray(
                     self._parameter_equation_jacobian_fn(*base_steady_state, *x),
                     dtype=np.float64,
-                ),
-            )
+                )
         else:
             state = np.asarray(steady_state, dtype=np.float64)
             if state.shape == (len(self.steady_state_names),):
@@ -1330,8 +1330,7 @@ class MacroModel:
                     "steady_state must have shape "
                     f"({len(self.steady_state_names)},) or ({self.timings.nVars},), got {state.shape}."
                 )
-            residual_fns = (
-                lambda x: np.concatenate(
+            residual_fn = lambda x: np.concatenate(
                     [
                         np.asarray(
                             self._steady_state_fn(*base_steady_state, *x),
@@ -1342,10 +1341,10 @@ class MacroModel:
                             dtype=np.float64,
                         ).reshape(-1),
                     ]
-                ),
-            )
-            jacobian_fns = (
-                lambda x: np.concatenate(
+                )
+
+            def symbolic_jacobian_fn(x: np.ndarray) -> np.ndarray:
+                return np.concatenate(
                     [
                         (
                             self._evaluate_steady_state_obc_parameter_jacobian(
@@ -1367,13 +1366,23 @@ class MacroModel:
                         ),
                     ],
                     axis=0,
-                ),
-            )
+                )
+
+        jacobian_mode = {"use_finite_difference": False}
+
+        def jacobian_fn(x: np.ndarray) -> np.ndarray:
+            if jacobian_mode["use_finite_difference"]:
+                return _finite_difference_jacobian(residual_fn, x)
+            try:
+                return symbolic_jacobian_fn(x)
+            except Exception:
+                jacobian_mode["use_finite_difference"] = True
+                return _finite_difference_jacobian(residual_fn, x)
 
         resolved, _, _, _ = _solve_newton_system(
             parameters,
-            residual_fn=residual_fns[0],
-            jacobian_fn=jacobian_fns[0],
+            residual_fn=residual_fn,
+            jacobian_fn=jacobian_fn,
             lower_bounds=lower_bounds,
             upper_bounds=upper_bounds,
             tol=tol,
@@ -5661,6 +5670,41 @@ def _solve_newton_system(
     return x, residual_norm < tol, max_iter, residual_norm
 
 
+def _finite_difference_jacobian(
+    residual_fn: object,
+    x: Sequence[float],
+    *,
+    step_scale: float = 1e-6,
+) -> np.ndarray:
+    point = np.asarray(x, dtype=np.float64)
+    base = np.asarray(residual_fn(point), dtype=np.float64).reshape(-1)
+    jacobian = np.zeros((base.shape[0], point.shape[0]), dtype=np.float64)
+
+    for idx in range(point.shape[0]):
+        step = step_scale * max(1.0, abs(float(point[idx])))
+        forward = point.copy()
+        forward[idx] += step
+        backward = point.copy()
+        backward[idx] -= step
+
+        forward_residual = np.asarray(residual_fn(forward), dtype=np.float64).reshape(-1)
+        backward_residual = np.asarray(residual_fn(backward), dtype=np.float64).reshape(-1)
+        if np.isfinite(forward_residual).all() and np.isfinite(backward_residual).all():
+            jacobian[:, idx] = (forward_residual - backward_residual) / (2.0 * step)
+            continue
+        if np.isfinite(forward_residual).all():
+            jacobian[:, idx] = (forward_residual - base) / step
+            continue
+        if np.isfinite(backward_residual).all():
+            jacobian[:, idx] = (base - backward_residual) / step
+            continue
+        raise ValueError(
+            "Finite-difference Jacobian evaluation produced non-finite residuals."
+        )
+
+    return jacobian
+
+
 def _solve_newton_system_jax(
     initial: Sequence[float],
     *,
@@ -5955,7 +5999,164 @@ def _split_parameter_body_lines(body: str) -> list[str]:
 
     if current:
         statements.append(" ".join(current))
-    return statements
+    return _resolve_parameter_tail_conditionals(statements)
+
+
+def _resolve_parameter_tail_conditionals(statements: Sequence[str]) -> list[str]:
+    filtered: list[str] = []
+    environment: dict[str, float] = {}
+    conditional_active: Optional[bool] = None
+    branch_taken = False
+    tail_conditional_seen = False
+    statement_targets: dict[str, int] = {}
+
+    for statement in statements:
+        stripped = statement.strip()
+        if stripped.startswith("if "):
+            conditional_active = _evaluate_parameter_condition_expression(
+                stripped[len("if") :].strip(),
+                environment,
+            )
+            branch_taken = conditional_active
+            tail_conditional_seen = True
+            continue
+        if stripped.startswith("elseif "):
+            if not tail_conditional_seen:
+                raise ValueError("Encountered `elseif` before `if` in `@parameters`.")
+            if branch_taken:
+                conditional_active = False
+            else:
+                conditional_active = _evaluate_parameter_condition_expression(
+                    stripped[len("elseif") :].strip(),
+                    environment,
+                )
+                branch_taken = conditional_active
+            continue
+        if stripped == "else":
+            if not tail_conditional_seen:
+                raise ValueError("Encountered `else` before `if` in `@parameters`.")
+            conditional_active = not branch_taken
+            branch_taken = True
+            continue
+
+        if conditional_active is False:
+            continue
+
+        target_name = _parameter_direct_assignment_target(statement)
+        if (
+            tail_conditional_seen
+            and target_name is not None
+            and target_name in statement_targets
+        ):
+            filtered[statement_targets[target_name]] = statement
+        else:
+            if target_name is not None:
+                statement_targets[target_name] = len(filtered)
+            filtered.append(statement)
+
+        _update_parameter_condition_environment(statement, environment)
+
+    return filtered
+
+
+def _evaluate_parameter_condition_expression(
+    expression_text: str,
+    environment: Mapping[str, float],
+) -> bool:
+    for operator in ("==", "!=", ">=", "<=", ">", "<"):
+        if operator not in expression_text:
+            continue
+        lhs_text, rhs_text = (part.strip() for part in expression_text.split(operator, 1))
+        lhs_value = _evaluate_parameter_condition_operand(lhs_text, environment)
+        rhs_value = _evaluate_parameter_condition_operand(rhs_text, environment)
+        if operator == "==":
+            return bool(np.isclose(lhs_value, rhs_value, rtol=0.0, atol=1e-12))
+        if operator == "!=":
+            return not bool(np.isclose(lhs_value, rhs_value, rtol=0.0, atol=1e-12))
+        if operator == ">=":
+            return lhs_value >= rhs_value
+        if operator == "<=":
+            return lhs_value <= rhs_value
+        if operator == ">":
+            return lhs_value > rhs_value
+        if operator == "<":
+            return lhs_value < rhs_value
+    raise ValueError(
+        "Parameter conditionals must use one of `==`, `!=`, `>=`, `<=`, `>`, or `<`, "
+        f"got `{expression_text}`."
+    )
+
+
+def _evaluate_parameter_condition_operand(
+    operand_text: str,
+    environment: Mapping[str, float],
+) -> float:
+    parse_name_map = {
+        name: _parameter_parse_name(name)
+        for name in environment
+        if _is_indexed_identifier(name)
+    }
+    local_env = {
+        parse_name_map.get(key, key): value
+        for key, value in environment.items()
+    }
+    expr = parse_expr(
+        _sanitize_indexed_identifiers(operand_text, parse_name_map),
+        local_dict={**local_env, **_function_locals()},
+        transformations=_TRANSFORMATIONS,
+    )
+    if getattr(expr, "free_symbols", set()):
+        unresolved = ", ".join(sorted(str(symbol) for symbol in expr.free_symbols))
+        raise ValueError(
+            "Parameter conditional expression depends on unresolved identifiers: "
+            + unresolved
+        )
+    return _evaluate_constant_parameter_expression(expr)
+
+
+def _parameter_direct_assignment_target(statement: str) -> Optional[str]:
+    if _is_parameter_bounds_line(statement) or "|" in statement or "=" not in statement:
+        return None
+    target_text = statement.split("=", 1)[0].strip()
+    if not re.fullmatch(_IDENTIFIER_PATTERN, target_text, re.UNICODE):
+        return None
+    return target_text
+
+
+def _update_parameter_condition_environment(
+    statement: str,
+    environment: dict[str, float],
+) -> None:
+    target_name = _parameter_direct_assignment_target(statement)
+    if target_name is None:
+        return
+
+    parse_name_map = {
+        name: _parameter_parse_name(name)
+        for name in environment
+        if _is_indexed_identifier(name)
+    }
+    local_env = {
+        parse_name_map.get(key, key): value
+        for key, value in environment.items()
+    }
+    try:
+        expr = parse_expr(
+            _sanitize_indexed_identifiers(
+                statement.split("=", 1)[1].strip(),
+                parse_name_map,
+            ),
+            local_dict={**local_env, **_function_locals()},
+            transformations=_TRANSFORMATIONS,
+        )
+    except Exception:
+        return
+    if getattr(expr, "free_symbols", set()):
+        return
+    try:
+        environment[target_name] = _evaluate_constant_parameter_expression(expr)
+    except Exception:
+        return
 
 
 def _model_line_requires_continuation(line: str) -> bool:
@@ -7157,7 +7358,9 @@ def _initial_parameter_guesses(
                     local_dict={**local_env, **_function_locals()},
                     transformations=_TRANSFORMATIONS,
                 )
-                numeric_value = float(value)
+                if getattr(value, "free_symbols", set()):
+                    continue
+                numeric_value = _evaluate_constant_parameter_expression(value)
             except Exception:
                 continue
             if np.isfinite(numeric_value):
@@ -7166,6 +7369,28 @@ def _initial_parameter_guesses(
                 progress = True
 
     return {name: environment.get(name, 1.0) for name in target_names}
+
+
+def _evaluate_constant_parameter_expression(expr: object) -> float:
+    reduced = sp.sympify(expr)
+
+    def is_implemented_function(node: sp.Basic) -> bool:
+        return (
+            getattr(node, "is_Function", False)
+            and hasattr(node.func, "_imp_")
+            and all(not getattr(arg, "free_symbols", set()) for arg in node.args)
+        )
+
+    def evaluate_implemented_function(node: sp.Basic) -> sp.Float:
+        numeric_args = [float(sp.N(arg)) for arg in node.args]
+        return sp.Float(node.func._imp_(*numeric_args))
+
+    while True:
+        updated = reduced.replace(is_implemented_function, evaluate_implemented_function)
+        if updated == reduced:
+            break
+        reduced = updated
+    return float(sp.N(reduced))
 
 
 def _available_indexed_parameter_names(
@@ -7370,11 +7595,136 @@ def _flatten_third_order(expr: sp.Expr, symbols: Sequence[sp.Symbol]) -> list[sp
     return third_order
 
 
+def _qmipf_solve_ss(
+    zeta: float,
+    zeta_st: float,
+    s_gy: float,
+    s_gy_st: float,
+    ss_y: float,
+    ss_c: float,
+    chi: float,
+    sigma: float,
+    eta_0: float,
+    k_n_st: float,
+    alpha: float,
+    theta_p: float,
+    chi_0_st: float,
+    ss_tau_n_st: float,
+    ss_tau_c_st: float,
+    varkappa_st: float,
+    ss_nu_st: float,
+    ss_n: float,
+    theta_w: float,
+    tau_p: float,
+    tau_w: float,
+) -> float:
+    values = np.asarray(
+        [
+            zeta,
+            zeta_st,
+            s_gy,
+            s_gy_st,
+            ss_y,
+            ss_c,
+            chi,
+            sigma,
+            eta_0,
+            k_n_st,
+            alpha,
+            theta_p,
+            chi_0_st,
+            ss_tau_n_st,
+            ss_tau_c_st,
+            varkappa_st,
+            ss_nu_st,
+            ss_n,
+            theta_w,
+            tau_p,
+            tau_w,
+        ],
+        dtype=np.float64,
+    )
+    if not np.isfinite(values).all():
+        raise ValueError("QMIPF_solve_SS requires only finite numeric arguments.")
+
+    exponent = chi * sigma
+    if zeta_st == 0.0 or chi_0_st == 0.0 or 1 + theta_p == 0.0 or 1 + theta_w == 0.0:
+        raise ValueError("QMIPF_solve_SS received invalid zero-denominator arguments.")
+    if 1 - varkappa_st - ss_nu_st == 0.0:
+        raise ValueError("QMIPF_solve_SS received a singular denominator.")
+
+    constant_term = (
+        ((1 + tau_p) * (1 + tau_w) * (1 - alpha) / (1 + theta_p))
+        * (k_n_st**alpha)
+        * (1 / chi_0_st / (1 + theta_w))
+        * (1 - ss_tau_n_st)
+        / (1 + ss_tau_c_st)
+    ) ** sigma / (1 - varkappa_st - ss_nu_st)
+
+    def objective(candidate: float) -> float:
+        if not np.isfinite(candidate) or candidate <= 0.0:
+            return np.inf
+        return (
+            zeta / zeta_st * ((1 - s_gy) * ss_y - ss_c) * candidate**exponent
+            + (1 - s_gy_st + eta_0 * s_gy_st) * (k_n_st**alpha) * candidate ** (exponent + 1.0)
+            - constant_term
+        )
+
+    initial = float(ss_n) if np.isfinite(ss_n) and ss_n > 0.0 else 0.3
+    initial_value = objective(initial)
+    if np.isfinite(initial_value) and abs(initial_value) < 1e-12:
+        return initial
+
+    lower = max(1e-10, initial * 0.5)
+    upper = max(1.0, initial * 2.0)
+    lower_value = objective(lower)
+    upper_value = objective(upper)
+
+    for _ in range(50):
+        if np.isfinite(lower_value) and lower_value == 0.0:
+            return lower
+        if np.isfinite(upper_value) and upper_value == 0.0:
+            return upper
+        if (
+            np.isfinite(lower_value)
+            and np.isfinite(upper_value)
+            and np.sign(lower_value) != np.sign(upper_value)
+        ):
+            result = scipy_optimize.root_scalar(
+                objective,
+                bracket=(lower, upper),
+                method="brentq",
+            )
+            if result.converged and np.isfinite(result.root) and result.root > 0.0:
+                return float(result.root)
+            break
+        lower = max(1e-12, lower * 0.5)
+        upper *= 2.0
+        lower_value = objective(lower)
+        upper_value = objective(upper)
+
+    secant_upper = initial * 1.1 if initial > 0.0 else 0.33
+    if secant_upper <= initial:
+        secant_upper = initial + 0.1
+    result = scipy_optimize.root_scalar(
+        objective,
+        x0=initial,
+        x1=secant_upper,
+        method="secant",
+        maxiter=200,
+    )
+    if result.converged and np.isfinite(result.root) and result.root > 0.0:
+        return float(result.root)
+    raise RuntimeError("QMIPF_solve_SS failed to find a positive root.")
+
+
 def _function_locals() -> dict[str, object]:
     normcdf = lambda x: sp.Rational(1, 2) * (1 + sp.erf(x / sp.sqrt(2)))
     norminv = lambda x: sp.sqrt(2) * sp.erfinv(2 * x - 1)
     normpdf = lambda x: sp.exp(-(x**2) / 2) / sp.sqrt(2 * sp.pi)
     normlogpdf = lambda x: -(x**2) / 2 - sp.log(sp.sqrt(2 * sp.pi))
+    qmipf_solve_ss = implemented_function("QMIPF_solve_SS", _qmipf_solve_ss)
+    qmipf_solve_ss_lower = implemented_function("QMIPF_solve_ss", _qmipf_solve_ss)
     return {
         "abs": sp.Abs,
         "dnorm": normpdf,
@@ -7390,18 +7740,30 @@ def _function_locals() -> dict[str, object]:
         "norminvcdf": norminv,
         "norminv": norminv,
         "pnorm": normcdf,
+        "QMIPF_solve_SS": qmipf_solve_ss,
+        "QMIPF_solve_ss": qmipf_solve_ss_lower,
         "qnorm": norminv,
         "sqrt": sp.sqrt,
     }
 
 
 def _numpy_lambdify_modules() -> list[object]:
-    return [{"erfcinv": scipy_special.erfcinv, "erfinv": scipy_special.erfinv}, "numpy"]
+    return [
+        {
+            "QMIPF_solve_SS": _qmipf_solve_ss,
+            "QMIPF_solve_ss": _qmipf_solve_ss,
+            "erfcinv": scipy_special.erfcinv,
+            "erfinv": scipy_special.erfinv,
+        },
+        "numpy",
+    ]
 
 
 def _jax_lambdify_modules() -> list[object]:
     return [
         {
+            "QMIPF_solve_SS": _qmipf_solve_ss,
+            "QMIPF_solve_ss": _qmipf_solve_ss,
             "erf": jsp_special.erf,
             "erfc": jsp_special.erfc,
             "erfcinv": lambda x: jsp_special.erfinv(1 - x),

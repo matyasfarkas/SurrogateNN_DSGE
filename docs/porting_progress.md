@@ -754,6 +754,34 @@ Python/JAX status:
 - the damped Newton solver now also has a regularized normal-equation fallback when both the direct solve and the dense least-squares fallback fail, which hardens large-model steady-state steps against `SVD did not converge` failures
 - tests verify the new no-manual-guess compile smoke on the affected upstream fixtures and force the regularized Newton fallback path directly
 
+### 49. Helper-backed parameter definitions from upstream source files
+
+Julia reference:
+
+- upstream source files such as `models/qipf.jl` that define parameters through helper calls like `QMIPF_solve_SS(...)`
+
+Python/JAX status:
+
+- the expression environment now includes a numeric implementation of `QMIPF_solve_SS(...)`, matching the upstream MATLAB helper used by the QIPF model family
+- direct parameter definitions can now evaluate helper-backed expressions during initial parameter resolution instead of silently falling back to `1.0`
+- parameter-resolution Jacobians now fall back to finite differences when helper-backed equations produce symbolic derivatives that SymPy cannot print to NumPy code
+- this moves raw `qipf.jl` past the old `NameError: QMIPF_solve_SS is not defined` failure and into the actual nonlinear steady-state / first-order solution layer
+- tests cover an exact reduced-form `QMIPF_solve_SS(...)` case with a known `0.2` root and verify that raw `qipf.jl` resolves the helper-backed `SS_N_ST` parameter numerically and reaches `solve_first_order_model(...)` without helper-related exceptions
+
+### 50. Tail conditionals in `@parameters` blocks
+
+Julia reference:
+
+- upstream QIPF-style source files such as `models/QIPF/testttfmodel_ttf_minimum.jl` that use tail `if sigma==1` overrides inside `@parameters`
+
+Python/JAX status:
+
+- `@parameters` parsing now supports tail `if` / `elseif` / `else` conditionals that run through the end of the block, matching the upstream source pattern that does not add a second `end` inside the macro block
+- active conditional assignments now override earlier direct definitions of the same parameter instead of tripping the duplicate-definition guard, which is required for QIPF-style `SS_U` / `SS_U_ST` overrides
+- the conditional prepass evaluates only the simple direct definitions it can resolve numerically and skips non-finite or unresolved intermediate expressions, so large parameter blocks can still use the conditional guard without needing the entire block to be numerically solved up front
+- raw `models/QIPF/testttfmodel_ttf_minimum.jl` now parses successfully, with finite `SS_U` and `SS_U_ST` values under `sigma = 1`
+- tests cover synthetic tail-`if` and tail-`if`/`else` overrides plus the upstream QIPF minimum source file
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
