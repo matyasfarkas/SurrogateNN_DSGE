@@ -38,6 +38,17 @@ end
 """
 
 
+SIMULATE_TOKEN_SOURCE = """
+@model simulate_token begin
+    y[0] = rho * y[-1] + eps_y[x] + eps_auxᵒᵇᶜ[x]
+end
+
+@parameters simulate_token begin
+    rho = 0.4
+end
+"""
+
+
 _ROOT = Path(__file__).resolve().parents[2]
 _UPSTREAM_MODEL_DIR = _ROOT / "SurrogateNN_Estimation.jl" / "models"
 
@@ -138,6 +149,96 @@ def test_simulate_model_matches_linear_first_order_rollout() -> None:
     )
 
 
+def test_get_irf_supports_simulate_token_with_deterministic_seed() -> None:
+    model = parse_macro_model(SIMULATE_TOKEN_SOURCE)
+
+    first = get_irf(
+        model,
+        periods=5,
+        variables=("y",),
+        shocks="simulate",
+        shock_size=0.5,
+        random_seed=7,
+    )
+    second = get_irf(
+        model,
+        periods=5,
+        variables=("y",),
+        shocks=":simulate",
+        shock_size=0.5,
+        random_seed=7,
+    )
+
+    assert first.shock_names == ("simulate",)
+    np.testing.assert_allclose(
+        np.asarray(first.responses, dtype=np.float64),
+        np.asarray(second.responses, dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(first.shocks, dtype=np.float64),
+        np.asarray(second.shocks, dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(first.shocks, dtype=np.float64)[model.timings.exo.index("eps_auxᵒᵇᶜ"), :, 0],
+        np.zeros(5, dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    shocks = np.asarray(first.shocks, dtype=np.float64)[model.timings.exo.index("eps_y"), :, 0]
+    expected = np.zeros(5, dtype=np.float64)
+    state = 0.0
+    for t, shock in enumerate(shocks):
+        state = 0.4 * state + shock
+        expected[t] = state
+    np.testing.assert_allclose(
+        np.asarray(first.responses, dtype=np.float64)[0, :, 0],
+        expected,
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_simulate_model_supports_simulate_token_and_matches_irf_path() -> None:
+    model = parse_macro_model(SIMULATE_TOKEN_SOURCE)
+
+    simulation = simulate_model(
+        model,
+        periods=6,
+        variables=("y",),
+        shocks="simulate",
+        shock_size=0.25,
+        random_seed=11,
+    )
+    irf = get_irf(
+        model,
+        periods=6,
+        variables=("y",),
+        shocks="simulate",
+        shock_size=0.25,
+        random_seed=11,
+        levels=True,
+    )
+
+    assert simulation.algorithm_used == "first_order"
+    np.testing.assert_allclose(
+        np.asarray(simulation.data, dtype=np.float64),
+        np.asarray(irf.responses, dtype=np.float64)[:, :, 0],
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(simulation.shocks, dtype=np.float64),
+        np.asarray(irf.shocks, dtype=np.float64)[:, :, 0],
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
 def test_get_irf_routes_obc_models_through_sep_unless_ignored() -> None:
     model = parse_macro_model(OBC_MAX_SOURCE)
 
@@ -169,6 +270,25 @@ def test_get_irf_routes_obc_models_through_sep_unless_ignored() -> None:
     assert np.all(np.asarray(enforced.responses, dtype=np.float64) >= 1.0 - 1e-8)
 
 
+def test_upstream_models_support_random_simulation_token() -> None:
+    model_path = _ROOT / "SurrogateNN_Estimation.jl" / "test" / "models" / "RBC_CME.jl"
+    model = parse_macro_model(model_path.read_text())
+
+    sim = simulate_model(
+        model,
+        periods=4,
+        variables=(model.steady_state_names[0],),
+        shocks="simulate",
+        random_seed=3,
+        steady_state_initial_guess={"k": 10.0, "c": 0.8, "y": 1.0, "l": 0.3, "z": 1.0},
+    )
+
+    assert sim.data.shape == (1, 4)
+    assert sim.shocks.shape[1] == 4
+    assert np.all(np.isfinite(np.asarray(sim.data, dtype=np.float64)))
+    assert np.all(np.isfinite(np.asarray(sim.shocks, dtype=np.float64)))
+
+
 @pytest.mark.parametrize(
     ("model_path", "steady_state_initial_guess"),
     _RUNTIME_SMOKE_MODELS,
@@ -194,10 +314,21 @@ def test_upstream_models_support_irf_and_simulation_runtime_helpers(
         shocks=np.zeros((model.timings.nExo, 3), dtype=np.float64),
         steady_state_initial_guess=steady_state_initial_guess,
     )
+    random_sim = simulate_model(
+        model,
+        periods=3,
+        variables=variable,
+        shocks="simulate",
+        random_seed=0,
+        steady_state_initial_guess=steady_state_initial_guess,
+    )
 
     assert irf.responses.shape[0] == 1
     assert irf.responses.shape[1] == 3
     assert irf.responses.shape[2] >= 1
     assert sim.data.shape == (1, 3)
+    assert random_sim.data.shape == (1, 3)
     assert np.all(np.isfinite(np.asarray(irf.responses, dtype=np.float64)))
     assert np.all(np.isfinite(np.asarray(sim.data, dtype=np.float64)))
+    assert np.all(np.isfinite(np.asarray(random_sim.data, dtype=np.float64)))
+    assert np.all(np.isfinite(np.asarray(random_sim.shocks, dtype=np.float64)))

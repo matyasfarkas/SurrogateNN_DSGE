@@ -738,14 +738,45 @@ class MacroModel:
 
     def _coerce_simulation_shocks(
         self,
-        shocks: Optional[Sequence[Sequence[float]] | Mapping[str, Sequence[float]]],
+        shocks: Optional[str | Sequence[Sequence[float]] | Mapping[str, Sequence[float]]],
         *,
         periods: int,
+        shock_size: float = 1.0,
+        random_seed: Optional[int] = None,
     ) -> np.ndarray:
+        if isinstance(shocks, str):
+            token = shocks.strip()
+            token = token[1:] if token.startswith(":") else token
+            if token == "none":
+                return np.zeros((self.timings.nExo, periods), dtype=np.float64)
+            if token == "simulate":
+                return self._draw_random_simulation_shocks(
+                    periods=periods,
+                    shock_size=shock_size,
+                    random_seed=random_seed,
+                )
         shock_matrix = self._coerce_sep_deterministic_shocks(shocks, periods=periods)
         if shock_matrix is None:
             return np.zeros((self.timings.nExo, periods), dtype=np.float64)
         return np.asarray(shock_matrix, dtype=np.float64).T
+
+    def _draw_random_simulation_shocks(
+        self,
+        *,
+        periods: int,
+        shock_size: float,
+        random_seed: Optional[int],
+    ) -> np.ndarray:
+        if self.timings.nExo == 0:
+            return np.zeros((0, periods), dtype=np.float64)
+        rng = np.random.default_rng(random_seed)
+        shock_matrix = rng.standard_normal((self.timings.nExo, periods)) * float(shock_size)
+        obc_mask = np.asarray(
+            ["ᵒᵇᶜ" in str(name) for name in self.timings.exo],
+            dtype=bool,
+        )
+        shock_matrix[obc_mask, :] = 0.0
+        return np.asarray(shock_matrix, dtype=np.float64)
 
     def _coerce_irf_shock_scenarios(
         self,
@@ -756,6 +787,7 @@ class MacroModel:
         periods: int,
         shock_size: float,
         negative_shock: bool,
+        random_seed: Optional[int] = None,
     ) -> tuple[tuple[str, ...], np.ndarray]:
         if self.timings.nExo == 0:
             return ("none",), np.zeros((0, periods, 1), dtype=np.float64)
@@ -771,6 +803,13 @@ class MacroModel:
             token = token[1:] if token.startswith(":") else token
             if token == "all":
                 selected = tuple(self.timings.exo)
+            elif token == "simulate":
+                shock_matrix = self._draw_random_simulation_shocks(
+                    periods=periods,
+                    shock_size=shock_size,
+                    random_seed=random_seed,
+                )
+                return ("simulate",), shock_matrix[:, :, None]
             elif token == "none":
                 return ("none",), np.zeros((self.timings.nExo, periods, 1), dtype=np.float64)
             else:
@@ -3100,8 +3139,10 @@ class MacroModel:
         self,
         *,
         periods: int,
-        shocks: Optional[Sequence[Sequence[float]] | Mapping[str, Sequence[float]]] = None,
+        shocks: Optional[str | Sequence[Sequence[float]] | Mapping[str, Sequence[float]]] = None,
         variables: Optional[Sequence[str] | str] = None,
+        shock_size: float = 1.0,
+        random_seed: Optional[int] = None,
         algorithm: str = "first_order",
         ignore_obc: bool = False,
         levels: bool = True,
@@ -3119,7 +3160,12 @@ class MacroModel:
         if periods < 1:
             raise ValueError(f"periods must be positive, got {periods}.")
         selected_variables, variable_indices = self._resolve_variable_selection(variables)
-        shock_matrix = self._coerce_simulation_shocks(shocks, periods=periods)
+        shock_matrix = self._coerce_simulation_shocks(
+            shocks,
+            periods=periods,
+            shock_size=shock_size,
+            random_seed=random_seed,
+        )
 
         algorithm_token = algorithm.lower()
         if algorithm_token not in {"first_order", "stochastic_extended_path", "sep"}:
@@ -3202,6 +3248,7 @@ class MacroModel:
         ] = "all",
         shock_size: float = 1.0,
         negative_shock: bool = False,
+        random_seed: Optional[int] = None,
         algorithm: str = "first_order",
         ignore_obc: bool = False,
         levels: bool = False,
@@ -3224,6 +3271,7 @@ class MacroModel:
             periods=periods,
             shock_size=shock_size,
             negative_shock=negative_shock,
+            random_seed=random_seed,
         )
 
         algorithm_token = algorithm.lower()
@@ -4560,8 +4608,10 @@ def simulate_model(
     model: MacroModel,
     *,
     periods: int,
-    shocks: Optional[Sequence[Sequence[float]] | Mapping[str, Sequence[float]]] = None,
+    shocks: Optional[str | Sequence[Sequence[float]] | Mapping[str, Sequence[float]]] = None,
     variables: Optional[Sequence[str] | str] = None,
+    shock_size: float = 1.0,
+    random_seed: Optional[int] = None,
     algorithm: str = "first_order",
     ignore_obc: bool = False,
     levels: bool = True,
@@ -4580,6 +4630,8 @@ def simulate_model(
         periods=periods,
         shocks=shocks,
         variables=variables,
+        shock_size=shock_size,
+        random_seed=random_seed,
         algorithm=algorithm,
         ignore_obc=ignore_obc,
         levels=levels,
@@ -4606,6 +4658,7 @@ def get_irf(
     ] = "all",
     shock_size: float = 1.0,
     negative_shock: bool = False,
+    random_seed: Optional[int] = None,
     algorithm: str = "first_order",
     ignore_obc: bool = False,
     levels: bool = False,
@@ -4626,6 +4679,7 @@ def get_irf(
         shocks=shocks,
         shock_size=shock_size,
         negative_shock=negative_shock,
+        random_seed=random_seed,
         algorithm=algorithm,
         ignore_obc=ignore_obc,
         levels=levels,

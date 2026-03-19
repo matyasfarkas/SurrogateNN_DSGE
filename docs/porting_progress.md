@@ -676,6 +676,22 @@ Python/JAX status:
 - this narrows the switching-estimation gap materially: for the first-order path, fixed-gate and automatic filter-gated estimation are now both available in compiled JAX form
 - tests verify parity against the composed concrete path, NumPyro log-density parity, and an actual compiled `NUTS` run on the automatic Kalman-gated switching wrapper
 
+### 44. Julia-style `shocks = :simulate` runtime semantics
+
+Julia reference:
+
+- `src/common_docstrings.jl` (`shocks`)
+- `src/get_functions.jl` (`simulate`, `get_simulation`, `get_simulations`)
+- `src/MacroModelling.jl` (`get_irf` random-shock branches)
+
+Python/JAX status:
+
+- parsed-model `simulate` / `simulate_model` now accept `shocks="simulate"` or `shocks=":simulate"` and generate Gaussian shock paths scaled by `shock_size`, matching the Julia `:simulate` branch instead of requiring an explicit shock matrix
+- parsed-model `get_irf` now accepts the same `simulate` token and returns a single random scenario with `shock_names == ("simulate",)`
+- OBC-tagged shocks whose names contain `ᵒᵇᶜ` are zeroed on the random-simulation path, matching the Julia exclusion of OBC-related shocks from `:simulate`
+- both runtime helpers now accept `random_seed` so the random simulation path is deterministic under test while remaining stochastic by default
+- tests verify deterministic-seed parity between `simulate` token spellings, exact linear recursion against the returned random shocks on a toy model, zeroing of OBC-tagged shocks on that path, and multi-model runtime smoke on `RBC_CME`, `RBC_Dynare`, `FS2000`, and `RBC_baseline`
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -687,7 +703,7 @@ Python/JAX status:
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
 - The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
 - The current parsed front end now supports basic `max` / `min` OBC syntax, branch-frozen linearization around the active steady-state branch, and parsed-model OBC violation diagnostics, but the Julia-specific enforcement layer around kinks, including explicit OBC shock-sequence optimization, subdifferential Newton options, and the broader OBC runtime surface, is still unported.
-- Parsed-model `get_irf` and `simulate_model` are now available, but the full Julia runtime surface is still broader, especially `simulate(..., shocks = :simulate)` random-shock semantics, the richer shock/variable selection API, and the exact first-order OBC artificial-shock enforcement path.
+- Parsed-model `get_irf` and `simulate_model` are now available, including Julia-style `shocks = :simulate` random-shock semantics, but the full Julia runtime surface is still broader, especially the richer shock/variable selection API and the exact first-order OBC artificial-shock enforcement path.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The switching layer now has compiled first-order likelihoods, supplied-shock gate statistics, first-order filter reconstruction, filter-derived gate construction, and automatic filter-gated NumPyro wrappers. The remaining gaps are the broader higher-order/nonlinear switching-estimation harness and the older concrete helper surface in `model.py`, not the core first-order switching-order path itself.
