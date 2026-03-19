@@ -283,6 +283,50 @@ def test_runtime_variable_selectors_can_exclude_auxiliary_variables() -> None:
     assert filtered.variables == ("x",)
 
 
+def test_runtime_helpers_accept_grouped_variable_and_shock_name_inputs() -> None:
+    model = parse_macro_model(SIMULATE_TOKEN_SOURCE)
+
+    grouped_irf = get_irf(
+        model,
+        periods=4,
+        variables=[["y"], ("y",)],
+        shocks=[["eps_auxᵒᵇᶜ"], (":eps_y",)],
+    )
+    explicit_irf = get_irf(
+        model,
+        periods=4,
+        variables=("y",),
+        shocks=("eps_auxᵒᵇᶜ", "eps_y"),
+    )
+    grouped_sim = simulate_model(
+        model,
+        periods=4,
+        variables=[["y"], (":y",)],
+        shocks={"eps_y": [1.0, 0.0, 0.0, 0.0]},
+    )
+    explicit_sim = simulate_model(
+        model,
+        periods=4,
+        variables=("y",),
+        shocks={"eps_y": [1.0, 0.0, 0.0, 0.0]},
+    )
+
+    assert grouped_irf.variables == ("y",)
+    assert grouped_irf.shock_names == ("eps_auxᵒᵇᶜ", "eps_y")
+    np.testing.assert_allclose(
+        np.asarray(grouped_irf.responses, dtype=np.float64),
+        np.asarray(explicit_irf.responses, dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(grouped_sim.data, dtype=np.float64),
+        np.asarray(explicit_sim.data, dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
 def test_simulate_model_supports_simulate_token_and_matches_irf_path() -> None:
     model = parse_macro_model(SIMULATE_TOKEN_SOURCE)
 

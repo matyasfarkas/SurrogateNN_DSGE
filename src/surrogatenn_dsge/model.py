@@ -737,7 +737,7 @@ class MacroModel:
             else:
                 selected = (token,)
         else:
-            selected = tuple(_strip_selector_prefix(str(name)) for name in variables)
+            selected = _flatten_named_selection(variables)
         if not selected:
             raise ValueError("variables must contain at least one variable name.")
         lookup = {name: idx for idx, name in enumerate(self.timings.var)}
@@ -840,13 +840,9 @@ class MacroModel:
                 scenarios[lookup[name], 0, scenario_idx] = amplitude
             return selected, scenarios
 
-        if (
-            isinstance(shocks, Sequence)
-            and not isinstance(shocks, (np.ndarray, jax.Array))
-            and len(shocks) > 0
-            and all(isinstance(name, str) for name in shocks)
-        ):
-            selected = tuple(_strip_selector_prefix(str(name)) for name in shocks)
+        grouped_selection = _flatten_named_selection(shocks)
+        if grouped_selection:
+            selected = grouped_selection
             lookup = {name: idx for idx, name in enumerate(self.timings.exo)}
             unexpected = sorted(set(selected).difference(lookup))
             if unexpected:
@@ -7282,6 +7278,35 @@ def _strip_auxiliary_suffix(name: str) -> str:
 def _strip_selector_prefix(name: str) -> str:
     token = str(name).strip()
     return token[1:] if token.startswith(":") else token
+
+
+def _flatten_named_selection(
+    values: object,
+) -> tuple[str, ...]:
+    flattened: list[str] = []
+
+    def visit(current: object) -> bool:
+        if isinstance(current, str):
+            flattened.append(_strip_selector_prefix(current))
+            return True
+        if isinstance(current, (list, tuple)):
+            success = True
+            for item in current:
+                success = visit(item) and success
+            return success
+        return False
+
+    if not visit(values):
+        return tuple()
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for name in flattened:
+        if name in seen:
+            continue
+        seen.add(name)
+        deduped.append(name)
+    return tuple(deduped)
 
 
 def _index_positions(values: Sequence[str], reference: Sequence[str]) -> list[int]:

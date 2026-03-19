@@ -707,6 +707,20 @@ Python/JAX status:
 - the variable selectors operate over the parsed `timings.var` ordering and exclude auxiliary variables from `timings.aux` plus exogenous-present state entries from `timings.exo_present` on the `:all_excluding_auxiliary_and_obc` path, matching the Julia parsing intent
 - tests verify selector parity on a toy model with OBC-tagged shocks, colon-prefixed single-name parity, and auxiliary/exogenous-present exclusion on a model that generates parser-added runtime auxiliaries
 
+### 46. Grouped runtime name selections
+
+Julia reference:
+
+- `src/MacroModelling.jl` (`parse_variables_input_to_index`, `parse_shocks_input_to_index`)
+- `src/common_docstrings.jl` (`variables`, `shocks`)
+
+Python/JAX status:
+
+- parsed-model runtime helpers now accept grouped nested variable-name inputs such as `[["y"], (":c",)]`, flattening them to a unique runtime selection rather than treating the nested structure as an invalid literal
+- `get_irf` now accepts grouped nested shock-name inputs as well, so nested lists/tuples of shock names behave like the Julia multi-name selectors on the impulse-response path
+- the grouped-name path is intentionally narrow: it flattens nested runtime name collections, while the explicit deterministic shock-history API remains matrix-or-mapping based
+- tests verify grouped variable and shock-name parity against the equivalent explicit flat selections on the runtime helpers
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -718,7 +732,7 @@ Python/JAX status:
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
 - The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
 - The current parsed front end now supports basic `max` / `min` OBC syntax, branch-frozen linearization around the active steady-state branch, and parsed-model OBC violation diagnostics, but the Julia-specific enforcement layer around kinks, including explicit OBC shock-sequence optimization, subdifferential Newton options, and the broader OBC runtime surface, is still unported.
-- Parsed-model `get_irf` and `simulate_model` are now available, including Julia-style `shocks = :simulate` random-shock semantics and the main selector tokens `:all_excluding_obc` / `:all_excluding_auxiliary_and_obc`, but the full Julia runtime surface is still broader, especially the grouped shock/variable selection API and the exact first-order OBC artificial-shock enforcement path.
+- Parsed-model `get_irf` and `simulate_model` are now available, including Julia-style `shocks = :simulate` random-shock semantics, grouped nested runtime name selections, and the main selector tokens `:all_excluding_obc` / `:all_excluding_auxiliary_and_obc`, but the full Julia runtime surface is still broader, especially the exact first-order OBC artificial-shock enforcement path.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The switching layer now has compiled first-order likelihoods, supplied-shock gate statistics, first-order filter reconstruction, filter-derived gate construction, and automatic filter-gated NumPyro wrappers. The remaining gaps are the broader higher-order/nonlinear switching-estimation harness and the older concrete helper surface in `model.py`, not the core first-order switching-order path itself.
