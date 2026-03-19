@@ -719,14 +719,25 @@ class MacroModel:
         if variables is None:
             selected = tuple(self.timings.var)
         elif isinstance(variables, str):
-            token = variables.strip()
-            token = token[1:] if token.startswith(":") else token
+            token = _strip_selector_prefix(variables)
             if token == "all":
                 selected = tuple(self.timings.var)
+            elif token == "all_excluding_obc":
+                selected = tuple(
+                    name for name in self.timings.var if "ᵒᵇᶜ" not in str(name)
+                )
+            elif token == "all_excluding_auxiliary_and_obc":
+                selected = tuple(
+                    name
+                    for name in self.timings.var
+                    if "ᵒᵇᶜ" not in str(name)
+                    and name not in self.timings.aux
+                    and name not in self.timings.exo_present
+                )
             else:
-                selected = (variables,)
+                selected = (token,)
         else:
-            selected = tuple(str(name) for name in variables)
+            selected = tuple(_strip_selector_prefix(str(name)) for name in variables)
         if not selected:
             raise ValueError("variables must contain at least one variable name.")
         lookup = {name: idx for idx, name in enumerate(self.timings.var)}
@@ -799,10 +810,13 @@ class MacroModel:
             shocks = "all"
 
         if isinstance(shocks, str):
-            token = shocks.strip()
-            token = token[1:] if token.startswith(":") else token
+            token = _strip_selector_prefix(shocks)
             if token == "all":
                 selected = tuple(self.timings.exo)
+            elif token == "all_excluding_obc":
+                selected = tuple(
+                    name for name in self.timings.exo if "ᵒᵇᶜ" not in str(name)
+                )
             elif token == "simulate":
                 shock_matrix = self._draw_random_simulation_shocks(
                     periods=periods,
@@ -813,7 +827,7 @@ class MacroModel:
             elif token == "none":
                 return ("none",), np.zeros((self.timings.nExo, periods, 1), dtype=np.float64)
             else:
-                selected = (shocks,)
+                selected = (token,)
             lookup = {name: idx for idx, name in enumerate(self.timings.exo)}
             unexpected = sorted(set(selected).difference(lookup))
             if unexpected:
@@ -832,7 +846,7 @@ class MacroModel:
             and len(shocks) > 0
             and all(isinstance(name, str) for name in shocks)
         ):
-            selected = tuple(str(name) for name in shocks)
+            selected = tuple(_strip_selector_prefix(str(name)) for name in shocks)
             lookup = {name: idx for idx, name in enumerate(self.timings.exo)}
             unexpected = sorted(set(selected).difference(lookup))
             if unexpected:
@@ -7263,6 +7277,11 @@ def _is_auxiliary_name(name: str) -> bool:
 
 def _strip_auxiliary_suffix(name: str) -> str:
     return name.split("__L", 1)[0]
+
+
+def _strip_selector_prefix(name: str) -> str:
+    token = str(name).strip()
+    return token[1:] if token.startswith(":") else token
 
 
 def _index_positions(values: Sequence[str], reference: Sequence[str]) -> list[int]:

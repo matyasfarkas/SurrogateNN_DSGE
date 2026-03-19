@@ -692,6 +692,21 @@ Python/JAX status:
 - both runtime helpers now accept `random_seed` so the random simulation path is deterministic under test while remaining stochastic by default
 - tests verify deterministic-seed parity between `simulate` token spellings, exact linear recursion against the returned random shocks on a toy model, zeroing of OBC-tagged shocks on that path, and multi-model runtime smoke on `RBC_CME`, `RBC_Dynare`, `FS2000`, and `RBC_baseline`
 
+### 45. Julia-style runtime selector tokens
+
+Julia reference:
+
+- `src/default_options.jl` (`DEFAULT_SHOCKS_EXCLUDING_OBC`, `DEFAULT_VARIABLES_EXCLUDING_OBC`, `DEFAULT_VARIABLES_EXCLUDING_AUX_AND_OBC`)
+- `src/MacroModelling.jl` (`parse_variables_input_to_index`, `parse_shocks_input_to_index`)
+- `src/common_docstrings.jl` (`variables`, `shocks`)
+
+Python/JAX status:
+
+- parsed-model runtime helpers now accept colon-prefixed single-name inputs like `variables=":y"` and `shocks=":eps_y"`, matching Julia symbol-style usage instead of treating the colon as part of the literal name
+- `get_irf` now supports the documented Julia selector tokens `:all_excluding_obc` for shocks and variables, plus `:all_excluding_auxiliary_and_obc` for variables
+- the variable selectors operate over the parsed `timings.var` ordering and exclude auxiliary variables from `timings.aux` plus exogenous-present state entries from `timings.exo_present` on the `:all_excluding_auxiliary_and_obc` path, matching the Julia parsing intent
+- tests verify selector parity on a toy model with OBC-tagged shocks, colon-prefixed single-name parity, and auxiliary/exogenous-present exclusion on a model that generates parser-added runtime auxiliaries
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -703,7 +718,7 @@ Python/JAX status:
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
 - The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
 - The current parsed front end now supports basic `max` / `min` OBC syntax, branch-frozen linearization around the active steady-state branch, and parsed-model OBC violation diagnostics, but the Julia-specific enforcement layer around kinks, including explicit OBC shock-sequence optimization, subdifferential Newton options, and the broader OBC runtime surface, is still unported.
-- Parsed-model `get_irf` and `simulate_model` are now available, including Julia-style `shocks = :simulate` random-shock semantics, but the full Julia runtime surface is still broader, especially the richer shock/variable selection API and the exact first-order OBC artificial-shock enforcement path.
+- Parsed-model `get_irf` and `simulate_model` are now available, including Julia-style `shocks = :simulate` random-shock semantics and the main selector tokens `:all_excluding_obc` / `:all_excluding_auxiliary_and_obc`, but the full Julia runtime surface is still broader, especially the grouped shock/variable selection API and the exact first-order OBC artificial-shock enforcement path.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The switching layer now has compiled first-order likelihoods, supplied-shock gate statistics, first-order filter reconstruction, filter-derived gate construction, and automatic filter-gated NumPyro wrappers. The remaining gaps are the broader higher-order/nonlinear switching-estimation harness and the older concrete helper surface in `model.py`, not the core first-order switching-order path itself.

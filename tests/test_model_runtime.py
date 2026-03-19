@@ -49,6 +49,17 @@ end
 """
 
 
+AUX_SELECTION_SOURCE = """
+@model aux_runtime begin
+    x[0] = rho * x[-2] + eps[x+1]
+end
+
+@parameters aux_runtime begin
+    rho = 0.5
+end
+"""
+
+
 _ROOT = Path(__file__).resolve().parents[2]
 _UPSTREAM_MODEL_DIR = _ROOT / "SurrogateNN_Estimation.jl" / "models"
 
@@ -203,6 +214,75 @@ def test_get_irf_supports_simulate_token_with_deterministic_seed() -> None:
     )
 
 
+def test_runtime_helpers_support_colon_prefixed_names_and_selector_tokens() -> None:
+    model = parse_macro_model(SIMULATE_TOKEN_SOURCE)
+
+    direct = get_irf(
+        model,
+        periods=4,
+        variables="y",
+        shocks="eps_y",
+    )
+    colon = get_irf(
+        model,
+        periods=4,
+        variables=":y",
+        shocks=":eps_y",
+    )
+    excluding_obc = get_irf(
+        model,
+        periods=4,
+        variables=":all_excluding_obc",
+        shocks=":all_excluding_obc",
+    )
+    all_shocks = get_irf(
+        model,
+        periods=4,
+        variables=":all",
+        shocks=":all",
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(direct.responses, dtype=np.float64),
+        np.asarray(colon.responses, dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert excluding_obc.variables == tuple(model.timings.var)
+    assert excluding_obc.shock_names == ("eps_y",)
+    assert all_shocks.shock_names == ("eps_auxᵒᵇᶜ", "eps_y")
+
+
+def test_runtime_variable_selectors_can_exclude_auxiliary_variables() -> None:
+    model = parse_macro_model(AUX_SELECTION_SOURCE)
+
+    all_result = get_irf(
+        model,
+        periods=3,
+        variables=":all",
+        shocks=":eps",
+    )
+    filtered = get_irf(
+        model,
+        periods=3,
+        variables=":all_excluding_auxiliary_and_obc",
+        shocks=":eps",
+    )
+    excluding_obc = get_irf(
+        model,
+        periods=3,
+        variables=":all_excluding_obc",
+        shocks=":eps",
+    )
+
+    auxiliary_name = model.timings.aux[0]
+    assert auxiliary_name in all_result.variables
+    assert "eps" in all_result.variables
+    assert auxiliary_name in excluding_obc.variables
+    assert "eps" in excluding_obc.variables
+    assert filtered.variables == ("x",)
+
+
 def test_simulate_model_supports_simulate_token_and_matches_irf_path() -> None:
     model = parse_macro_model(SIMULATE_TOKEN_SOURCE)
 
@@ -234,6 +314,21 @@ def test_simulate_model_supports_simulate_token_and_matches_irf_path() -> None:
     np.testing.assert_allclose(
         np.asarray(simulation.shocks, dtype=np.float64),
         np.asarray(irf.shocks, dtype=np.float64)[:, :, 0],
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+    colon_simulation = simulate_model(
+        model,
+        periods=6,
+        variables=":y",
+        shocks=":simulate",
+        shock_size=0.25,
+        random_seed=11,
+    )
+    np.testing.assert_allclose(
+        np.asarray(simulation.data, dtype=np.float64),
+        np.asarray(colon_simulation.data, dtype=np.float64),
         rtol=0.0,
         atol=1e-12,
     )
