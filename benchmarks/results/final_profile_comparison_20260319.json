@@ -1,0 +1,408 @@
+{
+  "config_path": "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/nn_surrogate_validation_profile.toml",
+  "julia_process": {
+    "max_rss_raw": 2066186240.0,
+    "peak_memory_bytes": 2636106944.0,
+    "real_s": 177.82,
+    "sys_s": 56.14,
+    "user_s": 159.17
+  },
+  "julia_results": {
+    "cases": {
+      "medium_sw07_hlt": {
+        "model_info": {
+          "n_exo": 7,
+          "n_vars": 66,
+          "parameter_count": 41
+        },
+        "stages": {
+          "first_order_solve": {
+            "first_call_s": 0.912899,
+            "result": {
+              "shape": [
+                34,
+                66
+              ]
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.000165458,
+              "mean_s": 0.000165458,
+              "median_s": 0.000165458,
+              "min_s": 0.000165458,
+              "reps": 1,
+              "std_s": 0.0
+            }
+          },
+          "kalman_grad": {
+            "first_call_s": 3.341543667,
+            "result": {
+              "grad_l2": 33.163728420615236,
+              "value": -600.6439319278632
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.032464166,
+              "mean_s": 0.026134958,
+              "median_s": 0.026134958,
+              "min_s": 0.01980575,
+              "reps": 2,
+              "std_s": 0.008950851792680294
+            }
+          },
+          "kalman_value": {
+            "first_call_s": 0.014942166,
+            "result": {
+              "value": -600.6439319278632
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.028815459,
+              "mean_s": 0.0069364514999999995,
+              "median_s": 0.002782646,
+              "min_s": 0.001237708,
+              "reps": 6,
+              "std_s": 0.01074192158890512
+            }
+          },
+          "model_load": {
+            "first_call_s": 12.386417125,
+            "result": {
+              "n_exo": 7,
+              "n_vars": 66,
+              "parameter_count": 41
+            },
+            "status": "ok",
+            "steady": {
+              "reps": 0
+            }
+          },
+          "sep_inversion": {
+            "first_call_s": 6.807736708,
+            "result": {
+              "value": null
+            },
+            "status": "ok",
+            "steady": {
+              "reps": 0
+            }
+          },
+          "switching_value": {
+            "first_call_s": 0.82426875,
+            "result": {
+              "value": -600.6442461217384
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.960616875,
+              "mean_s": 0.8856178545,
+              "median_s": 0.8856178545,
+              "min_s": 0.810618834,
+              "reps": 2,
+              "std_s": 0.1060646319557978
+            }
+          }
+        }
+      },
+      "small_fs2000": {
+        "model_info": {
+          "n_exo": 2,
+          "n_vars": 18,
+          "parameter_count": 9
+        },
+        "stages": {
+          "first_order_solve": {
+            "first_call_s": 11.89988675,
+            "result": {
+              "shape": [
+                7,
+                18
+              ]
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.000962083,
+              "mean_s": 0.000494875,
+              "median_s": 0.000494875,
+              "min_s": 2.7667e-05,
+              "reps": 2,
+              "std_s": 0.000660731890049209
+            }
+          },
+          "kalman_grad": {
+            "first_call_s": 30.039975125,
+            "result": {
+              "grad_l2": 349.3937369436851,
+              "value": 599.9689133171731
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.023960791,
+              "mean_s": 0.0051143918000000005,
+              "median_s": 0.0028520209999999997,
+              "min_s": 0.001939542,
+              "reps": 10,
+              "std_s": 0.006722991871631257
+            }
+          },
+          "kalman_value": {
+            "first_call_s": 5.931158917,
+            "result": {
+              "value": 599.9689133171731
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.001380708,
+              "mean_s": 0.00028872011666666663,
+              "median_s": 0.00021533350000000001,
+              "min_s": 0.000141,
+              "reps": 60,
+              "std_s": 0.0002226288548730171
+            }
+          },
+          "model_load": {
+            "first_call_s": 33.532415541,
+            "result": {
+              "n_exo": 2,
+              "n_vars": 18,
+              "parameter_count": 9
+            },
+            "status": "ok",
+            "steady": {
+              "reps": 0
+            }
+          },
+          "sep_inversion": {
+            "first_call_s": 6.254146958,
+            "result": {
+              "value": null
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.009753792,
+              "mean_s": 0.009753792,
+              "median_s": 0.009753792,
+              "min_s": 0.009753792,
+              "reps": 1,
+              "std_s": 0.0
+            }
+          },
+          "switching_value": {
+            "first_call_s": 32.771819125,
+            "result": {
+              "value": 562.7524494252531
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 1.002325,
+              "mean_s": 0.14209068225,
+              "median_s": 0.017639229,
+              "min_s": 0.011412958,
+              "reps": 8,
+              "std_s": 0.3477047328899512
+            }
+          }
+        }
+      }
+    },
+    "julia_version": "1.12.4",
+    "language": "julia"
+  },
+  "julia_results_path": "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/results/test_julia_results.json",
+  "julia_time_path": "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/results/test_julia_time.txt",
+  "payload_path": "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/results/test_payloads.json",
+  "python_process": {
+    "max_rss_raw": 638287872.0,
+    "peak_memory_bytes": 790464048.0,
+    "real_s": 69.53,
+    "sys_s": 7.19,
+    "user_s": 97.17
+  },
+  "python_results": {
+    "cases": {
+      "medium_sw07_hlt": {
+        "model_info": {
+          "jax_devices": [
+            "TFRT_CPU_0"
+          ],
+          "n_exo": 7,
+          "n_vars": 66,
+          "parameter_count": 54
+        },
+        "stages": {
+          "first_order_solve": {
+            "first_call_s": 2.847268167,
+            "result": {
+              "converged": true
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.015938459000000002,
+              "mean_s": 0.015938459000000002,
+              "median_s": 0.015938459000000002,
+              "min_s": 0.015938459000000002,
+              "reps": 1,
+              "std_s": 0.0
+            }
+          },
+          "kalman_grad": {
+            "error": "NotImplementedError: Unimplemented case of QR decomposition derivative",
+            "status": "error"
+          },
+          "kalman_value": {
+            "first_call_s": 2.1045777500000002,
+            "result": {
+              "value": -642315.1013417994
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.06660075,
+              "mean_s": 0.051179389,
+              "median_s": 0.052763375,
+              "min_s": 0.025739458000000003,
+              "reps": 6,
+              "std_s": 0.01482113380317719
+            }
+          },
+          "model_load": {
+            "first_call_s": 0.432591375,
+            "result": {
+              "n_exo": 7,
+              "n_vars": 66,
+              "parameter_count": 54
+            },
+            "status": "ok",
+            "steady": {
+              "reps": 0
+            }
+          },
+          "sep_inversion": {
+            "first_call_s": 6.9215912500000005,
+            "result": {
+              "value": -1000000000000.0
+            },
+            "status": "ok",
+            "steady": {
+              "reps": 0
+            }
+          },
+          "switching_value": {
+            "first_call_s": 4.763191375,
+            "result": {
+              "value": -1163.5636546703647
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.094091292,
+              "mean_s": 0.086137667,
+              "median_s": 0.086137667,
+              "min_s": 0.07818404200000001,
+              "reps": 2,
+              "std_s": 0.011248124345029706
+            }
+          }
+        }
+      },
+      "small_fs2000": {
+        "model_info": {
+          "jax_devices": [
+            "TFRT_CPU_0"
+          ],
+          "n_exo": 2,
+          "n_vars": 18,
+          "parameter_count": 9
+        },
+        "stages": {
+          "first_order_solve": {
+            "first_call_s": 1.41307325,
+            "result": {
+              "converged": true
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.029704459000000002,
+              "mean_s": 0.020825167000000002,
+              "median_s": 0.020825167000000002,
+              "min_s": 0.011945875,
+              "reps": 2,
+              "std_s": 0.012557215170670925
+            }
+          },
+          "kalman_grad": {
+            "error": "NotImplementedError: Unimplemented case of QR decomposition derivative",
+            "status": "error"
+          },
+          "kalman_value": {
+            "first_call_s": 0.997424709,
+            "result": {
+              "value": 599.9618939853731
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.002350875,
+              "mean_s": 0.0007521993333333334,
+              "median_s": 0.00044593750000000004,
+              "min_s": 0.000390125,
+              "reps": 60,
+              "std_s": 0.000535648924260198
+            }
+          },
+          "model_load": {
+            "first_call_s": 0.092725084,
+            "result": {
+              "n_exo": 2,
+              "n_vars": 18,
+              "parameter_count": 9
+            },
+            "status": "ok",
+            "steady": {
+              "reps": 0
+            }
+          },
+          "sep_inversion": {
+            "first_call_s": 22.634325375000003,
+            "result": {
+              "value": -1000000000000.0
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 20.674319125,
+              "mean_s": 20.674319125,
+              "median_s": 20.674319125,
+              "min_s": 20.674319125,
+              "reps": 1,
+              "std_s": 0.0
+            }
+          },
+          "switching_value": {
+            "first_call_s": 1.876565333,
+            "result": {
+              "value": 557.3909586342324
+            },
+            "status": "ok",
+            "steady": {
+              "max_s": 0.005356584,
+              "mean_s": 0.0020890937500000002,
+              "median_s": 0.001862188,
+              "min_s": 0.000881583,
+              "reps": 8,
+              "std_s": 0.0014100072882140666
+            }
+          }
+        }
+      }
+    },
+    "jax_version": "0.4.30",
+    "language": "python",
+    "python_version": "3.9.6 (default, Dec  2 2025, 07:27:58) \n[Clang 17.0.0 (clang-1700.6.3.2)]"
+  },
+  "python_results_path": "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/results/test_python_results.json",
+  "python_time_path": "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/results/test_python_time.txt",
+  "system_info": {
+    "cpu_brand": "Apple M4",
+    "eff_cores": "6",
+    "logical_cpu": "10",
+    "mem_bytes": "17179869184",
+    "perf_cores": "4"
+  }
+}

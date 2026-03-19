@@ -1,0 +1,83 @@
+[global]
+upstream_repo = "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_Estimation.jl"
+python_executable = "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/.venv/bin/python"
+julia_executable = "julia"
+thread_count = 8
+gate_quantile = 0.8
+report_path = "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/docs/benchmark_report_2026-03-19.md"
+
+[[case]]
+name = "small_fs2000"
+model_symbol = "FS2000"
+model_path = "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_Estimation.jl/models/FS2000.jl"
+observables = ["log_gp_obs", "log_gy_obs"]
+parameter_subset = ["alp", "bet", "gam"]
+state_names = ["log_gp_obs", "log_gy_obs"]
+periods = 96
+shock_seed = 1234
+shock_scale_by_exo = { e_a = 0.25, e_m = 0.25 }
+measurement_error_scale = 1.0e-8
+jitter = 1.0e-9
+solve_reps = 2
+kalman_value_reps = 60
+kalman_grad_reps = 10
+switching_reps = 8
+sep_reps = 1
+gate_periods = 1
+gate_mode = "soft"
+gate_beta_eps = 2.0
+gate_beta_y = 2.0
+gate_hard_threshold = 0.5
+gate_prob_floor = 1.0e-4
+gate_prob_ceiling = 0.9999
+soft_mixture = "logsumexp"
+sep_eval_periods = 8
+sep_periods = 3
+sep_branching_order = 1
+sep_nnodes = 3
+sep_sparse_tree = true
+sep_maxit = 6
+sep_tol = 1.0e-6
+sep_accept_tol = 1.0e-3
+sep_inv_maxit = 4
+sep_inv_step_tol = 1.0e-5
+sep_inv_resid_tol = 1.0e-5
+sep_inv_lambda = 1.0e-4
+
+[[case]]
+name = "medium_sw07_hlt"
+model_symbol = "Smets_Wouters_2007_HLT"
+model_path = "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_Estimation.jl/models/Smets_Wouters_2007_HLT.jl"
+observables = ["dy", "dc", "dinve", "labobs", "pinfobs", "dwobs", "robs"]
+parameter_subset = ["cprobp", "cindp", "curvp"]
+state_names = ["dy", "dc", "dinve", "labobs", "pinfobs", "dwobs", "robs"]
+periods = 80
+shock_seed = 4321
+shock_scale_by_exo = { ea = 1.0, eb = 1.0, eg = 1.0, em = 1.0, epinf = 1.0, eqs = 1.0, ew = 1.0 }
+measurement_error_scale = 1.0e-8
+jitter = 1.0e-9
+solve_reps = 1
+kalman_value_reps = 6
+kalman_grad_reps = 2
+switching_reps = 2
+sep_reps = 0
+gate_periods = 1
+gate_mode = "soft"
+gate_beta_eps = 2.0
+gate_beta_y = 2.0
+gate_hard_threshold = 0.5
+gate_prob_floor = 1.0e-4
+gate_prob_ceiling = 0.9999
+soft_mixture = "logsumexp"
+sep_eval_periods = 2
+sep_periods = 2
+sep_branching_order = 0
+sep_nnodes = 3
+sep_sparse_tree = true
+sep_maxit = 6
+sep_tol = 1.0e-5
+sep_accept_tol = 1.0e-3
+sep_inv_maxit = 4
+sep_inv_step_tol = 1.0e-5
+sep_inv_resid_tol = 1.0e-5
+sep_inv_lambda = 1.0e-4

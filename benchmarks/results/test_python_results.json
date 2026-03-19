@@ -1,0 +1,178 @@
+{
+  "cases": {
+    "medium_sw07_hlt": {
+      "model_info": {
+        "jax_devices": [
+          "TFRT_CPU_0"
+        ],
+        "n_exo": 7,
+        "n_vars": 66,
+        "parameter_count": 54
+      },
+      "stages": {
+        "first_order_solve": {
+          "first_call_s": 2.847268167,
+          "result": {
+            "converged": true
+          },
+          "status": "ok",
+          "steady": {
+            "max_s": 0.015938459000000002,
+            "mean_s": 0.015938459000000002,
+            "median_s": 0.015938459000000002,
+            "min_s": 0.015938459000000002,
+            "reps": 1,
+            "std_s": 0.0
+          }
+        },
+        "kalman_grad": {
+          "error": "NotImplementedError: Unimplemented case of QR decomposition derivative",
+          "status": "error"
+        },
+        "kalman_value": {
+          "first_call_s": 2.1045777500000002,
+          "result": {
+            "value": -642315.1013417994
+          },
+          "status": "ok",
+          "steady": {
+            "max_s": 0.06660075,
+            "mean_s": 0.051179389,
+            "median_s": 0.052763375,
+            "min_s": 0.025739458000000003,
+            "reps": 6,
+            "std_s": 0.01482113380317719
+          }
+        },
+        "model_load": {
+          "first_call_s": 0.432591375,
+          "result": {
+            "n_exo": 7,
+            "n_vars": 66,
+            "parameter_count": 54
+          },
+          "status": "ok",
+          "steady": {
+            "reps": 0
+          }
+        },
+        "sep_inversion": {
+          "first_call_s": 6.9215912500000005,
+          "result": {
+            "value": -1000000000000.0
+          },
+          "status": "ok",
+          "steady": {
+            "reps": 0
+          }
+        },
+        "switching_value": {
+          "first_call_s": 4.763191375,
+          "result": {
+            "value": -1163.5636546703647
+          },
+          "status": "ok",
+          "steady": {
+            "max_s": 0.094091292,
+            "mean_s": 0.086137667,
+            "median_s": 0.086137667,
+            "min_s": 0.07818404200000001,
+            "reps": 2,
+            "std_s": 0.011248124345029706
+          }
+        }
+      }
+    },
+    "small_fs2000": {
+      "model_info": {
+        "jax_devices": [
+          "TFRT_CPU_0"
+        ],
+        "n_exo": 2,
+        "n_vars": 18,
+        "parameter_count": 9
+      },
+      "stages": {
+        "first_order_solve": {
+          "first_call_s": 1.41307325,
+          "result": {
+            "converged": true
+          },
+          "status": "ok",
+          "steady": {
+            "max_s": 0.029704459000000002,
+            "mean_s": 0.020825167000000002,
+            "median_s": 0.020825167000000002,
+            "min_s": 0.011945875,
+            "reps": 2,
+            "std_s": 0.012557215170670925
+          }
+        },
+        "kalman_grad": {
+          "error": "NotImplementedError: Unimplemented case of QR decomposition derivative",
+          "status": "error"
+        },
+        "kalman_value": {
+          "first_call_s": 0.997424709,
+          "result": {
+            "value": 599.9618939853731
+          },
+          "status": "ok",
+          "steady": {
+            "max_s": 0.002350875,
+            "mean_s": 0.0007521993333333334,
+            "median_s": 0.00044593750000000004,
+            "min_s": 0.000390125,
+            "reps": 60,
+            "std_s": 0.000535648924260198
+          }
+        },
+        "model_load": {
+          "first_call_s": 0.092725084,
+          "result": {
+            "n_exo": 2,
+            "n_vars": 18,
+            "parameter_count": 9
+          },
+          "status": "ok",
+          "steady": {
+            "reps": 0
+          }
+        },
+        "sep_inversion": {
+          "first_call_s": 22.634325375000003,
+          "result": {
+            "value": -1000000000000.0
+          },
+          "status": "ok",
+          "steady": {
+            "max_s": 20.674319125,
+            "mean_s": 20.674319125,
+            "median_s": 20.674319125,
+            "min_s": 20.674319125,
+            "reps": 1,
+            "std_s": 0.0
+          }
+        },
+        "switching_value": {
+          "first_call_s": 1.876565333,
+          "result": {
+            "value": 557.3909586342324
+          },
+          "status": "ok",
+          "steady": {
+            "max_s": 0.005356584,
+            "mean_s": 0.0020890937500000002,
+            "median_s": 0.001862188,
+            "min_s": 0.000881583,
+            "reps": 8,
+            "std_s": 0.0014100072882140666
+          }
+        }
+      }
+    }
+  },
+  "jax_version": "0.4.30",
+  "language": "python",
+  "python_version": "3.9.6 (default, Dec  2 2025, 07:27:58) \n[Clang 17.0.0 (clang-1700.6.3.2)]"
+}
