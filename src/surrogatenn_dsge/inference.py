@@ -14,10 +14,8 @@ from .linalg import solve_discrete_lyapunov_direct
 from .model import MacroModel, kalman_loglikelihood_from_model
 from .statespace import (
     LinearGaussianStateSpace,
-    kalman_filter,
     kalman_loglikelihood as _statespace_kalman_loglikelihood,
     kalman_loglikelihood_per_period as _statespace_kalman_loglikelihood_per_period,
-    kalman_smoother,
 )
 from .switching import (
     LinearGateStatsResult,
@@ -691,84 +689,71 @@ def _estimate_first_order_kalman_filter_paths_jax(
     solution = jnp.asarray(solution_matrix, dtype=jnp.float64)
     observations = jnp.asarray(observation_deviations, dtype=jnp.float64)
     observable_index_array = jnp.asarray(observable_indices, dtype=jnp.int32)
-    state_index_array = jnp.asarray(
-        model.timings.past_not_future_and_mixed_idx,
-        dtype=jnp.int32,
-    )
     n_past = model.timings.nPast_not_future_and_mixed
     periods = observations.shape[1]
-
-    state_space = _linear_state_space_from_first_order_solution_jax(
-        solution,
-        model,
-        observable_indices,
-        initial_covariance_strategy=initial_covariance_strategy,
-        measurement_error_scale=0.0,
+    transition = jnp.zeros(
+        (model.timings.nVars, model.timings.nVars),
+        dtype=solution.dtype,
+    ).at[:, jnp.asarray(model.timings.past_not_future_and_mixed_idx, dtype=jnp.int32)].set(
+        solution[:, :n_past]
     )
-    filter_result = kalman_filter(
-        state_space,
-        observations,
-        presample_periods=0,
-        jitter=jitter,
-    )
-    latent_path = (
-        kalman_smoother(
-            state_space,
-            filter_result,
-            jitter=jitter,
-        ).smoothed_means
-        if smooth
-        else filter_result.filtered_means
-    )
-
-    latent_indices = tuple(
-        sorted(set(model.timings.past_not_future_and_mixed_idx) | set(observable_indices))
-    )
-    latent_index_array = jnp.asarray(latent_indices, dtype=jnp.int32)
-    latent_transition = solution[latent_index_array, :n_past]
-    latent_shock_impact = solution[latent_index_array, n_past:]
-    if len(latent_indices) == model.timings.nExo:
-        shock_map = jnp.linalg.inv(latent_shock_impact)
+    shock_impact = solution[:, n_past:]
+    observation = jnp.zeros(
+        (len(observable_indices), model.timings.nVars),
+        dtype=solution.dtype,
+    ).at[
+        jnp.arange(len(observable_indices), dtype=jnp.int32),
+        observable_index_array,
+    ].set(1.0)
+    process_covariance = shock_impact @ shock_impact.T
+    if initial_covariance_strategy == "theoretical":
+        initial_covariance = solve_discrete_lyapunov_direct(
+            transition,
+            process_covariance,
+        ).solution
+    elif initial_covariance_strategy == "diagonal":
+        initial_covariance = 10.0 * jnp.eye(
+            model.timings.nVars,
+            dtype=solution.dtype,
+        )
     else:
-        shock_map = jnp.linalg.pinv(latent_shock_impact)
-
-    empty_shocks = jnp.full(
-        (model.timings.nExo, periods),
-        fill_value,
-        dtype=jnp.float64,
-    )
-    empty_variables = jnp.full(
-        (model.timings.nVars, periods),
-        fill_value,
-        dtype=jnp.float64,
-    )
-    map_ok = (
-        jnp.all(jnp.isfinite(latent_path))
-        & jnp.all(jnp.isfinite(latent_shock_impact))
-        & jnp.all(jnp.isfinite(shock_map))
-    )
+        raise ValueError(
+            "initial_covariance_strategy must be 'theoretical' or 'diagonal'."
+        )
 
     def _success(_: Any) -> _LinearFilterPathResult:
         def step(
-            carry: tuple[jax.Array, jax.Array],
-            latent_t: jax.Array,
-        ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
-            reduced_state, valid = carry
+            carry: tuple[jax.Array, jax.Array, jax.Array],
+            observation_t: jax.Array,
+        ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple[jax.Array, ...]]:
+            mean_t, covariance_t, valid = carry
 
-            def _active(_: Any) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
-                residual = latent_t - latent_transition @ reduced_state
-                shock_t = shock_map @ residual
-                next_state = solution @ jnp.concatenate([reduced_state, shock_t], axis=0)
+            def _active(_: Any) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple[jax.Array, ...]]:
+                innovation = observation_t - observation @ mean_t
+                innovation_covariance = observation @ covariance_t @ observation.T
+                innovation_covariance = innovation_covariance + jitter * jnp.eye(
+                    innovation.shape[0],
+                    dtype=solution.dtype,
+                )
+                inverse_innovation = jnp.linalg.inv(innovation_covariance)
+                projected_gain = covariance_t @ observation.T @ inverse_innovation
+                kalman_l = transition - transition @ projected_gain @ observation
+                next_covariance = (
+                    transition @ covariance_t @ kalman_l.T
+                    + process_covariance
+                )
+                next_mean = transition @ (mean_t + projected_gain @ innovation)
+                shock_t = shock_impact.T @ observation.T @ inverse_innovation @ innovation
                 finite = (
-                    jnp.all(jnp.isfinite(residual))
+                    jnp.all(jnp.isfinite(innovation))
+                    & jnp.all(jnp.isfinite(inverse_innovation))
+                    & jnp.all(jnp.isfinite(next_covariance))
+                    & jnp.all(jnp.isfinite(next_mean))
                     & jnp.all(jnp.isfinite(shock_t))
-                    & jnp.all(jnp.isfinite(next_state))
+                    & (jnp.abs(jnp.linalg.det(innovation_covariance)) > jnp.finfo(solution.dtype).eps)
                 )
-                safe_reduced = jnp.where(
-                    finite,
-                    next_state[state_index_array],
-                    reduced_state,
-                )
+                safe_mean = jnp.where(finite, next_mean, mean_t)
+                safe_covariance = jnp.where(finite, next_covariance, covariance_t)
                 shock_out = jnp.where(
                     finite,
                     shock_t,
@@ -776,15 +761,46 @@ def _estimate_first_order_kalman_filter_paths_jax(
                 )
                 state_out = jnp.where(
                     finite,
-                    next_state,
-                    jnp.full_like(next_state, fill_value),
+                    next_mean,
+                    jnp.full((model.timings.nVars,), fill_value, dtype=solution.dtype),
                 )
-                return (safe_reduced, finite), (shock_out, state_out)
-
-            def _inactive(_: Any) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
+                innovation_out = jnp.where(
+                    finite,
+                    innovation,
+                    jnp.full((observation.shape[0],), fill_value, dtype=solution.dtype),
+                )
+                inv_out = jnp.where(
+                    finite,
+                    inverse_innovation,
+                    jnp.full_like(inverse_innovation, fill_value),
+                )
+                kalman_l_out = jnp.where(
+                    finite,
+                    kalman_l,
+                    jnp.full_like(kalman_l, fill_value),
+                )
                 return (
-                    (reduced_state, jnp.asarray(False, dtype=jnp.bool_)),
+                    (safe_mean, safe_covariance, finite),
                     (
+                        innovation_out,
+                        covariance_t,
+                        inv_out,
+                        kalman_l_out,
+                        mean_t,
+                        shock_out,
+                        state_out,
+                    ),
+                )
+
+            def _inactive(_: Any) -> tuple[tuple[jax.Array, jax.Array, jax.Array], tuple[jax.Array, ...]]:
+                return (
+                    (mean_t, covariance_t, jnp.asarray(False, dtype=jnp.bool_)),
+                    (
+                        jnp.full((observation.shape[0],), fill_value, dtype=solution.dtype),
+                        jnp.full_like(covariance_t, fill_value),
+                        jnp.full((observation.shape[0], observation.shape[0]), fill_value, dtype=solution.dtype),
+                        jnp.full((model.timings.nVars, model.timings.nVars), fill_value, dtype=solution.dtype),
+                        jnp.full((model.timings.nVars,), fill_value, dtype=solution.dtype),
                         jnp.full((model.timings.nExo,), fill_value, dtype=solution.dtype),
                         jnp.full((model.timings.nVars,), fill_value, dtype=solution.dtype),
                     ),
@@ -793,26 +809,98 @@ def _estimate_first_order_kalman_filter_paths_jax(
             return lax.cond(valid, _active, _inactive, operand=None)
 
         initial_carry = (
-            jnp.zeros((n_past,), dtype=solution.dtype),
+            jnp.zeros((model.timings.nVars,), dtype=solution.dtype),
+            initial_covariance,
             jnp.asarray(True, dtype=jnp.bool_),
         )
-        (_, valid), (shocks_t, variables_t) = lax.scan(step, initial_carry, latent_path.T)
-        return _LinearFilterPathResult(
-            ok=valid,
-            shocks=shocks_t.T,
-            variables=variables_t.T,
+        (
+            (_, _, valid),
+            (
+                innovations_t,
+                covariances_t,
+                inverse_innovations_t,
+                kalman_l_t,
+                prior_means_t,
+                filtered_shocks_t,
+                filtered_variables_t,
+            ),
+        ) = lax.scan(step, initial_carry, observations.T)
+
+        if not smooth:
+            return _LinearFilterPathResult(
+                ok=valid,
+                shocks=filtered_shocks_t.T,
+                variables=filtered_variables_t.T,
+            )
+
+        prior_means_t_rev = prior_means_t[::-1]
+        smoother_inputs = (
+            innovations_t[::-1],
+            covariances_t[::-1],
+            inverse_innovations_t[::-1],
+            kalman_l_t[::-1],
         )
 
-    return lax.cond(
-        map_ok,
-        _success,
-        lambda _: _LinearFilterPathResult(
-            ok=jnp.asarray(False, dtype=jnp.bool_),
-            shocks=empty_shocks,
-            variables=empty_variables,
-        ),
-        operand=None,
-    )
+        def smoother_scan(
+            carry: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+            inputs: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+        ) -> tuple[tuple[jax.Array, jax.Array, jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
+            r_vector, n_matrix, valid_smoother, index = carry
+            innovation_t, covariance_t, inverse_innovation_t, kalman_l_current = inputs
+
+            def _active(_: Any) -> tuple[tuple[jax.Array, jax.Array, jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
+                next_r = (
+                    observation.T @ inverse_innovation_t @ innovation_t
+                    + kalman_l_current.T @ r_vector
+                )
+                next_n = (
+                    observation.T @ inverse_innovation_t @ observation
+                    + kalman_l_current.T @ n_matrix @ kalman_l_current
+                )
+                smoothed_state = prior_means_t_rev[index] + covariance_t @ next_r
+                smoothed_shock = shock_impact.T @ next_r
+                finite = (
+                    jnp.all(jnp.isfinite(next_r))
+                    & jnp.all(jnp.isfinite(next_n))
+                    & jnp.all(jnp.isfinite(smoothed_state))
+                    & jnp.all(jnp.isfinite(smoothed_shock))
+                )
+                return (
+                    (next_r, next_n, finite, index + 1),
+                    (smoothed_state, smoothed_shock),
+                )
+
+            def _inactive(_: Any) -> tuple[tuple[jax.Array, jax.Array, jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
+                return (
+                    (r_vector, n_matrix, jnp.asarray(False, dtype=jnp.bool_), index + 1),
+                    (
+                        jnp.full((model.timings.nVars,), fill_value, dtype=solution.dtype),
+                        jnp.full((model.timings.nExo,), fill_value, dtype=solution.dtype),
+                    ),
+                )
+
+            return lax.cond(valid_smoother, _active, _inactive, operand=None)
+
+        (
+            (_, _, valid_smoother, _),
+            (smoothed_variables_rev, smoothed_shocks_rev),
+        ) = lax.scan(
+            smoother_scan,
+            (
+                jnp.zeros((model.timings.nVars,), dtype=solution.dtype),
+                jnp.zeros((model.timings.nVars, model.timings.nVars), dtype=solution.dtype),
+                valid,
+                jnp.asarray(0, dtype=jnp.int32),
+            ),
+            smoother_inputs,
+        )
+        return _LinearFilterPathResult(
+            ok=valid_smoother,
+            shocks=smoothed_shocks_rev[::-1].T,
+            variables=smoothed_variables_rev[::-1].T,
+        )
+
+    return _success(None)
 
 
 def _estimate_observed_shocks_and_variables_matrix_model_jax(

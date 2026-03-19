@@ -20,7 +20,7 @@ Implemented:
 - linear Gaussian state-space simulation, Kalman likelihood, filtering, and RTS smoothing
 - first-order inversion-filter likelihoods with per-period contributions and warmup support
 - parsed-model observable-name resolution and first-order state-space construction for Kalman estimation
-- parsed-model Kalman loglikelihood helpers for named observable data in levels, including per-period likelihood contributions, Julia-style sorted-observable handling for array inputs, and verified `Smets_Wouters_2007_HLT` loglikelihood parity against Julia
+- parsed-model Kalman loglikelihood helpers for named observable data in levels, including per-period likelihood contributions, Julia-style sorted-observable handling for array inputs, and verified `Smets_Wouters_2007_HLT` parity against Julia for total likelihood, per-period likelihood, and filtered/smoothed Kalman state extraction
 - parsed-model inversion loglikelihood helpers for both first-order and stochastic extended path likelihoods, including SEP inversion diagnostics and Julia-style runtime override keywords
 - regime-switching likelihood mixing with supplied hard masks or gate probabilities, plus a parsed-model bridge that mixes ROM Kalman and FOM inversion per-period likelihoods
 - gate-stat computation, threshold calibration, probability mapping, padding, and automatic hard-regime assignment utilities for the switching layer

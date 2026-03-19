@@ -319,8 +319,9 @@ Python/JAX status:
 - parsed models now expose high-level Kalman loglikelihood helpers that accept named observable data either as a matrix plus explicit observable order or as a mapping from observable names to time series
 - the parsed-model likelihood path demeans level data by the solved model steady state before passing deviations into the existing JAX Kalman layer, matching the Julia estimation flow
 - observable names are now canonicalized in the same sorted order as Julia's `get_and_check_observables`, so array-like observation inputs are reordered before filtering instead of being consumed in caller order
+- the Kalman filter helper path now follows Julia's full-state Durbin-Koopman recursion directly rather than reconstructing full variables and shocks from the reduced latent state with a pseudo-inverse, which fixes filtered/smoothed state extraction parity on the `Smets_Wouters_2007_HLT` benchmark payload
 - first-order solution failure and parameter-bound violations now return configurable failure values instead of forcing every caller to handle solver internals manually
-- tests verify parity with the low-level deviation-based Kalman path, mapping-input handling, Julia-style sorted-observable array handling, per-period contributions summing to the total likelihood, Julia-style failure fallbacks on bound violations, and an upstream `Smets_Wouters_2007_HLT` benchmark likelihood that now matches the Julia reference exactly
+- tests verify parity with the low-level deviation-based Kalman path, mapping-input handling, Julia-style sorted-observable array handling, per-period contributions summing to the total likelihood, Julia-style failure fallbacks on bound violations, and full upstream `Smets_Wouters_2007_HLT` parity for total likelihood, per-period likelihood, filtered variables, smoothed variables, filtered shocks, and smoothed shocks
 
 ### 21. Optional NumPyro subset-parameter inference helpers
 

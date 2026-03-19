@@ -243,8 +243,11 @@ def test_first_order_filter_helpers_match_exact_linear_inversion_recovery() -> N
     np.testing.assert_allclose(from_filter.f_stat, manual.f_stat, rtol=1e-12, atol=1e-12)
 
 
-def test_first_order_filter_helpers_match_exact_linear_kalman_recovery() -> None:
-    model, first_order_result, shock_name, shocks, levels = _linear_filter_fixture()
+def test_first_order_filter_helpers_match_linear_kalman_recursion() -> None:
+    model, first_order_result, _, shocks, levels = _linear_filter_fixture()
+    steady_state = np.asarray(first_order_result.steady_state, dtype=np.float64)
+    rho = float(model.parameter_values[model.parameter_names.index("rho")])
+    first_period_multiplier = 1.0 - rho**2
 
     estimated_shocks = estimate_observed_shocks_matrix(
         model,
@@ -271,9 +274,28 @@ def test_first_order_filter_helpers_match_exact_linear_kalman_recovery() -> None
         smooth=True,
     )
 
-    np.testing.assert_allclose(estimated_shocks, shocks, rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(estimated_variables, levels, rtol=1e-6, atol=1e-6)
-    np.testing.assert_allclose(smoothed_shocks, shocks, rtol=1e-6, atol=1e-6)
+    expected_filtered_shocks = shocks.copy()
+    expected_filtered_shocks[:, 0] = first_period_multiplier * shocks[:, 0]
+    expected_filtered_variables = rho * np.asarray(levels, dtype=np.float64)
+
+    np.testing.assert_allclose(
+        estimated_shocks,
+        expected_filtered_shocks,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        estimated_variables,
+        expected_filtered_variables,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        smoothed_shocks,
+        expected_filtered_shocks,
+        rtol=1e-6,
+        atol=1e-6,
+    )
     assert variable_names == ("y",)
 
 

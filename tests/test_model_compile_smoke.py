@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
+import shutil
+import subprocess
 
 import jax
 import numpy as np
 import pytest
 
 from surrogatenn_dsge import (
+    estimate_observed_shocks_matrix,
+    estimate_observed_variables_matrix,
     kalman_loglikelihood_from_model,
     kalman_loglikelihood_from_model_jax,
+    kalman_loglikelihood_per_period_from_model,
     parse_macro_model,
     solve_first_order_model,
 )
@@ -162,6 +168,108 @@ _SCHUR_COMPILE_SMOKE_MODELS = (
 )
 
 
+def _hlt_case() -> dict[str, object]:
+    payload = json.loads(_BENCHMARK_PAYLOAD_PATH.read_text())
+    return next(entry for entry in payload["cases"] if entry["name"] == "medium_sw07_hlt")
+
+
+@lru_cache(maxsize=1)
+def _hlt_julia_kalman_reference() -> dict[str, object]:
+    julia = shutil.which("julia")
+    if julia is None:
+        pytest.skip("Julia is not available for MacroModelling parity checks.")
+
+    project = _ROOT / "SurrogateNN_Estimation.jl"
+    if not project.exists():
+        pytest.skip("Upstream Julia reference repo is not available.")
+
+    code = f"""
+using AxisKeys
+using JSON
+using MacroModelling
+
+quiet(f::Function) = redirect_stdout(devnull) do
+    redirect_stderr(devnull) do
+        f()
+    end
+end
+
+payload = JSON.parsefile(raw\"{_BENCHMARK_PAYLOAD_PATH}\")
+case = only(filter(c -> c[\"name\"] == \"medium_sw07_hlt\", payload[\"cases\"]))
+quiet() do
+    Base.include(Main, case[\"model_path\"])
+end
+model = Base.invokelatest(() -> getfield(Main, Symbol(case[\"model_symbol\"])))
+params = Float64.(model.parameter_values)
+observables = Symbol.(case[\"observables\"])
+rows = [Float64.(row) for row in case[\"observations\"]]
+matrix = reduce(vcat, [reshape(row, 1, :) for row in rows])
+data = KeyedArray(matrix; Variable = observables, Time = collect(1:size(matrix, 2)))
+per_period = quiet() do
+    MacroModelling.get_loglikelihood_per_period(
+        model,
+        data,
+        params;
+        algorithm = :first_order,
+        filter = :kalman,
+        quadratic_matrix_equation_algorithm = :schur,
+        initial_covariance = :theoretical,
+        presample_periods = 0,
+        verbose = false,
+    )
+end
+sorted_observables = sort(observables)
+row_lookup = Dict(name => idx for (idx, name) in enumerate(observables))
+sorted_matrix = reduce(
+    vcat,
+    [reshape(matrix[row_lookup[name], :], 1, :) for name in sorted_observables],
+)
+steady_state = quiet() do
+    MacroModelling.get_steady_state(
+        model;
+        parameters = params,
+        algorithm = :first_order,
+        derivatives = false,
+        verbose = false,
+    )
+end
+steady_lookup = Dict(axiskeys(steady_state, 1) .=> Array(steady_state))
+steady_observables = [steady_lookup[name] for name in sorted_observables]
+opts = MacroModelling.merge_calculation_options(
+    quadratic_matrix_equation_algorithm = :schur,
+    verbose = false,
+)
+smoothed_variables, _, smoothed_shocks, _, filtered_variables, _, filtered_shocks, _ = quiet() do
+    MacroModelling.filter_and_smooth(
+        model,
+        sorted_matrix .- reshape(steady_observables, :, 1),
+        collect(sorted_observables);
+        opts = opts,
+    )
+end
+println(
+    JSON.json(
+        Dict(
+            \"per_period\" => per_period,
+            \"filtered_variables\" => filtered_variables,
+            \"smoothed_variables\" => smoothed_variables,
+            \"filtered_shocks\" => filtered_shocks,
+            \"smoothed_shocks\" => smoothed_shocks,
+        ),
+    ),
+)
+"""
+
+    completed = subprocess.run(
+        [julia, f"--project={project}", "-e", code],
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=_ROOT,
+    )
+    return json.loads(completed.stdout)
+
+
 @pytest.mark.parametrize(
     ("model_path", "steady_state_initial_guess"),
     _COMPILE_SMOKE_MODELS,
@@ -245,8 +353,7 @@ def test_upstream_fixture_solves_first_order_and_compiled_kalman_with_schur(
 
 
 def test_hlt_kalman_loglikelihood_matches_julia_reference() -> None:
-    payload = json.loads(_BENCHMARK_PAYLOAD_PATH.read_text())
-    case = next(entry for entry in payload["cases"] if entry["name"] == "medium_sw07_hlt")
+    case = _hlt_case()
     model = parse_macro_model(Path(case["model_path"]).read_text())
 
     expected = -600.6439319278583
@@ -277,3 +384,90 @@ def test_hlt_kalman_loglikelihood_matches_julia_reference() -> None:
 
     np.testing.assert_allclose(high_level, expected, rtol=1e-10, atol=1e-10)
     np.testing.assert_allclose(compiled, expected, rtol=1e-10, atol=1e-10)
+
+
+def test_hlt_kalman_filter_paths_match_julia_reference() -> None:
+    case = _hlt_case()
+    reference = _hlt_julia_kalman_reference()
+    model = parse_macro_model(Path(case["model_path"]).read_text())
+
+    observations = np.asarray(case["observations"], dtype=np.float64)
+    steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
+    per_period = kalman_loglikelihood_per_period_from_model(
+        model,
+        observations,
+        observables=case["observables"],
+        steady_state=steady_state,
+        measurement_error_scale=0.0,
+        jitter=0.0,
+        on_failure_loglikelihood=-1e12,
+        qme_algorithm="schur",
+    )
+    filtered_variables, variable_names = estimate_observed_variables_matrix(
+        model,
+        observations,
+        observables=case["observables"],
+        steady_state=steady_state,
+        qme_algorithm="schur",
+        filter="kalman",
+        smooth=False,
+    )
+    smoothed_variables, _ = estimate_observed_variables_matrix(
+        model,
+        observations,
+        observables=case["observables"],
+        steady_state=steady_state,
+        qme_algorithm="schur",
+        filter="kalman",
+        smooth=True,
+    )
+    filtered_shocks = estimate_observed_shocks_matrix(
+        model,
+        observations,
+        observables=case["observables"],
+        steady_state=steady_state,
+        qme_algorithm="schur",
+        filter="kalman",
+        smooth=False,
+    )
+    smoothed_shocks = estimate_observed_shocks_matrix(
+        model,
+        observations,
+        observables=case["observables"],
+        steady_state=steady_state,
+        qme_algorithm="schur",
+        filter="kalman",
+        smooth=True,
+    )
+
+    assert variable_names == tuple(model.timings.var)
+    np.testing.assert_allclose(
+        per_period,
+        np.asarray(reference["per_period"], dtype=np.float64),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        filtered_variables,
+        np.asarray(reference["filtered_variables"], dtype=np.float64).T + steady_state[:, None],
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        smoothed_variables,
+        np.asarray(reference["smoothed_variables"], dtype=np.float64).T + steady_state[:, None],
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        filtered_shocks,
+        np.asarray(reference["filtered_shocks"], dtype=np.float64).T,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        smoothed_shocks,
+        np.asarray(reference["smoothed_shocks"], dtype=np.float64).T,
+        rtol=1e-6,
+        atol=1e-6,
+    )

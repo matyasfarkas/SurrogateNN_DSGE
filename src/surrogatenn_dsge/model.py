@@ -55,10 +55,8 @@ from .sep import (
 )
 from .statespace import (
     LinearGaussianStateSpace,
-    kalman_filter,
     kalman_loglikelihood as _statespace_kalman_loglikelihood,
     kalman_loglikelihood_per_period as _statespace_kalman_loglikelihood_per_period,
-    kalman_smoother,
 )
 from .switching import (
     LinearGateStatsResult,
@@ -67,6 +65,7 @@ from .switching import (
     compute_gate_stat_series,
     compute_switching_loglikelihood,
 )
+from .linalg import solve_discrete_lyapunov_direct
 
 _TRANSFORMATIONS = standard_transformations + (
     convert_xor,
@@ -2538,71 +2537,140 @@ class MacroModel:
         initial_covariance_strategy: str = "theoretical",
         jitter: float = 1e-9,
     ) -> tuple[np.ndarray, np.ndarray]:
-        state_space = self.build_linear_state_space(
-            observable_names,
-            first_order_result=parsed_result,
-            initial_covariance_strategy=initial_covariance_strategy,
-            measurement_error_scale=0.0,
-        )
-        filter_result = kalman_filter(
-            state_space,
-            observation_deviations,
-            presample_periods=0,
-            jitter=jitter,
-        )
-        if smooth:
-            latent_path = np.asarray(
-                kalman_smoother(
-                    state_space,
-                    filter_result,
-                    jitter=jitter,
-                ).smoothed_means,
-                dtype=np.float64,
-            )
-        else:
-            latent_path = np.asarray(filter_result.filtered_means, dtype=np.float64)
-
         solution = np.asarray(parsed_result.solution.solution_matrix, dtype=np.float64)
+        n_past = self.timings.nPast_not_future_and_mixed
         state_indices = np.asarray(
             self.timings.past_not_future_and_mixed_idx,
             dtype=np.int64,
         )
-        n_past = self.timings.nPast_not_future_and_mixed
-        latent_indices = tuple(
-            sorted(set(self.timings.past_not_future_and_mixed_idx) | set(observable_indices))
+        transition = np.zeros((self.timings.nVars, self.timings.nVars), dtype=np.float64)
+        transition[:, state_indices] = solution[:, :n_past]
+        shock_impact = solution[:, n_past:]
+        observation = np.zeros(
+            (len(observable_indices), self.timings.nVars),
+            dtype=np.float64,
         )
-        latent_transition = solution[list(latent_indices), :n_past]
-        latent_shock_impact = solution[list(latent_indices), n_past:]
-        if latent_shock_impact.shape[0] == self.timings.nExo:
-            try:
-                shock_map = np.linalg.inv(latent_shock_impact)
-            except np.linalg.LinAlgError:
-                shock_map = np.linalg.pinv(latent_shock_impact)
+        observation[
+            np.arange(len(observable_indices), dtype=np.int64),
+            np.asarray(observable_indices, dtype=np.int64),
+        ] = 1.0
+        process_covariance = shock_impact @ shock_impact.T
+        if initial_covariance_strategy == "theoretical":
+            covariance = np.asarray(
+                solve_discrete_lyapunov_direct(
+                    transition,
+                    process_covariance,
+                ).solution,
+                dtype=np.float64,
+            )
+        elif initial_covariance_strategy == "diagonal":
+            covariance = 10.0 * np.eye(self.timings.nVars, dtype=np.float64)
         else:
-            shock_map = np.linalg.pinv(latent_shock_impact)
-        if not np.isfinite(shock_map).all():
             raise ValueError(
-                "Kalman filter helper failed: could not construct a finite shock map."
+                "initial_covariance_strategy must be 'theoretical' or 'diagonal'."
             )
 
         periods = int(observation_deviations.shape[1])
-        reduced_state = np.zeros((n_past,), dtype=np.float64)
-        variables = np.zeros((self.timings.nVars, periods), dtype=np.float64)
-        shocks = np.zeros((self.timings.nExo, periods), dtype=np.float64)
+        innovations = np.zeros((observation.shape[0], periods), dtype=np.float64)
+        predicted_states = np.zeros((self.timings.nVars, periods + 1), dtype=np.float64)
+        inverse_innovation_covariances = np.zeros(
+            (periods, observation.shape[0], observation.shape[0]),
+            dtype=np.float64,
+        )
+        kalman_l_matrices = np.zeros(
+            (periods, self.timings.nVars, self.timings.nVars),
+            dtype=np.float64,
+        )
+        predicted_covariances = np.zeros(
+            (periods + 1, self.timings.nVars, self.timings.nVars),
+            dtype=np.float64,
+        )
+        predicted_covariances[0] = covariance
+        filtered_shocks = np.zeros((self.timings.nExo, periods), dtype=np.float64)
 
         for period in range(periods):
-            residual = latent_path[:, period] - latent_transition @ reduced_state
-            shock_t = shock_map @ residual
-            next_state = solution @ np.concatenate([reduced_state, shock_t], axis=0)
-            if not np.isfinite(shock_t).all() or not np.isfinite(next_state).all():
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                innovation = (
+                    observation_deviations[:, period]
+                    - observation @ predicted_states[:, period]
+                )
+                innovation_covariance = (
+                    observation @ predicted_covariances[period] @ observation.T
+                )
+                if jitter > 0.0:
+                    innovation_covariance = innovation_covariance + jitter * np.eye(
+                        innovation.shape[0],
+                        dtype=np.float64,
+                    )
+                try:
+                    inverse_innovation = np.linalg.inv(innovation_covariance)
+                except np.linalg.LinAlgError as exc:
+                    raise ValueError(
+                        "Kalman filter helper failed: innovation covariance is singular."
+                    ) from exc
+                if not np.isfinite(inverse_innovation).all():
+                    raise ValueError(
+                        "Kalman filter helper failed: innovation covariance inverse is non-finite."
+                    )
+                projected_gain = (
+                    predicted_covariances[period] @ observation.T @ inverse_innovation
+                )
+                kalman_l = transition - transition @ projected_gain @ observation
+                next_covariance = (
+                    transition @ predicted_covariances[period] @ kalman_l.T
+                    + process_covariance
+                )
+                next_state = transition @ (
+                    predicted_states[:, period] + projected_gain @ innovation
+                )
+                shock_t = (
+                    shock_impact.T @ observation.T @ inverse_innovation @ innovation
+                )
+            if (
+                not np.isfinite(innovation).all()
+                or not np.isfinite(next_covariance).all()
+                or not np.isfinite(next_state).all()
+                or not np.isfinite(shock_t).all()
+            ):
                 raise ValueError(
                     "Kalman filter helper produced non-finite shocks or state estimates."
                 )
-            shocks[:, period] = shock_t
-            variables[:, period] = next_state
-            reduced_state = next_state[state_indices]
+            innovations[:, period] = innovation
+            inverse_innovation_covariances[period] = inverse_innovation
+            kalman_l_matrices[period] = kalman_l
+            predicted_covariances[period + 1] = next_covariance
+            predicted_states[:, period + 1] = next_state
+            filtered_shocks[:, period] = shock_t
 
-        return shocks, variables
+        filtered_variables = predicted_states[:, 1:]
+        if not smooth:
+            return filtered_shocks, filtered_variables
+
+        smoothed_variables = np.zeros((self.timings.nVars, periods), dtype=np.float64)
+        smoothed_shocks = np.zeros((self.timings.nExo, periods), dtype=np.float64)
+        r_vector = np.zeros((self.timings.nVars,), dtype=np.float64)
+        n_matrix = np.zeros((self.timings.nVars, self.timings.nVars), dtype=np.float64)
+
+        for period in range(periods - 1, -1, -1):
+            with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                inverse_innovation = inverse_innovation_covariances[period]
+                kalman_l = kalman_l_matrices[period]
+                innovation = innovations[:, period]
+                r_vector = (
+                    observation.T @ inverse_innovation @ innovation
+                    + kalman_l.T @ r_vector
+                )
+                smoothed_variables[:, period] = (
+                    predicted_states[:, period]
+                    + predicted_covariances[period] @ r_vector
+                )
+                n_matrix = (
+                    observation.T @ inverse_innovation @ observation
+                    + kalman_l.T @ n_matrix @ kalman_l
+                )
+                smoothed_shocks[:, period] = shock_impact.T @ r_vector
+
+        return smoothed_shocks, smoothed_variables
 
     def _estimate_observed_shocks_and_variables_matrix(
         self,
