@@ -723,6 +723,22 @@ Python/JAX status:
 - the grouped-name path is intentionally narrow: it flattens nested runtime name collections, while the explicit deterministic shock-history API remains matrix-or-mapping based
 - tests verify grouped variable and shock-name parity against the equivalent explicit flat selections on the runtime helpers
 
+### 47. Upstream MacroModelling source compatibility sweep
+
+Julia reference:
+
+- upstream `.jl` model sources under `models/` and `test/models/`
+
+Python/JAX status:
+
+- the parser now accepts residual-only model equations without an explicit `= 0`, which is required for several upstream Smets-Wouters source files
+- multiline `@model` and `@parameters` expressions now stay intact while delimiters remain open, so multiline `max(...)` OBC equations and multiline parameter definitions parse correctly instead of being truncated line-by-line
+- identifier handling now covers superscript/modifier-code nomenclature such as `A¹¹`, `σᶻ`, `ϵᶻ`, `SDF⁺¹`, and `ψ²`, with safe ASCII parse tokens generated internally
+- unknown function-call names inside parameter definitions are now parsed symbolically instead of being misclassified as missing parameters, which is needed for upstream QIPF files that still reference helper functions such as `QMIPF_solve_SS(...)`
+- numeric scientific-notation literals like `3.9e-3` no longer leak a fake parameter named `e` into the extracted parameter set
+- upstream source-compatibility smoke now parses `42/43` checked `.jl` model files from `SurrogateNN_Estimation.jl`; the remaining `models/testqipf.jl` failure is intentionally kept explicit because it appears to contain an upstream typo (`1GAMM`) and should not be guessed away in the Python port
+- tests verify minimal syntax regressions for residual-only equations, multiline OBC equations, multiline parameter expressions with unknown function calls, unicode superscript identifiers, the broad upstream parse sweep, and the explicit `testqipf.jl` typo guard
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
@@ -742,6 +758,7 @@ Python/JAX status:
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed SEP path with both full-tree and sparse fishbone branching.
+- One upstream model source, `models/testqipf.jl`, is still intentionally excluded from source-compatibility parity because it appears to contain a literal typo (`1GAMM`) rather than a parser feature gap.
 
 ## Environment note
 

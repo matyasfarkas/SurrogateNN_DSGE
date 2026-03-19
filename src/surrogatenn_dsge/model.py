@@ -83,8 +83,9 @@ _PARAMETERS_BLOCK_RE = re.compile(
     r"@parameters\s+(?P<name>[^\s]+)(?P<options>.*?)\bbegin\b",
     re.DOTALL,
 )
-_IDENTIFIER_PATTERN = r"(?!\d)(?:[\w\u0300-\u036f])+(?:\{[^{}\[\]]+\})*"
-_INDEXED_IDENTIFIER_PATTERN = r"(?!\d)(?:[\w\u0300-\u036f])+(?:\{[^{}\[\]]+\})+"
+_IDENTIFIER_CHAR_CLASS = r"[\w\u02b0-\u02ff\u0300-\u036f\u1d2c-\u1dbf\u2070-\u209f]"
+_IDENTIFIER_PATTERN = rf"(?!\d)(?:{_IDENTIFIER_CHAR_CLASS})+(?:\{{[^{{}}\[\]]+\}})*"
+_INDEXED_IDENTIFIER_PATTERN = rf"(?!\d)(?:{_IDENTIFIER_CHAR_CLASS})+(?:\{{[^{{}}\[\]]+\}})+"
 _REFERENCE_RE = re.compile(
     rf"(?P<name>{_IDENTIFIER_PATTERN})\s*\[\s*(?P<index>[^\]]+)\s*\]",
     re.UNICODE,
@@ -4433,7 +4434,17 @@ def parse_macro_model(source: str) -> MacroModel:
         sp.Symbol(name, real=True) for name in parameter_parse_names
     )
     parameter_symbol_map = dict(zip(parameter_parse_names, parameter_symbols))
-    parse_locals = {**timed_symbols, **parameter_symbol_map, **_function_locals()}
+    unknown_function_names = _collect_unknown_function_names(
+        dynamic_texts + steady_state_texts + list(parsed_parameter_block.equation_texts),
+        timed_symbols,
+        parameter_names,
+    )
+    parse_locals = {
+        **timed_symbols,
+        **parameter_symbol_map,
+        **{name: sp.Function(name) for name in unknown_function_names},
+        **_function_locals(),
+    }
 
     dynamic_exprs = tuple(
         parse_expr(
@@ -5858,7 +5869,11 @@ def _split_model_body_lines(
         if loop_depth < 0:
             raise ValueError("Encountered `end` without a matching `for` in `@model`.")
 
-        if loop_depth == 0 and not _model_line_requires_continuation(stripped):
+        if (
+            loop_depth == 0
+            and _delimiter_balance(" ".join(current)) == 0
+            and not _model_line_requires_continuation(stripped)
+        ):
             if _is_model_for_block_statement(current):
                 statements.extend(
                     _expand_model_for_block(
@@ -5895,8 +5910,38 @@ def _split_model_body_lines(
     return statements
 
 
+def _split_parameter_body_lines(body: str) -> list[str]:
+    lines = _split_body_lines(body)
+    statements: list[str] = []
+    current: list[str] = []
+
+    for line in lines:
+        stripped = line.strip()
+        current.append(stripped)
+        if (
+            _delimiter_balance(" ".join(current)) == 0
+            and not _model_line_requires_continuation(stripped)
+        ):
+            statements.append(" ".join(current))
+            current = []
+
+    if current:
+        statements.append(" ".join(current))
+    return statements
+
+
 def _model_line_requires_continuation(line: str) -> bool:
     return bool(re.search(r"[+\-*/=]$", line))
+
+
+def _delimiter_balance(text: str) -> int:
+    depth = 0
+    for char in text:
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+    return depth
 
 
 def _block_line_delta(line: str) -> int:
@@ -6526,9 +6571,32 @@ def _strip_comment(line: str) -> str:
 
 def _equation_to_difference(equation: str) -> str:
     if "=" not in equation:
-        raise ValueError(f"Equation must contain `=`, got `{equation}`.")
+        return f"({equation.strip()})"
     lhs, rhs = equation.split("=", 1)
     return f"({lhs.strip()}) - ({rhs.strip()})"
+
+
+def _identifier_is_function_call(
+    expression: str,
+    match: re.Match[str],
+) -> bool:
+    return expression[match.end() :].lstrip().startswith("(")
+
+
+def _identifier_is_numeric_exponent(
+    expression: str,
+    match: re.Match[str],
+) -> bool:
+    name = match.group(0)
+    if name not in {"e", "E"}:
+        return False
+    previous = expression[match.start() - 1] if match.start() > 0 else ""
+    following = expression[match.end() :]
+    return bool(
+        previous
+        and (previous.isdigit() or previous == ".")
+        and re.match(r"[+-]?\d", following)
+    )
 
 
 def _transform_dynamic_expression(
@@ -6843,11 +6911,40 @@ def _extract_parameter_names(
     function_names = set(_function_locals()) | {"E", "pi"}
     parameters: set[str] = set()
     for expression in expressions:
-        for name in _IDENTIFIER_RE.findall(expression):
+        for match in _IDENTIFIER_RE.finditer(expression):
+            name = match.group(0)
             if name in timed_symbols or name in function_names:
+                continue
+            if _identifier_is_function_call(expression, match):
+                continue
+            if _identifier_is_numeric_exponent(expression, match):
                 continue
             parameters.add(name)
     return parameters
+
+
+def _collect_unknown_function_names(
+    expressions: Sequence[str],
+    timed_symbols: Mapping[str, sp.Symbol],
+    parameter_names: Sequence[str],
+) -> tuple[str, ...]:
+    function_names = set(_function_locals()) | {"E", "pi"}
+    known_identifiers = set(timed_symbols) | set(parameter_names) | function_names
+    unknown_functions: list[str] = []
+    seen: set[str] = set()
+
+    for expression in expressions:
+        for match in _IDENTIFIER_RE.finditer(expression):
+            name = match.group(0)
+            if name in known_identifiers:
+                continue
+            if not _identifier_is_function_call(expression, match):
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            unknown_functions.append(name)
+    return tuple(unknown_functions)
 
 
 def _parse_parameter_block(
@@ -6864,7 +6961,7 @@ def _parse_parameter_block(
     bounds: dict[str, tuple[float, float]] = {}
     seen_targets: set[str] = set()
 
-    for line in _split_body_lines(body):
+    for line in _split_parameter_body_lines(body):
         if _is_parameter_bounds_line(line):
             for name, bound in _parse_parameter_bounds_line(
                 line,
@@ -7061,8 +7158,11 @@ def _available_indexed_parameter_names(
             ordered_names.append(base_name)
 
     for expression in expressions:
-        for name in _IDENTIFIER_RE.findall(expression):
+        for match in _IDENTIFIER_RE.finditer(expression):
+            name = match.group(0)
             if name in timed_symbols or name in function_names:
+                continue
+            if _identifier_is_function_call(expression, match):
                 continue
             if _is_indexed_identifier(name) and name not in seen:
                 seen.add(name)
@@ -7306,7 +7406,7 @@ def _sanitize_indexed_identifiers(
 def _encode_name(name: str) -> str:
     encoded = []
     for char in name:
-        if ("a" <= char <= "z") or ("A" <= char <= "Z") or char.isdigit() or char == "_":
+        if ("a" <= char <= "z") or ("A" <= char <= "Z") or ("0" <= char <= "9") or char == "_":
             encoded.append(char)
         else:
             encoded.append(f"_u{ord(char):04x}_")
