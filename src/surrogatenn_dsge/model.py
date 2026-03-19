@@ -483,16 +483,35 @@ class MacroModel:
         initial_guess: Optional[Sequence[float] | Mapping[str, float]],
     ) -> np.ndarray:
         n = len(self.steady_state_names)
+
+        def default_value(name: str) -> float:
+            compact = name.replace("_", "").lower()
+            if "log" in compact:
+                return 0.0
+            if name == "efficiency":
+                return 0.0
+            if compact in {"l", "n"} or "labour" in compact or "labor" in compact or "lab" in compact:
+                return 0.3
+            if compact in {"k", "capital"}:
+                return 10.0
+            if compact in {"c", "consumption", "y", "output", "i", "investment"}:
+                return 1.2
+            return 1.0
+
+        default_guess = np.asarray(
+            [default_value(name) for name in self.steady_state_names],
+            dtype=np.float64,
+        )
         if initial_guess is None:
             if not self.default_initial_guess:
-                return np.ones(n, dtype=np.float64)
-            guess = np.ones(n, dtype=np.float64)
+                return default_guess
+            guess = default_guess.copy()
             for idx, name in enumerate(self.steady_state_names):
                 if name in self.default_initial_guess:
                     guess[idx] = float(self.default_initial_guess[name])
             return guess
         if isinstance(initial_guess, Mapping):
-            guess = np.ones(n, dtype=np.float64)
+            guess = default_guess.copy()
             for idx, name in enumerate(self.steady_state_names):
                 if name in initial_guess:
                     guess[idx] = float(initial_guess[name])
@@ -5599,7 +5618,16 @@ def _solve_newton_system(
         try:
             direction = np.linalg.solve(jacobian, -residual)
         except np.linalg.LinAlgError:
-            direction, *_ = np.linalg.lstsq(jacobian, -residual, rcond=None)
+            try:
+                direction, *_ = np.linalg.lstsq(jacobian, -residual, rcond=None)
+            except np.linalg.LinAlgError:
+                normal_matrix = jacobian.T @ jacobian
+                rhs = -(jacobian.T @ residual)
+                ridge = 1e-8 * max(1.0, float(np.linalg.norm(normal_matrix, ord=np.inf)))
+                direction = np.linalg.solve(
+                    normal_matrix + ridge * np.eye(normal_matrix.shape[0], dtype=np.float64),
+                    rhs,
+                )
 
         step = 1.0
         accepted = False

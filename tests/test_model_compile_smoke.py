@@ -26,16 +26,6 @@ _UPSTREAM_TEST_MODEL_DIR = _ROOT / "SurrogateNN_Estimation.jl" / "test" / "model
 _UPSTREAM_MODEL_DIR = _ROOT / "SurrogateNN_Estimation.jl" / "models"
 _BENCHMARK_PAYLOAD_PATH = _ROOT / "SurrogateNN_DSGE" / "benchmarks" / "results" / "test_payloads.json"
 
-_RBC_STEADY_STATE_GUESS = {
-    "A": 1.0,
-    "Pi": 1.0025,
-    "R": 1.0035,
-    "c": 1.2,
-    "k": 9.4,
-    "y": 1.42,
-    "z_delta": 1.0,
-}
-
 _COMPILE_SMOKE_MODELS = (
     pytest.param(
         _UPSTREAM_TEST_MODEL_DIR / "RBC_CME.jl",
@@ -50,79 +40,28 @@ _COMPILE_SMOKE_MODELS = (
     pytest.param(
         _UPSTREAM_TEST_MODEL_DIR
         / "RBC_CME_calibration_equations_and_parameter_definitions_and_specfuns.jl",
-        {
-            **_RBC_STEADY_STATE_GUESS,
-            "ZZ_avg": 1.0,
-            "ZZ_avg_fut": 1.0,
-            "log_ZZ_avg": 0.0,
-            "c_normlogpdf": -1.2,
-            "c_norminvcdf": -0.8,
-            "c_erfcinv": 1.0,
-            "c_erfinv": 0.3,
-        },
+        None,
         id="rbc_cme_specfuns",
     ),
     pytest.param(
         _UPSTREAM_TEST_MODEL_DIR
         / "RBC_CME_calibration_equations_and_parameter_definitions_lead_lags.jl",
-        {
-            **_RBC_STEADY_STATE_GUESS,
-            "ZZ_avg": 1.0,
-            "ZZ_avg_fut": 1.0,
-            "log_ZZ_avg": 0.0,
-            "c_normlogpdf": -1.2,
-            "c_norminvcdf": -0.8,
-        },
+        None,
         id="rbc_cme_lead_lags",
     ),
     pytest.param(
         _UPSTREAM_MODEL_DIR / "RBC_Dynare.jl",
-        {
-            "Capital": 10.0,
-            "Consumption": 0.8,
-            "Efficiency": 1.0,
-            "Investment": 0.2,
-            "Labour": 0.3,
-            "Output": 1.0,
-            "efficiency": 0.0,
-        },
+        None,
         id="rbc_dynare",
     ),
     pytest.param(
         _UPSTREAM_MODEL_DIR / "FS2000.jl",
-        {
-            "P": 1.0,
-            "R": 1.0,
-            "W": 1.0,
-            "c": 0.8,
-            "d": 0.0,
-            "dA": 1.01,
-            "e": 1.0,
-            "gp_obs": 1.0,
-            "gy_obs": 1.01,
-            "k": 8.0,
-            "l": 0.9,
-            "log_gp_obs": 0.0,
-            "log_gy_obs": 0.01,
-            "m": 1.0,
-            "n": 0.3,
-            "y": 1.0,
-        },
+        None,
         id="fs2000",
     ),
     pytest.param(
         _UPSTREAM_MODEL_DIR / "RBC_baseline.jl",
-        {
-            "c": 0.55,
-            "g": 0.20,
-            "i": 0.25,
-            "k": 10.4,
-            "l": 1.0 / 3.0,
-            "r": 0.128,
-            "w": 2.0,
-            "y": 1.0,
-            "z": 1.0,
-        },
+        None,
         id="rbc_baseline",
     ),
     pytest.param(

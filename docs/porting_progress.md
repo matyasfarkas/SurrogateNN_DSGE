@@ -739,6 +739,21 @@ Python/JAX status:
 - upstream source-compatibility smoke now parses `42/43` checked `.jl` model files from `SurrogateNN_Estimation.jl`; the remaining `models/testqipf.jl` failure is intentionally kept explicit because it appears to contain an upstream typo (`1GAMM`) and should not be guessed away in the Python port
 - tests verify minimal syntax regressions for residual-only equations, multiline OBC equations, multiline parameter expressions with unknown function calls, unicode superscript identifiers, the broad upstream parse sweep, and the explicit `testqipf.jl` typo guard
 
+### 48. Heuristic steady-state warm starts for upstream source parity
+
+Julia reference:
+
+- upstream models that solve from raw source without hand-supplied steady-state seeds
+
+Python/JAX status:
+
+- the default steady-state filler guess is no longer a flat all-ones vector; unspecified steady-state entries now use a deterministic feasibility heuristic tuned for MacroModelling-style source nomenclature, with log-like states seeded at `0.0`, labour-like states at `0.3`, capital-like states at `10.0`, and main activity states such as consumption/output/investment at `1.2`
+- that heuristic now feeds both `solve_steady_state(...)` and high-level parsed-model helpers like `solve_first_order_model(...)`, including the existing JAX/NumPyro front ends when they delegate through the parsed steady-state path
+- the upstream compile-smoke fixtures `RBC_Dynare`, `FS2000`, `RBC_baseline`, `RBC_CME_calibration_equations_and_parameter_definitions_and_specfuns`, and `RBC_CME_calibration_equations_and_parameter_definitions_lead_lags` now solve and reach the compiled Kalman smoke path without any explicit manual steady-state guess
+- a broader raw-source sweep now solves `18/42` parse-compatible upstream `.jl` models at first order with no hand-supplied steady-state seed, up from `10/42` before the heuristic warm-start change
+- the damped Newton solver now also has a regularized normal-equation fallback when both the direct solve and the dense least-squares fallback fail, which hardens large-model steady-state steps against `SVD did not converge` failures
+- tests verify the new no-manual-guess compile smoke on the affected upstream fixtures and force the regularized Newton fallback path directly
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
