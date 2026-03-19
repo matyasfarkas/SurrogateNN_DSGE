@@ -57,9 +57,34 @@ def _loglikelihood_fixture():
     return model, first_order_result, observables, state_space, simulation, levels
 
 
+def _sorted_low_level_reference(
+    model,
+    first_order_result,
+    observables,
+    simulation,
+):
+    sorted_observables = tuple(sorted(observables))
+    row_lookup = {name: idx for idx, name in enumerate(observables)}
+    sorted_state_space = build_linear_state_space_from_model(
+        model,
+        sorted_observables,
+        first_order_result=first_order_result,
+    )
+    sorted_deviations = np.vstack(
+        [simulation.observations[row_lookup[name]] for name in sorted_observables]
+    )
+    return sorted_state_space, sorted_deviations
+
+
 def test_model_loglikelihood_matches_low_level_kalman_path() -> None:
-    model, first_order_result, observables, state_space, simulation, levels = (
+    model, first_order_result, observables, _, simulation, levels = (
         _loglikelihood_fixture()
+    )
+    sorted_state_space, sorted_deviations = _sorted_low_level_reference(
+        model,
+        first_order_result,
+        observables,
+        simulation,
     )
 
     high_level = kalman_loglikelihood_from_model(
@@ -68,7 +93,7 @@ def test_model_loglikelihood_matches_low_level_kalman_path() -> None:
         observables=observables,
         first_order_result=first_order_result,
     )
-    low_level = kalman_loglikelihood(state_space, simulation.observations)
+    low_level = kalman_loglikelihood(sorted_state_space, sorted_deviations)
 
     np.testing.assert_allclose(high_level, low_level, rtol=1e-10, atol=1e-10)
 
@@ -146,8 +171,14 @@ def test_model_loglikelihood_per_period_matches_total_and_failure_value() -> Non
 
 
 def test_model_loglikelihood_accepts_schur_qme_algorithm() -> None:
-    model, first_order_result, observables, state_space, simulation, levels = (
+    model, first_order_result, observables, _, simulation, levels = (
         _loglikelihood_fixture()
+    )
+    sorted_state_space, sorted_deviations = _sorted_low_level_reference(
+        model,
+        first_order_result,
+        observables,
+        simulation,
     )
 
     high_level = kalman_loglikelihood_from_model(
@@ -168,7 +199,31 @@ def test_model_loglikelihood_accepts_schur_qme_algorithm() -> None:
         observables=observables,
         first_order_result=explicit_first_order,
     )
-    low_level = kalman_loglikelihood(state_space, simulation.observations)
+    low_level = kalman_loglikelihood(sorted_state_space, sorted_deviations)
 
     np.testing.assert_allclose(high_level, explicit, rtol=1e-10, atol=1e-10)
     np.testing.assert_allclose(high_level, low_level, rtol=1e-10, atol=1e-10)
+
+
+def test_model_loglikelihood_sorts_array_observables_like_julia() -> None:
+    model, first_order_result, observables, _, simulation, levels = _loglikelihood_fixture()
+    sorted_state_space, sorted_deviations = _sorted_low_level_reference(
+        model,
+        first_order_result,
+        observables,
+        simulation,
+    )
+
+    high_level = kalman_loglikelihood_from_model(
+        model,
+        levels,
+        observables=observables,
+        first_order_result=first_order_result,
+    )
+
+    np.testing.assert_allclose(
+        high_level,
+        kalman_loglikelihood(sorted_state_space, sorted_deviations),
+        rtol=1e-10,
+        atol=1e-10,
+    )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import jax
@@ -7,6 +8,7 @@ import numpy as np
 import pytest
 
 from surrogatenn_dsge import (
+    kalman_loglikelihood_from_model,
     kalman_loglikelihood_from_model_jax,
     parse_macro_model,
     solve_first_order_model,
@@ -16,6 +18,7 @@ from surrogatenn_dsge import (
 _ROOT = Path(__file__).resolve().parents[2]
 _UPSTREAM_TEST_MODEL_DIR = _ROOT / "SurrogateNN_Estimation.jl" / "test" / "models"
 _UPSTREAM_MODEL_DIR = _ROOT / "SurrogateNN_Estimation.jl" / "models"
+_BENCHMARK_PAYLOAD_PATH = _ROOT / "SurrogateNN_DSGE" / "benchmarks" / "results" / "test_payloads.json"
 
 _RBC_STEADY_STATE_GUESS = {
     "A": 1.0,
@@ -239,3 +242,38 @@ def test_upstream_fixture_solves_first_order_and_compiled_kalman_with_schur(
 
     value = compiled(np.asarray(first_order_result.parameter_values, dtype=np.float64))
     assert np.isfinite(value)
+
+
+def test_hlt_kalman_loglikelihood_matches_julia_reference() -> None:
+    payload = json.loads(_BENCHMARK_PAYLOAD_PATH.read_text())
+    case = next(entry for entry in payload["cases"] if entry["name"] == "medium_sw07_hlt")
+    model = parse_macro_model(Path(case["model_path"]).read_text())
+
+    expected = -600.6439319278583
+    high_level = float(
+        kalman_loglikelihood_from_model(
+            model,
+            case["observations"],
+            observables=case["observables"],
+            steady_state=case["reference_steady_state"],
+            measurement_error_scale=0.0,
+            jitter=0.0,
+            on_failure_loglikelihood=-1e12,
+            qme_algorithm="schur",
+        )
+    )
+    compiled = float(
+        kalman_loglikelihood_from_model_jax(
+            model,
+            case["observations"],
+            observables=case["observables"],
+            steady_state=case["reference_steady_state"],
+            measurement_error_scale=0.0,
+            jitter=0.0,
+            on_failure_loglikelihood=-1e12,
+            qme_algorithm="schur",
+        )
+    )
+
+    np.testing.assert_allclose(high_level, expected, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(compiled, expected, rtol=1e-10, atol=1e-10)

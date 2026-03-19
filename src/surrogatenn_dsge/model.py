@@ -1718,7 +1718,7 @@ class MacroModel:
             observable_names = (
                 tuple(sorted(series_lookup))
                 if observables is None
-                else self._coerce_observable_names(observables)
+                else tuple(sorted(self._coerce_observable_names(observables)))
             )
             missing = tuple(name for name in observable_names if name not in series_lookup)
             if missing:
@@ -1759,7 +1759,8 @@ class MacroModel:
                 raise ValueError(
                     "observables must be provided when observations are array-like."
                 )
-            observable_names = self._coerce_observable_names(observables)
+            requested_names = self._coerce_observable_names(observables)
+            observable_names = tuple(sorted(requested_names))
             data = np.asarray(observations, dtype=np.float64)
             if data.ndim != 2:
                 raise ValueError(
@@ -1770,6 +1771,9 @@ class MacroModel:
                     "observations must have one row per observable, got "
                     f"{data.shape[0]} rows for {len(observable_names)} observables."
                 )
+            if observable_names != requested_names:
+                row_lookup = {name: idx for idx, name in enumerate(requested_names)}
+                data = data[[row_lookup[name] for name in observable_names], :]
 
         if not np.isfinite(data).all():
             raise ValueError("observations must contain only finite values.")
@@ -1858,13 +1862,14 @@ class MacroModel:
             steady_state,
             parameter_values=parameter_values,
         )
-        resolved_parameters = (
-            provided_parameters
-            if provided_parameters is not None
-            else np.asarray(
-                self.resolve_parameter_values(steady_state=full_steady_state),
-                dtype=np.float64,
-            )
+        resolved_parameters = np.asarray(
+            self.resolve_parameter_values(
+                parameter_values=provided_parameters,
+                steady_state=full_steady_state,
+                tol=steady_state_tol,
+                max_iter=steady_state_max_iter,
+            ),
+            dtype=np.float64,
         )
         if not self._parameter_values_within_bounds(resolved_parameters):
             return full_steady_state, None

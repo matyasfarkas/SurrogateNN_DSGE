@@ -75,16 +75,16 @@ def test_model_linear_gate_stats_from_shocks_matches_manual_first_order_rollout(
     )
 
     expected_e, expected_f = compute_gate_stat_series(
-        levels,
-        levels,
+        levels[[1, 0], :],
+        levels[[1, 0], :],
         shock_matrix,
-        np.asarray([0.1, 0.2], dtype=np.float64),
+        np.asarray([0.2, 0.1], dtype=np.float64),
         np.asarray([0.25, 0.5], dtype=np.float64),
     )
 
     np.testing.assert_allclose(
         result.linear_observations,
-        levels,
+        levels[[1, 0], :],
         rtol=1e-12,
         atol=1e-12,
     )

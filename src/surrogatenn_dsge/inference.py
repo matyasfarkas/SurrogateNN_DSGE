@@ -319,7 +319,16 @@ def kalman_loglikelihood_from_model_jax(
 
     def _valid_loglikelihood(parameters: jax.Array) -> jax.Array:
         if explicit_steady_state is not None:
-            return _loglikelihood_from_full_steady_state(explicit_steady_state, parameters)
+            resolved_parameters = model.resolve_parameter_values_jax(
+                parameter_values=parameters,
+                steady_state=explicit_steady_state,
+                tol=steady_state_tol,
+                max_iter=steady_state_max_iter,
+            )
+            return _loglikelihood_from_full_steady_state(
+                explicit_steady_state,
+                resolved_parameters,
+            )
 
         steady_state_result = model.solve_steady_state_jax(
             parameter_values=parameters,
@@ -331,7 +340,7 @@ def kalman_loglikelihood_from_model_jax(
             steady_state_result.converged,
             lambda result: _loglikelihood_from_full_steady_state(
                 result.steady_state,
-                parameters,
+                result.parameter_values,
             ),
             lambda _: failure_value,
             steady_state_result,
@@ -527,7 +536,16 @@ def switching_loglikelihood_from_model_jax(
 
     def _valid_loglikelihood(parameters: jax.Array) -> jax.Array:
         if explicit_steady_state is not None:
-            return _loglikelihood_from_full_steady_state(explicit_steady_state, parameters)
+            resolved_parameters = model.resolve_parameter_values_jax(
+                parameter_values=parameters,
+                steady_state=explicit_steady_state,
+                tol=steady_state_tol,
+                max_iter=steady_state_max_iter,
+            )
+            return _loglikelihood_from_full_steady_state(
+                explicit_steady_state,
+                resolved_parameters,
+            )
 
         steady_state_result = model.solve_steady_state_jax(
             parameter_values=parameters,
@@ -539,7 +557,7 @@ def switching_loglikelihood_from_model_jax(
             steady_state_result.converged,
             lambda result: _loglikelihood_from_full_steady_state(
                 result.steady_state,
-                parameters,
+                result.parameter_values,
             ),
             lambda _: failure_value,
             steady_state_result,
@@ -996,7 +1014,16 @@ def _estimate_observed_shocks_and_variables_matrix_model_jax(
 
     def _valid_paths(parameters: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         if explicit_steady_state is not None:
-            return _paths_from_full_steady_state(explicit_steady_state, parameters)
+            resolved_parameters = model.resolve_parameter_values_jax(
+                parameter_values=parameters,
+                steady_state=explicit_steady_state,
+                tol=steady_state_tol,
+                max_iter=steady_state_max_iter,
+            )
+            return _paths_from_full_steady_state(
+                explicit_steady_state,
+                resolved_parameters,
+            )
 
         steady_state_result = model.solve_steady_state_jax(
             parameter_values=parameters,
@@ -1008,7 +1035,7 @@ def _estimate_observed_shocks_and_variables_matrix_model_jax(
             steady_state_result.converged,
             lambda result: _paths_from_full_steady_state(
                 result.steady_state,
-                parameters,
+                result.parameter_values,
             ),
             _failure_result,
             steady_state_result,
@@ -1643,7 +1670,16 @@ def compute_linear_gate_stats_from_shocks_model_jax(
 
     def _valid_stats(parameters: jax.Array) -> LinearGateStatsResult:
         if explicit_steady_state is not None:
-            return _stats_from_full_steady_state(explicit_steady_state, parameters)
+            resolved_parameters = model.resolve_parameter_values_jax(
+                parameter_values=parameters,
+                steady_state=explicit_steady_state,
+                tol=steady_state_tol,
+                max_iter=steady_state_max_iter,
+            )
+            return _stats_from_full_steady_state(
+                explicit_steady_state,
+                resolved_parameters,
+            )
 
         steady_state_result = model.solve_steady_state_jax(
             parameter_values=parameters,
@@ -1655,7 +1691,7 @@ def compute_linear_gate_stats_from_shocks_model_jax(
             steady_state_result.converged,
             lambda result: _stats_from_full_steady_state(
                 result.steady_state,
-                parameters,
+                result.parameter_values,
             ),
             _failure_result,
             steady_state_result,
