@@ -100,7 +100,7 @@ def test_iterative_sylvester_algorithms_match_direct_solution() -> None:
     c = jnp.array([[0.8, 0.1], [0.2, 0.4]])
     direct = solve_discrete_sylvester_direct(a, b, c)
 
-    for algorithm in ("bicgstab", "gmres"):
+    for algorithm in ("bicgstab", "gmres", "dqgmres"):
         outcome = solve_discrete_sylvester(
             a,
             b,
@@ -130,7 +130,7 @@ def test_iterative_sylvester_falls_back_to_direct_when_cut_short() -> None:
         a,
         b,
         c,
-        algorithm="gmres",
+        algorithm="dqgmres",
         max_iter=1,
         tol=1e-30,
         fallback_to_direct=True,

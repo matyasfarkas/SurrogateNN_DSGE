@@ -129,7 +129,7 @@ def test_iterative_lyapunov_algorithms_converge() -> None:
     a = jnp.array([[0.2, 0.05], [0.0, 0.3]])
     c = jnp.array([[0.8, 0.1], [0.1, 0.4]])
 
-    for algorithm in ("bicgstab", "gmres"):
+    for algorithm in ("bicgstab", "gmres", "dqgmres"):
         outcome = solve_discrete_lyapunov(
             a,
             c,
@@ -150,7 +150,7 @@ def test_iterative_lyapunov_falls_back_to_direct_when_cut_short() -> None:
     outcome = solve_discrete_lyapunov(
         a,
         c,
-        algorithm="gmres",
+        algorithm="dqgmres",
         max_iter=1,
         tol=1e-30,
         fallback_to_direct=True,

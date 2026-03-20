@@ -811,13 +811,13 @@ Python/JAX status:
 - the steady-state and calibrated-parameter Newton path now has symbolic-Jacobian safety fallbacks plus restart heuristics on both the NumPy and JAX implementations, so non-finite default guesses and singular autodiff Jacobians no longer fail immediately on the compiled first-order path
 - when `@parameters ... symbolic = true`, the steady-state solver now also applies a conservative symbolic seeding pass that recursively substitutes uniquely solvable steady-state equations before Newton starts, on both the NumPy and JAX paths
 - the steady-state solver now also keeps a small nearest-parameter cache of converged solutions and reuses the closest cached steady state as the default guess on subsequent nearby solves, on both the NumPy and JAX paths
-- the Lyapunov layer now accepts the Julia-compatible algorithm names `bartels_stewart`, `bicgstab`, and `gmres`, with iterative fallback back to the existing dense direct solve when needed
-- the discrete Sylvester layer now accepts the Julia-compatible iterative algorithm names `bicgstab` and `gmres`, with parity against the dense direct solve and iterative fallback back to that direct solve when the Krylov path is cut short
+- the Lyapunov layer now accepts the Julia-compatible algorithm names `bartels_stewart`, `bicgstab`, `gmres`, and `dqgmres`, with iterative fallback back to the existing dense direct solve when needed; `dqgmres` is currently a compatibility alias onto the SciPy GMRES backend
+- the discrete Sylvester layer now accepts the Julia-compatible iterative algorithm names `bicgstab`, `gmres`, and `dqgmres`, with parity against the dense direct solve and iterative fallback back to that direct solve when the Krylov path is cut short; `dqgmres` is currently a compatibility alias onto the SciPy GMRES backend
 - tests cover parsed option capture, OBC runtime horizon routing, steady-state recovery from a non-finite default guess, nearest-solution steady-state cache reuse on both NumPy and JAX paths, Bartels-Stewart parity, iterative Lyapunov/Sylvester convergence, and iterative-to-direct fallback
 
 ## Explicit gaps
 
-- The Julia `:bartels_stewart` and `:dqgmres` Sylvester variants are not ported yet.
+- The Julia `:bartels_stewart` Sylvester variant is not ported yet, and `:dqgmres` is currently provided as a compatibility alias to the SciPy GMRES backend rather than as a distinct implementation.
 - The Julia QME `:schur` variant is now ported, but the JAX-facing primal solve is not fully GPU-native yet; until JAX exposes generalized `qz` / `ordqz`, the ordered-QZ step runs through SciPy on the host and only the reverse-mode derivative is native JAX.
 - The Python port now defaults public first-order workflows to `schur` for Julia parity, which means the default compiled JAX likelihood path also uses the host-callback ordered-QZ branch unless `qme_algorithm="doubling"` is requested explicitly.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.

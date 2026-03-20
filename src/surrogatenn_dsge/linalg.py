@@ -10,8 +10,15 @@ import scipy.linalg as scipy_linalg
 import scipy.sparse.linalg as scipy_sparse_linalg
 from jax import lax
 
-LyapunovAlgorithm = Literal["doubling", "direct", "bartels_stewart", "bicgstab", "gmres"]
-SylvesterAlgorithm = Literal["doubling", "direct", "bicgstab", "gmres"]
+LyapunovAlgorithm = Literal[
+    "doubling",
+    "direct",
+    "bartels_stewart",
+    "bicgstab",
+    "gmres",
+    "dqgmres",
+]
+SylvesterAlgorithm = Literal["doubling", "direct", "bicgstab", "gmres", "dqgmres"]
 
 
 class LyapunovResult(NamedTuple):
@@ -199,7 +206,7 @@ def _solve_discrete_lyapunov_iterative(
     a: Union[jax.Array, np.ndarray],
     c: Union[jax.Array, np.ndarray],
     *,
-    algorithm: Literal["bicgstab", "gmres"],
+    algorithm: Literal["bicgstab", "gmres", "dqgmres"],
     tol: float = 1e-14,
     acceptance_tol: float = 1e-12,
     max_iter: int = 500,
@@ -322,11 +329,18 @@ def solve_discrete_lyapunov(
     max_iter: int = 500,
     fallback_to_direct: bool = True,
 ) -> LyapunovOutcome:
-    if algorithm not in ("doubling", "direct", "bartels_stewart", "bicgstab", "gmres"):
+    if algorithm not in (
+        "doubling",
+        "direct",
+        "bartels_stewart",
+        "bicgstab",
+        "gmres",
+        "dqgmres",
+    ):
         raise ValueError(
             f"Unsupported Lyapunov algorithm {algorithm!r}. "
             "Supported algorithms are 'doubling', 'direct', 'bartels_stewart', "
-            "'bicgstab', and 'gmres'."
+            "'bicgstab', 'gmres', and 'dqgmres'."
         )
     _validate_finite_inputs(a, c)
 
@@ -344,7 +358,7 @@ def solve_discrete_lyapunov(
             c,
             acceptance_tol=acceptance_tol,
         )
-    elif algorithm in ("bicgstab", "gmres"):
+    elif algorithm in ("bicgstab", "gmres", "dqgmres"):
         result = _solve_discrete_lyapunov_iterative(
             a,
             c,
@@ -365,7 +379,7 @@ def solve_discrete_lyapunov(
 
     if (
         fallback_to_direct
-        and algorithm in ("doubling", "bicgstab", "gmres")
+        and algorithm in ("doubling", "bicgstab", "gmres", "dqgmres")
         and not bool(np.asarray(result.converged))
     ):
         direct_result = solve_discrete_lyapunov_direct(
@@ -510,7 +524,7 @@ def _solve_discrete_sylvester_iterative(
     b: Union[jax.Array, np.ndarray],
     c: Union[jax.Array, np.ndarray],
     *,
-    algorithm: Literal["bicgstab", "gmres"],
+    algorithm: Literal["bicgstab", "gmres", "dqgmres"],
     initial_guess: Optional[Union[jax.Array, np.ndarray]] = None,
     tol: float = 1e-14,
     acceptance_tol: float = 1e-10,
@@ -598,10 +612,11 @@ def solve_discrete_sylvester(
     max_iter: int = 500,
     fallback_to_direct: bool = True,
 ) -> SylvesterOutcome:
-    if algorithm not in ("doubling", "direct", "bicgstab", "gmres"):
+    if algorithm not in ("doubling", "direct", "bicgstab", "gmres", "dqgmres"):
         raise ValueError(
             f"Unsupported Sylvester algorithm {algorithm!r}. "
-            "Supported algorithms are 'doubling', 'direct', 'bicgstab', and 'gmres'."
+            "Supported algorithms are 'doubling', 'direct', 'bicgstab', "
+            "'gmres', and 'dqgmres'."
         )
     a_arr, b_arr, c_arr = _cast_sylvester_inputs(a, b, c)
     _validate_finite_sylvester_inputs(a_arr, b_arr, c_arr)
@@ -642,7 +657,7 @@ def solve_discrete_sylvester(
             acceptance_tol=acceptance_tol,
             max_iter=max_iter,
         )
-    elif algorithm in ("bicgstab", "gmres"):
+    elif algorithm in ("bicgstab", "gmres", "dqgmres"):
         result = _solve_discrete_sylvester_iterative(
             a_arr,
             b_arr,
@@ -667,7 +682,7 @@ def solve_discrete_sylvester(
 
     if (
         fallback_to_direct
-        and algorithm in ("doubling", "bicgstab", "gmres")
+        and algorithm in ("doubling", "bicgstab", "gmres", "dqgmres")
         and not bool(np.asarray(result.converged))
     ):
         direct_result = solve_discrete_sylvester_direct(

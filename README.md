@@ -16,9 +16,9 @@ Implemented:
 - discrete Lyapunov solver for `A X A^T + C = X`
 - JAX-native doubling kernel
 - JAX-native dense direct solver fallback
-- Julia-compatible Lyapunov algorithm names `bartels_stewart`, `bicgstab`, and `gmres`, with tested residual parity and direct fallback when the iterative path is cut short
+- Julia-compatible Lyapunov algorithm names `bartels_stewart`, `bicgstab`, `gmres`, and `dqgmres`, with tested residual parity and direct fallback when the iterative path is cut short; `dqgmres` is a compatibility alias routed to the SciPy GMRES backend
 - discrete Sylvester solver for `A X B + C = X`
-- Julia-compatible iterative Sylvester algorithm names `bicgstab` and `gmres`, with tested parity against the dense direct solve and direct fallback when the Krylov path is cut short
+- Julia-compatible iterative Sylvester algorithm names `bicgstab`, `gmres`, and `dqgmres`, with tested parity against the dense direct solve and direct fallback when the Krylov path is cut short; `dqgmres` is a compatibility alias routed to the SciPy GMRES backend
 - linear Gaussian state-space simulation, Kalman likelihood, filtering, and RTS smoothing
 - first-order inversion-filter likelihoods with per-period contributions and warmup support
 - parsed-model observable-name resolution and first-order state-space construction for Kalman estimation
