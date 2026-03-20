@@ -30,6 +30,7 @@ from .dsge import (
     SecondOrderStochasticSteadyStateResult,
     ThirdOrderDSGEResult,
     ThirdOrderStochasticSteadyStateResult,
+    first_order_state_update,
     rollout_first_order_solution,
     linear_state_space_from_first_order_solution,
     solve_first_order_dsge_solution,
@@ -192,6 +193,15 @@ class _JaxNewtonState(NamedTuple):
     converged: jax.Array
     done: jax.Array
     iterations: jax.Array
+
+
+class _FirstOrderOBCProjectionSpec(NamedTuple):
+    variable_name: str
+    variable_index: int
+    current_symbol: sp.Symbol
+    operator: str
+    left_expr: sp.Expr
+    right_expr: sp.Expr
 
 
 @dataclass(frozen=True)
@@ -451,6 +461,77 @@ class MacroModel:
     @cached_property
     def _obc_violation_matrix(self) -> sp.Matrix:
         return sp.Matrix(self._obc_violation_expressions)
+
+    @cached_property
+    def _first_order_obc_projection_specs(
+        self,
+    ) -> Optional[tuple[_FirstOrderOBCProjectionSpec, ...]]:
+        if not self.has_obc:
+            return ()
+        current_symbols = tuple(
+            self._dynamic_input_symbols[
+                self.timings.nFuture_not_past_and_mixed : (
+                    self.timings.nFuture_not_past_and_mixed + self.timings.nVars
+                )
+            ]
+        )
+        current_symbol_to_index = {
+            symbol: idx for idx, symbol in enumerate(current_symbols)
+        }
+        future_symbols = frozenset(
+            self._dynamic_input_symbols[: self.timings.nFuture_not_past_and_mixed]
+        )
+        specs: list[_FirstOrderOBCProjectionSpec] = []
+
+        for expr in self._dynamic_expressions:
+            obc_calls = _obc_calls_in_expression(expr)
+            if not obc_calls:
+                continue
+            if len(obc_calls) != 1:
+                return None
+            obc_call = obc_calls[0]
+            if len(obc_call.args) != 2:
+                return None
+            placeholder = sp.Symbol("__obc_projection_placeholder__", real=True)
+            try:
+                solutions = sp.solve(
+                    sp.Eq(expr.xreplace({obc_call: placeholder}), 0),
+                    placeholder,
+                )
+            except Exception:
+                return None
+            if len(solutions) != 1:
+                return None
+            solved_expr = sp.simplify(solutions[0])
+            if not isinstance(solved_expr, sp.Symbol):
+                return None
+            if solved_expr not in current_symbol_to_index:
+                return None
+            left_expr = sp.simplify(obc_call.args[0])
+            right_expr = sp.simplify(obc_call.args[1])
+            branch_symbols = left_expr.free_symbols | right_expr.free_symbols
+            if solved_expr in branch_symbols:
+                return None
+            if branch_symbols & future_symbols:
+                return None
+            variable_index = current_symbol_to_index[solved_expr]
+            specs.append(
+                _FirstOrderOBCProjectionSpec(
+                    variable_name=self.timings.var[variable_index],
+                    variable_index=variable_index,
+                    current_symbol=solved_expr,
+                    operator="max" if obc_call.func is sp.Max else "min",
+                    left_expr=left_expr,
+                    right_expr=right_expr,
+                )
+            )
+
+        if not specs:
+            return None
+        variable_indices = [spec.variable_index for spec in specs]
+        if len(set(variable_indices)) != len(variable_indices):
+            return None
+        return tuple(specs)
 
     def _coerce_parameter_values(
         self,
@@ -921,6 +1002,118 @@ class MacroModel:
                 f"{deviations.shape}, expected ({self.timings.nVars}, {periods})."
             )
         return deviations + steady_state[:, None]
+
+    def _project_first_order_obc_state(
+        self,
+        lag_state: Sequence[float],
+        current_state: Sequence[float],
+        shock: Sequence[float],
+        *,
+        parameter_values: Sequence[float],
+        steady_reference_values: Sequence[float],
+    ) -> np.ndarray:
+        specs = self._first_order_obc_projection_specs
+        if specs is None:
+            raise ValueError(
+                "The parsed OBC equations are not currently supported by the "
+                "dedicated first-order enforcement path."
+            )
+        projected = np.asarray(current_state, dtype=np.float64).copy()
+        lag = np.asarray(lag_state, dtype=np.float64)
+        shock_values = np.asarray(shock, dtype=np.float64)
+        params = np.asarray(parameter_values, dtype=np.float64)
+        steady_refs = np.asarray(steady_reference_values, dtype=np.float64)
+
+        for _ in range(max(1, len(specs) + 1)):
+            previous = projected.copy()
+            args = self._dynamic_input_args_from_context(
+                lag,
+                projected,
+                projected,
+                shock_values,
+                parameter_values=params,
+                steady_reference_values=steady_refs,
+            )
+            numeric_args = _coerce_symbolic_numeric_args(args)
+            symbol_values = {
+                symbol: value
+                for symbol, value in zip(self._dynamic_input_symbols, numeric_args)
+            }
+            for spec in specs:
+                left_value = _evaluate_obc_expression_value(spec.left_expr, symbol_values)
+                right_value = _evaluate_obc_expression_value(spec.right_expr, symbol_values)
+                target_value = (
+                    max(left_value, right_value)
+                    if spec.operator == "max"
+                    else min(left_value, right_value)
+                )
+                projected[spec.variable_index] = target_value
+                symbol_values[spec.current_symbol] = target_value
+            if np.allclose(projected, previous, rtol=0.0, atol=1e-12):
+                break
+        return projected
+
+    def _simulate_first_order_obc_path(
+        self,
+        shocks: np.ndarray,
+        *,
+        first_order_result: ParsedModelFirstOrderResult,
+        steady_state: np.ndarray,
+        initial_state: Optional[Sequence[float]] = None,
+    ) -> np.ndarray:
+        specs = self._first_order_obc_projection_specs
+        if specs is None:
+            raise ValueError(
+                "The parsed OBC equations are not currently supported by the "
+                "dedicated first-order enforcement path."
+            )
+        periods = shocks.shape[1]
+        initial_state_values = (
+            np.asarray(steady_state, dtype=np.float64)
+            if initial_state is None
+            else np.asarray(
+                self._coerce_dynamic_state_vector(initial_state, label="initial_state"),
+                dtype=np.float64,
+            )
+        )
+        state_indices = np.asarray(
+            self.timings.past_not_future_and_mixed_idx,
+            dtype=np.int64,
+        )
+        reduced_state = (
+            initial_state_values[state_indices] - steady_state[state_indices]
+        )
+        steady_refs = self._steady_reference_values(np.asarray(steady_state, dtype=np.float64))
+        parameter_values = np.asarray(first_order_result.parameter_values, dtype=np.float64)
+        solution_matrix = np.asarray(
+            first_order_result.solution.solution_matrix,
+            dtype=np.float64,
+        )
+        state_path = np.zeros((self.timings.nVars, periods), dtype=np.float64)
+        lag_state = np.asarray(initial_state_values, dtype=np.float64)
+
+        for period in range(periods):
+            deviation = np.asarray(
+                first_order_state_update(
+                    solution_matrix,
+                    self.timings,
+                    reduced_state,
+                    shocks[:, period],
+                ),
+                dtype=np.float64,
+            )
+            unconstrained_state = deviation + steady_state
+            constrained_state = self._project_first_order_obc_state(
+                lag_state,
+                unconstrained_state,
+                shocks[:, period],
+                parameter_values=parameter_values,
+                steady_reference_values=steady_refs,
+            )
+            state_path[:, period] = constrained_state
+            lag_state = constrained_state
+            reduced_state = constrained_state[state_indices] - steady_state[state_indices]
+        return state_path
 
     def _simulate_sep_path(
         self,
@@ -3313,8 +3506,18 @@ class MacroModel:
                 f"Unknown algorithm {algorithm!r}. "
                 "Use 'first_order' or 'stochastic_extended_path'."
             )
+        use_first_order_obc = (
+            algorithm_token == "first_order"
+            and self.has_obc
+            and not ignore_obc
+            and terminal_state is None
+            and self._first_order_obc_projection_specs is not None
+        )
         use_sep = algorithm_token in {"stochastic_extended_path", "sep"} or (
-            algorithm_token == "first_order" and self.has_obc and not ignore_obc
+            algorithm_token == "first_order"
+            and self.has_obc
+            and not ignore_obc
+            and not use_first_order_obc
         )
 
         if use_sep:
@@ -3359,12 +3562,20 @@ class MacroModel:
             )
             if parsed_result is None or full_steady_state is None:
                 raise ValueError("Could not prepare a converged first-order solution for simulation.")
-            state_path = self._simulate_first_order_path(
-                shock_matrix,
-                first_order_result=parsed_result,
-                steady_state=np.asarray(full_steady_state, dtype=np.float64),
-                initial_state=initial_state,
-            )
+            if use_first_order_obc:
+                state_path = self._simulate_first_order_obc_path(
+                    shock_matrix,
+                    first_order_result=parsed_result,
+                    steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                    initial_state=initial_state,
+                )
+            else:
+                state_path = self._simulate_first_order_path(
+                    shock_matrix,
+                    first_order_result=parsed_result,
+                    steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                    initial_state=initial_state,
+                )
             algorithm_used = "first_order"
             parameter_output = np.asarray(parsed_result.parameter_values, dtype=np.float64)
             steady_output = np.asarray(full_steady_state, dtype=np.float64)
@@ -3424,8 +3635,18 @@ class MacroModel:
                 f"Unknown algorithm {algorithm!r}. "
                 "Use 'first_order' or 'stochastic_extended_path'."
             )
+        use_first_order_obc = (
+            algorithm_token == "first_order"
+            and self.has_obc
+            and not ignore_obc
+            and terminal_state is None
+            and self._first_order_obc_projection_specs is not None
+        )
         use_sep = algorithm_token in {"stochastic_extended_path", "sep"} or (
-            algorithm_token == "first_order" and self.has_obc and not ignore_obc
+            algorithm_token == "first_order"
+            and self.has_obc
+            and not ignore_obc
+            and not use_first_order_obc
         )
 
         state_paths = np.zeros(
@@ -3477,12 +3698,20 @@ class MacroModel:
             if parsed_result is None or full_steady_state is None:
                 raise ValueError("Could not prepare a converged first-order solution for IRFs.")
             for scenario_idx in range(shock_scenarios.shape[2]):
-                state_paths[:, :, scenario_idx] = self._simulate_first_order_path(
-                    shock_scenarios[:, :, scenario_idx],
-                    first_order_result=parsed_result,
-                    steady_state=np.asarray(full_steady_state, dtype=np.float64),
-                    initial_state=initial_state,
-                )
+                if use_first_order_obc:
+                    state_paths[:, :, scenario_idx] = self._simulate_first_order_obc_path(
+                        shock_scenarios[:, :, scenario_idx],
+                        first_order_result=parsed_result,
+                        steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                        initial_state=initial_state,
+                    )
+                else:
+                    state_paths[:, :, scenario_idx] = self._simulate_first_order_path(
+                        shock_scenarios[:, :, scenario_idx],
+                        first_order_result=parsed_result,
+                        steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                        initial_state=initial_state,
+                    )
             parameter_output = np.asarray(parsed_result.parameter_values, dtype=np.float64)
             steady_output = np.asarray(full_steady_state, dtype=np.float64)
 

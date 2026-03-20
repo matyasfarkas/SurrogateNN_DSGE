@@ -27,7 +27,7 @@ def test_parser_records_model_and_parameter_options() -> None:
     assert model.default_initial_guess["r"] == 1.1
 
 
-def test_first_order_obc_runtime_uses_model_max_obc_horizon(monkeypatch) -> None:
+def test_first_order_obc_sep_fallback_uses_model_max_obc_horizon(monkeypatch) -> None:
     model = parse_macro_model(_OPTION_SOURCE)
     captured: list[tuple[int, int, int]] = []
 
@@ -50,6 +50,7 @@ def test_first_order_obc_runtime_uses_model_max_obc_horizon(monkeypatch) -> None
         periods=2,
         shocks={"eps": [0.1, 0.0]},
         algorithm="first_order",
+        terminal_state=[1.0],
         config=SEPConfig(periods=1),
     )
 

@@ -378,7 +378,7 @@ def test_simulate_model_supports_simulate_token_and_matches_irf_path() -> None:
     )
 
 
-def test_get_irf_routes_obc_models_through_sep_unless_ignored() -> None:
+def test_get_irf_enforces_supported_obc_models_with_dedicated_first_order_path() -> None:
     model = parse_macro_model(OBC_MAX_SOURCE)
 
     ignored = get_irf(
@@ -402,11 +402,50 @@ def test_get_irf_routes_obc_models_through_sep_unless_ignored() -> None:
         ignore_obc=False,
         config=SEPConfig(periods=3, branching_order=0, tol=1e-8),
     )
+    sep = get_irf(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks="eps_r",
+        shock_size=2.0,
+        negative_shock=True,
+        levels=True,
+        algorithm="sep",
+        ignore_obc=False,
+        config=SEPConfig(periods=3, branching_order=0, tol=1e-8),
+    )
 
     assert ignored.algorithm_used == "first_order"
-    assert enforced.algorithm_used == "stochastic_extended_path"
+    assert enforced.algorithm_used == "first_order"
+    assert sep.algorithm_used == "stochastic_extended_path"
     assert np.min(np.asarray(ignored.responses, dtype=np.float64)) < 1.0 - 1e-3
     assert np.all(np.asarray(enforced.responses, dtype=np.float64) >= 1.0 - 1e-8)
+    np.testing.assert_allclose(
+        np.asarray(enforced.responses, dtype=np.float64),
+        np.asarray(sep.responses, dtype=np.float64),
+        rtol=1e-8,
+        atol=1e-8,
+    )
+
+
+def test_get_irf_obc_requests_with_terminal_state_still_fall_back_to_sep() -> None:
+    model = parse_macro_model(OBC_MAX_SOURCE)
+
+    result = get_irf(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks="eps_r",
+        shock_size=2.0,
+        negative_shock=True,
+        levels=True,
+        ignore_obc=False,
+        terminal_state=[1.2, 1.2],
+        config=SEPConfig(periods=3, branching_order=0, tol=1e-8),
+    )
+
+    assert result.algorithm_used == "stochastic_extended_path"
+    assert np.all(np.asarray(result.responses, dtype=np.float64) >= 1.0 - 1e-8)
 
 
 def test_upstream_models_support_random_simulation_token() -> None:
