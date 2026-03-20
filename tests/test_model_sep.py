@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from surrogatenn_dsge import (
     SEPConfig,
@@ -10,6 +11,7 @@ from surrogatenn_dsge import (
     solve_stochastic_extended_path_model,
     solve_stochastic_extended_path_residual_expectation,
 )
+import surrogatenn_dsge.model as model_module
 
 
 NONLINEAR_SEP_SOURCE = """
@@ -113,3 +115,70 @@ def test_parsed_model_sep_hmc_backend_runs() -> None:
 
     assert solution.solution.converged
     assert np.all(np.isfinite(solution.solution.mean_path))
+
+
+def test_parsed_model_sep_builds_linear_first_order_warm_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = parse_macro_model(NONLINEAR_SEP_SOURCE)
+    captured: dict[str, object] = {}
+    original_solver = model_module.solve_stochastic_extended_path_residual_expectation
+
+    def wrapped_solver(*args: object, **kwargs: object):
+        captured["initial_guess"] = kwargs.get("initial_guess")
+        return original_solver(*args, **kwargs)
+
+    monkeypatch.setattr(
+        model_module,
+        "solve_stochastic_extended_path_residual_expectation",
+        wrapped_solver,
+    )
+
+    result = solve_stochastic_extended_path_model(
+        model,
+        config=SEPConfig(periods=3, branching_order=0, tol=1e-10),
+        deterministic_shocks={"u": [0.2, 0.0, 0.0]},
+    )
+
+    assert result.solution.converged
+    assert captured["initial_guess"] is not None
+    np.testing.assert_allclose(
+        np.asarray(captured["initial_guess"], dtype=np.float64).reshape(3),
+        np.asarray([0.2, 0.05, 0.0125], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_explicit_sep_initial_guess_overrides_linear_warm_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = parse_macro_model(NONLINEAR_SEP_SOURCE)
+    captured: dict[str, object] = {}
+    original_solver = model_module.solve_stochastic_extended_path_residual_expectation
+    explicit_guess = np.asarray([[0.7], [0.6], [0.5]], dtype=np.float64)
+
+    def wrapped_solver(*args: object, **kwargs: object):
+        captured["initial_guess"] = kwargs.get("initial_guess")
+        return original_solver(*args, **kwargs)
+
+    monkeypatch.setattr(
+        model_module,
+        "solve_stochastic_extended_path_residual_expectation",
+        wrapped_solver,
+    )
+
+    result = solve_stochastic_extended_path_model(
+        model,
+        config=SEPConfig(periods=3, branching_order=0, tol=1e-10),
+        deterministic_shocks={"u": [0.2, 0.0, 0.0]},
+        initial_guess=explicit_guess,
+    )
+
+    assert result.solution.converged
+    np.testing.assert_allclose(
+        np.asarray(captured["initial_guess"], dtype=np.float64),
+        explicit_guess,
+        rtol=0.0,
+        atol=0.0,
+    )

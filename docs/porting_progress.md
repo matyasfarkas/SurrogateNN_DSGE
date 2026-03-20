@@ -797,6 +797,19 @@ Python/JAX status:
 - focused runtime tests verify first-order parity against the deterministic SEP fallback on a synthetic `log(r[0]) = max(...)` model and verify implied OBC shock recovery on that transformed form
 - an upstream smoke regression now confirms that `models/Gali_2015_chapter_3_obc.jl` uses the dedicated first-order OBC runtime path under a small negative monetary shock instead of falling straight back to SEP
 
+### 52. Automatic first-order warm starts for parsed-model SEP
+
+Julia reference:
+
+- the upstream SEP/runtime surface prefers economically meaningful initial paths over a flat terminal-state stack, especially when deterministic shocks are present and SEP is used as the nonlinear fallback around OBC episodes
+
+Python/JAX status:
+
+- parsed-model SEP now automatically builds a deterministic first-order path guess when no explicit `initial_guess` is supplied
+- the warm start is constructed from the parsed Jacobian plus the first-order Schur solution, then replicated across the SEP tree structure so both direct parsed-model SEP calls and runtime SEP fallbacks start from a linear path instead of a flat terminal-state guess
+- explicit `initial_guess` still takes precedence and bypasses the automatic warm-start builder
+- focused tests verify that parsed-model SEP receives the expected linear warm start on a toy nonlinear model, that explicit warm starts override it, and that the broader SEP/runtime regressions still pass
+
 ### 30. Steady-state restarts, common macro options, OBC runtime horizon plumbing, and Lyapunov variants
 
 Julia reference:

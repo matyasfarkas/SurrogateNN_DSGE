@@ -1386,6 +1386,90 @@ class MacroModel:
             reduced_state = constrained_state[state_indices] - steady_state[state_indices]
         return _FirstOrderOBCSimulationResult(state_path=state_path, shocks=shock_matrix)
 
+    def _build_sep_linear_initial_guess(
+        self,
+        *,
+        parameter_values: np.ndarray,
+        steady_state: np.ndarray,
+        initial_state: np.ndarray,
+        deterministic_shocks: np.ndarray,
+        config: SEPConfig,
+    ) -> Optional[np.ndarray]:
+        try:
+            jacobian = self.calculate_jacobian(
+                parameter_values=parameter_values,
+                steady_state=steady_state,
+            )
+            first_order_solution = solve_first_order_dsge_solution(
+                jacobian,
+                self.timings,
+                qme_algorithm="schur",
+            )
+        except Exception:
+            return None
+        if not bool(np.asarray(first_order_solution.converged)):
+            return None
+
+        state_indices = np.asarray(
+            self.timings.past_not_future_and_mixed_idx,
+            dtype=np.int64,
+        )
+        initial_reduced_state = (
+            np.asarray(initial_state, dtype=np.float64)[state_indices]
+            - np.asarray(steady_state, dtype=np.float64)[state_indices]
+        )
+        shock_matrix = np.asarray(deterministic_shocks, dtype=np.float64)
+        if shock_matrix.shape == (config.periods, self.timings.nExo):
+            shock_matrix = shock_matrix.T
+        if shock_matrix.shape != (self.timings.nExo, config.periods):
+            return None
+        try:
+            linear_path = np.asarray(
+                rollout_first_order_solution(
+                    first_order_solution.solution_matrix,
+                    self.timings,
+                    shock_matrix,
+                    initial_reduced_state=initial_reduced_state,
+                ),
+                dtype=np.float64,
+            )
+        except Exception:
+            return None
+        if linear_path.shape != (self.timings.nVars, config.periods):
+            return None
+        if not np.isfinite(linear_path).all():
+            return None
+
+        if config.expectation_method == "hmc":
+            group_counts = tuple(1 for _ in range(config.periods + 1))
+        else:
+            rule = (
+                _gauss_hermite_sparse_rule(
+                    config.nnodes,
+                    self.timings.nExo,
+                    config.shock_scale,
+                )
+                if config.sparse_tree
+                else gauss_hermite_rule(
+                    config.nnodes,
+                    self.timings.nExo,
+                    config.shock_scale,
+                )
+            )
+            group_counts = _group_counts(
+                config.periods,
+                config.branching_order,
+                int(rule.weights.shape[0]),
+                sparse_tree=config.sparse_tree,
+            )
+
+        level_path = linear_path + np.asarray(steady_state, dtype=np.float64)[:, None]
+        guess_blocks = [
+            np.tile(level_path[:, period_idx], (group_counts[period_idx + 1], 1))
+            for period_idx in range(config.periods)
+        ]
+        return np.vstack(guess_blocks)
+
     def _simulate_sep_path(
         self,
         shocks: np.ndarray,
@@ -1421,6 +1505,13 @@ class MacroModel:
         runtime_config = config
         if runtime_config.periods != runtime_periods:
             runtime_config = dataclass_replace(runtime_config, periods=runtime_periods)
+        sep_initial_guess = self._build_sep_linear_initial_guess(
+            parameter_values=np.asarray(parameter_values, dtype=np.float64),
+            steady_state=np.asarray(steady_state, dtype=np.float64),
+            initial_state=np.asarray(initial_state_values, dtype=np.float64),
+            deterministic_shocks=np.asarray(runtime_shocks, dtype=np.float64),
+            config=runtime_config,
+        )
         sep_result = self.solve_stochastic_extended_path(
             parameter_values=parameter_values,
             steady_state=steady_state,
@@ -1428,6 +1519,7 @@ class MacroModel:
             terminal_state=terminal_state_values,
             config=runtime_config,
             deterministic_shocks=runtime_shocks,
+            initial_guess=sep_initial_guess,
         )
         if not sep_result.solution.converged:
             raise ValueError("Stochastic extended path solve did not converge.")
@@ -4689,6 +4781,16 @@ class MacroModel:
                 steady_reference_values=steady_reference_values,
             )
 
+        sep_initial_guess = initial_guess
+        if sep_initial_guess is None:
+            sep_initial_guess = self._build_sep_linear_initial_guess(
+                parameter_values=np.asarray(resolved_parameters, dtype=np.float64),
+                steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                initial_state=np.asarray(initial_state_values, dtype=np.float64),
+                deterministic_shocks=np.asarray(deterministic_shock_values, dtype=np.float64),
+                config=effective_config,
+            )
+
         solution = solve_stochastic_extended_path_residual_expectation(
             conditional_residual,
             initial_state=initial_state_values,
@@ -4696,7 +4798,7 @@ class MacroModel:
             shock_dim=self.timings.nExo,
             config=effective_config,
             deterministic_shocks=deterministic_shock_values,
-            initial_guess=initial_guess,
+            initial_guess=sep_initial_guess,
             jacobian_fn=sep_jacobian_fn,
         )
 

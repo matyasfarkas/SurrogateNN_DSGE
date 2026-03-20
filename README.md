@@ -77,6 +77,7 @@ Implemented:
 - generic callback-based stochastic extended path solver with Gauss-Hermite branching
 - sparse fishbone stochastic extended path branching for callback-based and parsed-model SEP solves, including real `sep_sparse_tree` runtime support in the inversion bridge
 - adaptive Levenberg-Marquardt damping, explicit SEP config validation, and checked warm-start support for more robust nonlinear SEP solves
+- automatic first-order linear-path warm starts for parsed-model SEP solves and deterministic SEP runtime fallbacks, with explicit `initial_guess` still taking precedence
 - HMC expectation backend for both SEP callback APIs, including parsed-model SEP solves and optional parallel tempering
 - parsed-model stochastic extended path solve path with JAX dynamic residual evaluation and residual-expectation averaging over future branches
 - focused tests for residuals, symmetry, fallback behavior, JIT, autodiff, parser parity, inversion filtering, switching likelihoods, gate calibration, and multi-model JAX compile smoke across upstream model files
