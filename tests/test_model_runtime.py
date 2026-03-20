@@ -52,6 +52,34 @@ end
 """
 
 
+OBC_LOG_SOURCE = """
+@model obc_log begin
+    log(r[0]) = max(log(r_star[0]), log(zlb))
+    log(r_star[0]) = rho * log(r_star[-1]) + (1-rho) * log(mu) + eps_r[x]
+end
+
+@parameters obc_log begin
+    rho = 0.8
+    mu = 1.2
+    zlb = 1.0
+end
+"""
+
+
+OBC_LOG_AUX_SHOCK_SOURCE = """
+@model obc_log_aux_shock begin
+    log(r[0]) = max(log(r_star[0]) + eps_zlbᵒᵇᶜ[x], log(zlb))
+    log(r_star[0]) = rho * log(r_star[-1]) + (1-rho) * log(mu) + eps_r[x]
+end
+
+@parameters obc_log_aux_shock begin
+    rho = 0.8
+    mu = 1.2
+    zlb = 1.0
+end
+"""
+
+
 SIMULATE_TOKEN_SOURCE = """
 @model simulate_token begin
     y[0] = rho * y[-1] + eps_y[x] + eps_auxᵒᵇᶜ[x]
@@ -129,6 +157,34 @@ _RUNTIME_SMOKE_MODELS = (
         id="rbc_baseline",
     ),
 )
+
+
+_GALI_OBC_PATH = _UPSTREAM_MODEL_DIR / "Gali_2015_chapter_3_obc.jl"
+_GALI_OBC_STEADY_STATE_GUESS = {
+    "R": 1.01,
+    "Q": 0.99,
+    "realinterest": 1.0,
+    "Pi": 1.0,
+    "Pi_star": 1.0,
+    "C": 1.0,
+    "Y": 1.0,
+    "N": 0.3,
+    "S": 1.0,
+    "A": 1.0,
+    "Z": 1.0,
+    "nu": 0.0,
+    "MC": 1.0,
+    "W_real": 1.0,
+    "x_aux_1": 1.0,
+    "x_aux_2": 1.0,
+    "log_y": 0.0,
+    "log_W_real": 0.0,
+    "log_N": -1.2,
+    "pi_ann": 0.0,
+    "i_ann": 0.0,
+    "r_real_ann": 0.0,
+    "M_real": 1.0,
+}
 
 
 def test_get_irf_first_order_matches_closed_form_linear_response() -> None:
@@ -538,6 +594,67 @@ def test_get_irf_supported_obc_path_recovers_implied_obc_shocks() -> None:
     )
 
 
+def test_get_irf_supports_log_obc_constraints_with_first_order_path() -> None:
+    model = parse_macro_model(OBC_LOG_SOURCE)
+
+    enforced = get_irf(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks="eps_r",
+        shock_size=0.3,
+        negative_shock=True,
+        levels=True,
+        ignore_obc=False,
+    )
+    sep = get_irf(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks="eps_r",
+        shock_size=0.3,
+        negative_shock=True,
+        levels=True,
+        algorithm="sep",
+        ignore_obc=False,
+        config=SEPConfig(periods=3, branching_order=0, tol=1e-8),
+    )
+
+    assert enforced.algorithm_used == "first_order"
+    assert np.all(np.asarray(enforced.responses, dtype=np.float64) >= 1.0 - 1e-8)
+    np.testing.assert_allclose(
+        np.asarray(enforced.responses, dtype=np.float64),
+        np.asarray(sep.responses, dtype=np.float64),
+        rtol=1e-8,
+        atol=1e-8,
+    )
+
+
+def test_get_irf_recovers_implied_obc_shocks_for_log_constraints() -> None:
+    model = parse_macro_model(OBC_LOG_AUX_SHOCK_SOURCE)
+
+    enforced = get_irf(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks="eps_r",
+        shock_size=0.3,
+        negative_shock=True,
+        levels=True,
+        ignore_obc=False,
+    )
+
+    obc_index = model.timings.exo.index("eps_zlbᵒᵇᶜ")
+    assert enforced.algorithm_used == "first_order"
+    assert np.all(np.asarray(enforced.responses, dtype=np.float64) >= 1.0 - 1e-8)
+    np.testing.assert_allclose(
+        np.asarray(enforced.shocks, dtype=np.float64)[obc_index, 0, 0],
+        2.0 / 15.0,
+        rtol=0.0,
+        atol=1e-10,
+    )
+
+
 def test_simulate_model_ignore_obc_is_overridden_when_obc_shocks_are_present() -> None:
     model = parse_macro_model(OBC_AUX_SHOCK_SOURCE)
 
@@ -668,3 +785,23 @@ def test_upstream_models_support_irf_and_simulation_runtime_helpers(
     assert np.all(np.isfinite(np.asarray(sim.data, dtype=np.float64)))
     assert np.all(np.isfinite(np.asarray(random_sim.data, dtype=np.float64)))
     assert np.all(np.isfinite(np.asarray(random_sim.shocks, dtype=np.float64)))
+
+
+def test_upstream_gali_obc_uses_dedicated_first_order_runtime_path() -> None:
+    model = parse_macro_model(_GALI_OBC_PATH.read_text())
+
+    result = get_irf(
+        model,
+        periods=3,
+        variables=("R",),
+        shocks="eps_nu",
+        shock_size=0.01,
+        negative_shock=True,
+        levels=True,
+        ignore_obc=False,
+        steady_state_initial_guess=_GALI_OBC_STEADY_STATE_GUESS,
+        config=SEPConfig(periods=3, branching_order=0, tol=1e-8),
+    )
+
+    assert result.algorithm_used == "first_order"
+    assert np.all(np.isfinite(np.asarray(result.responses, dtype=np.float64)))

@@ -202,6 +202,8 @@ class _FirstOrderOBCProjectionSpec(NamedTuple):
     operator: str
     left_expr: sp.Expr
     right_expr: sp.Expr
+    target_symbol: sp.Symbol
+    inverse_expr: sp.Expr
 
 
 class _FirstOrderOBCSimulationResult(NamedTuple):
@@ -526,6 +528,7 @@ class MacroModel:
         current_symbol_to_index = {
             symbol: idx for idx, symbol in enumerate(current_symbols)
         }
+        current_symbol_set = frozenset(current_symbols)
         future_symbols = frozenset(
             self._dynamic_input_symbols[: self.timings.nFuture_not_past_and_mixed]
         )
@@ -551,26 +554,53 @@ class MacroModel:
             if len(solutions) != 1:
                 return None
             solved_expr = sp.simplify(solutions[0])
-            if not isinstance(solved_expr, sp.Symbol):
+            solved_symbols = solved_expr.free_symbols
+            current_symbols_in_solution = tuple(
+                symbol for symbol in current_symbols if symbol in solved_symbols
+            )
+            if len(current_symbols_in_solution) != 1:
                 return None
-            if solved_expr not in current_symbol_to_index:
+            current_symbol = current_symbols_in_solution[0]
+            if solved_symbols & future_symbols:
+                return None
+            if solved_symbols & (current_symbol_set - {current_symbol}):
+                return None
+            target_symbol = sp.Symbol("__obc_projection_target__", real=True)
+            try:
+                inverse_solutions = sp.solve(
+                    sp.Eq(solved_expr, target_symbol),
+                    current_symbol,
+                )
+            except Exception:
+                return None
+            if len(inverse_solutions) != 1:
+                return None
+            inverse_expr = sp.simplify(inverse_solutions[0])
+            inverse_symbols = inverse_expr.free_symbols - {target_symbol}
+            if current_symbol in inverse_symbols:
+                return None
+            if inverse_symbols & future_symbols:
+                return None
+            if inverse_symbols & (current_symbol_set - {current_symbol}):
                 return None
             left_expr = sp.simplify(obc_call.args[0])
             right_expr = sp.simplify(obc_call.args[1])
             branch_symbols = left_expr.free_symbols | right_expr.free_symbols
-            if solved_expr in branch_symbols:
+            if current_symbol in branch_symbols:
                 return None
             if branch_symbols & future_symbols:
                 return None
-            variable_index = current_symbol_to_index[solved_expr]
+            variable_index = current_symbol_to_index[current_symbol]
             specs.append(
                 _FirstOrderOBCProjectionSpec(
                     variable_name=self.timings.var[variable_index],
                     variable_index=variable_index,
-                    current_symbol=solved_expr,
+                    current_symbol=current_symbol,
                     operator="max" if obc_call.func is sp.Max else "min",
                     left_expr=left_expr,
                     right_expr=right_expr,
+                    target_symbol=target_symbol,
+                    inverse_expr=inverse_expr,
                 )
             )
 
@@ -1214,8 +1244,15 @@ class MacroModel:
                     if spec.operator == "max"
                     else min(left_value, right_value)
                 )
-                projected[spec.variable_index] = target_value
-                symbol_values[spec.current_symbol] = target_value
+                projected_value = _evaluate_obc_expression_value(
+                    spec.inverse_expr,
+                    {
+                        **symbol_values,
+                        spec.target_symbol: target_value,
+                    },
+                )
+                projected[spec.variable_index] = projected_value
+                symbol_values[spec.current_symbol] = projected_value
             if np.allclose(projected, previous, rtol=0.0, atol=1e-12):
                 break
         return projected

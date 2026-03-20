@@ -783,6 +783,20 @@ Python/JAX status:
 - raw `models/QIPF/testttfmodel_ttf_minimum.jl` now parses successfully, with finite `SS_U` and `SS_U_ST` values under `sigma = 1`
 - tests cover synthetic tail-`if` and tail-`if`/`else` overrides plus the upstream QIPF minimum source file
 
+### 51. First-order OBC runtime support for monotone transformed constraints
+
+Julia reference:
+
+- `src/MacroModelling.jl` OBC runtime surface exercised by models such as `models/Gali_2015_chapter_3_obc.jl` and `models/Smets_Wouters_2003_obc.jl`, where the occasionally binding constraint is written on `log(R[0])` rather than directly on `R[0]`
+
+Python/JAX status:
+
+- the dedicated first-order parsed-model OBC runtime path no longer requires the constrained side of the equation to be a bare current variable
+- it now supports equations where the binding object is a monotone transform of a single current variable, such as `log(R[0]) = max(...)`, by symbolically inverting that transform before projecting the constrained state
+- the same path still recovers implied OBC shock sequences when explicit OBC shock channels are present, now also for transformed constraints
+- focused runtime tests verify first-order parity against the deterministic SEP fallback on a synthetic `log(r[0]) = max(...)` model and verify implied OBC shock recovery on that transformed form
+- an upstream smoke regression now confirms that `models/Gali_2015_chapter_3_obc.jl` uses the dedicated first-order OBC runtime path under a small negative monetary shock instead of falling straight back to SEP
+
 ### 30. Steady-state restarts, common macro options, OBC runtime horizon plumbing, and Lyapunov variants
 
 Julia reference:
@@ -810,8 +824,8 @@ Python/JAX status:
 - The current `algorithm="direct"` Lyapunov fallback is still a direct Kronecker solve even though the separate `algorithm="bartels_stewart"` path is now implemented.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
 - The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess`, bounds, `silent`, `symbolic`, `perturbation_order`, and the common `simplify` / `verbose` options.
-- The current parsed front end now supports basic `max` / `min` OBC syntax, branch-frozen linearization around the active steady-state branch, parsed-model OBC violation diagnostics, and a dedicated first-order enforcement path for simple direct `max` / `min` equations, but the Julia-specific enforcement layer around kinks, including explicit OBC shock-sequence optimization, subdifferential Newton options, and the broader OBC runtime surface, is still unported.
-- Parsed-model `get_irf` and `simulate_model` are now available, including Julia-style `shocks = :simulate` random-shock semantics, grouped nested runtime name selections, and the main selector tokens `:all_excluding_obc` / `:all_excluding_auxiliary_and_obc`, but the full Julia runtime surface is still broader because general first-order OBC enforcement still falls back to deterministic SEP outside the newly supported direct-constraint subset.
+- The current parsed front end now supports basic `max` / `min` OBC syntax, branch-frozen linearization around the active steady-state branch, parsed-model OBC violation diagnostics, and a dedicated first-order enforcement path for direct and simple monotone-transformed current-variable `max` / `min` equations, but the Julia-specific enforcement layer around kinks, including explicit OBC shock-sequence optimization, subdifferential Newton options, and the broader OBC runtime surface, is still unported.
+- Parsed-model `get_irf` and `simulate_model` are now available, including Julia-style `shocks = :simulate` random-shock semantics, grouped nested runtime name selections, and the main selector tokens `:all_excluding_obc` / `:all_excluding_auxiliary_and_obc`, but the full Julia runtime surface is still broader because general first-order OBC enforcement still falls back to deterministic SEP outside the newly supported direct / monotone-transformed subset.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The switching layer now has compiled first-order likelihoods, supplied-shock gate statistics, first-order filter reconstruction, filter-derived gate construction, and automatic filter-gated NumPyro wrappers. The remaining gaps are the broader higher-order/nonlinear switching-estimation harness and the older concrete helper surface in `model.py`, not the core first-order switching-order path itself.
