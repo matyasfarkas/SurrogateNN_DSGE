@@ -727,6 +727,42 @@ class MacroModel:
             raise ValueError(f"Missing steady-state reference value for `{name}`.")
         return refs
 
+    @cached_property
+    def _obc_shock_indices(self) -> np.ndarray:
+        return np.asarray(
+            [idx for idx, name in enumerate(self.timings.exo) if "ᵒᵇᶜ" in str(name)],
+            dtype=np.int64,
+        )
+
+    def _obc_shocks_included(
+        self,
+        shocks: np.ndarray,
+        *,
+        tol: float = 1e-10,
+    ) -> bool:
+        if not self.has_obc or self._obc_shock_indices.size == 0:
+            return False
+        shock_values = np.asarray(shocks, dtype=np.float64)
+        if shock_values.ndim not in {2, 3}:
+            raise ValueError(
+                "shocks must be rank-2 or rank-3 for OBC shock detection, "
+                f"got shape {shock_values.shape}."
+            )
+        relevant = shock_values[self._obc_shock_indices]
+        return bool(relevant.size and np.max(np.abs(relevant)) > tol)
+
+    def _effective_ignore_obc_flag(
+        self,
+        shocks: np.ndarray,
+        *,
+        ignore_obc: bool,
+    ) -> bool:
+        if not self.has_obc or not ignore_obc:
+            return False
+        if self._obc_shocks_included(shocks):
+            return False
+        return True
+
     def _steady_reference_values_jax(
         self,
         full_steady_state: Sequence[float],
@@ -3499,6 +3535,10 @@ class MacroModel:
             shock_size=shock_size,
             random_seed=random_seed,
         )
+        effective_ignore_obc = self._effective_ignore_obc_flag(
+            shock_matrix,
+            ignore_obc=ignore_obc,
+        )
 
         algorithm_token = algorithm.lower()
         if algorithm_token not in {"first_order", "stochastic_extended_path", "sep"}:
@@ -3509,14 +3549,14 @@ class MacroModel:
         use_first_order_obc = (
             algorithm_token == "first_order"
             and self.has_obc
-            and not ignore_obc
+            and not effective_ignore_obc
             and terminal_state is None
             and self._first_order_obc_projection_specs is not None
         )
         use_sep = algorithm_token in {"stochastic_extended_path", "sep"} or (
             algorithm_token == "first_order"
             and self.has_obc
-            and not ignore_obc
+            and not effective_ignore_obc
             and not use_first_order_obc
         )
 
@@ -3628,6 +3668,10 @@ class MacroModel:
             negative_shock=negative_shock,
             random_seed=random_seed,
         )
+        effective_ignore_obc = self._effective_ignore_obc_flag(
+            shock_scenarios,
+            ignore_obc=ignore_obc,
+        )
 
         algorithm_token = algorithm.lower()
         if algorithm_token not in {"first_order", "stochastic_extended_path", "sep"}:
@@ -3638,14 +3682,14 @@ class MacroModel:
         use_first_order_obc = (
             algorithm_token == "first_order"
             and self.has_obc
-            and not ignore_obc
+            and not effective_ignore_obc
             and terminal_state is None
             and self._first_order_obc_projection_specs is not None
         )
         use_sep = algorithm_token in {"stochastic_extended_path", "sep"} or (
             algorithm_token == "first_order"
             and self.has_obc
-            and not ignore_obc
+            and not effective_ignore_obc
             and not use_first_order_obc
         )
 

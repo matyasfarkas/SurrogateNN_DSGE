@@ -38,6 +38,20 @@ end
 """
 
 
+OBC_AUX_SHOCK_SOURCE = """
+@model obc_aux_shock begin
+    r[0] = max(r_star[0] + eps_zlbᵒᵇᶜ[x], zlb)
+    r_star[0] = rho * r_star[-1] + (1-rho) * mu + eps_r[x]
+end
+
+@parameters obc_aux_shock begin
+    rho = 0.8
+    mu = 1.2
+    zlb = 1.0
+end
+"""
+
+
 SIMULATE_TOKEN_SOURCE = """
 @model simulate_token begin
     y[0] = rho * y[-1] + eps_y[x] + eps_auxᵒᵇᶜ[x]
@@ -446,6 +460,70 @@ def test_get_irf_obc_requests_with_terminal_state_still_fall_back_to_sep() -> No
 
     assert result.algorithm_used == "stochastic_extended_path"
     assert np.all(np.asarray(result.responses, dtype=np.float64) >= 1.0 - 1e-8)
+
+
+def test_get_irf_ignore_obc_is_overridden_when_obc_shocks_are_selected() -> None:
+    model = parse_macro_model(OBC_AUX_SHOCK_SOURCE)
+
+    ignored = get_irf(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks="eps_zlbᵒᵇᶜ",
+        shock_size=2.0,
+        negative_shock=True,
+        levels=True,
+        ignore_obc=True,
+    )
+    enforced = get_irf(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks="eps_zlbᵒᵇᶜ",
+        shock_size=2.0,
+        negative_shock=True,
+        levels=True,
+        ignore_obc=False,
+    )
+
+    assert ignored.algorithm_used == "first_order"
+    np.testing.assert_allclose(
+        np.asarray(ignored.responses, dtype=np.float64),
+        np.asarray(enforced.responses, dtype=np.float64),
+        rtol=1e-8,
+        atol=1e-8,
+    )
+    assert np.all(np.asarray(ignored.responses, dtype=np.float64) >= 1.0 - 1e-8)
+
+
+def test_simulate_model_ignore_obc_is_overridden_when_obc_shocks_are_present() -> None:
+    model = parse_macro_model(OBC_AUX_SHOCK_SOURCE)
+
+    ignored = simulate_model(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks={"eps_zlbᵒᵇᶜ": [-2.0, 0.0, 0.0]},
+        levels=True,
+        ignore_obc=True,
+    )
+    enforced = simulate_model(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks={"eps_zlbᵒᵇᶜ": [-2.0, 0.0, 0.0]},
+        levels=True,
+        ignore_obc=False,
+    )
+
+    assert ignored.algorithm_used == "first_order"
+    np.testing.assert_allclose(
+        np.asarray(ignored.data, dtype=np.float64),
+        np.asarray(enforced.data, dtype=np.float64),
+        rtol=1e-8,
+        atol=1e-8,
+    )
+    assert np.all(np.asarray(ignored.data, dtype=np.float64) >= 1.0 - 1e-8)
 
 
 def test_upstream_models_support_random_simulation_token() -> None:
