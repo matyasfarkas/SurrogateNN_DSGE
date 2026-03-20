@@ -62,7 +62,7 @@ Implemented:
 - lazy symbolic matrix construction and cached `sympy.lambdify` compilation for parsed models, so large MacroModelling-style sources parse without eagerly compiling every derivative object
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
 - damped Newton non-stochastic steady-state solver
-- steady-state and calibrated-parameter Newton restart heuristics plus finite-difference Jacobian fallback for non-finite/singular symbolic starts, which materially improves raw-source solve robustness on hard steady states
+- steady-state and calibrated-parameter Newton restart heuristics plus finite-difference Jacobian fallback on both the NumPy and JAX paths, so compiled first-order estimation no longer fails immediately on non-finite default guesses or singular autodiff Jacobians
 - calibrated-parameter resolution from either the joint steady-state solve or a supplied steady state
 - first-order DSGE perturbation solver with Julia `RBC_CME` fixture coverage
 - second-order DSGE perturbation solver with Julia-compatible compression matrices and Sylvester solve

@@ -793,7 +793,7 @@ Python/JAX status:
 
 - parsed `@model` and `@parameters` options now record the common upstream directives `max_obc_horizon`, `simplify`, and `verbose` instead of silently dropping them
 - first-order OBC runtime requests now preserve user SEP horizons and also respect `max_obc_horizon` as a lower bound, with zero-padded deterministic shocks when the runtime SEP horizon exceeds the requested output horizon
-- the steady-state and calibrated-parameter Newton path now has symbolic-Jacobian safety fallbacks plus restart heuristics, so non-finite default guesses and singular symbolic Jacobians no longer fail immediately on the NumPy path
+- the steady-state and calibrated-parameter Newton path now has symbolic-Jacobian safety fallbacks plus restart heuristics on both the NumPy and JAX implementations, so non-finite default guesses and singular autodiff Jacobians no longer fail immediately on the compiled first-order path
 - the Lyapunov layer now accepts the Julia-compatible algorithm names `bartels_stewart`, `bicgstab`, and `gmres`, with iterative fallback back to the existing dense direct solve when needed
 - tests cover parsed option capture, OBC runtime horizon routing, steady-state recovery from a non-finite default guess, Bartels-Stewart parity, iterative Lyapunov convergence, and iterative-to-direct fallback
 

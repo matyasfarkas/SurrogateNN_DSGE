@@ -1451,10 +1451,14 @@ class MacroModel:
                     ]
                 )
 
-        resolved, _, _, _ = _solve_newton_system_jax(
+        resolved, _, _, _ = _solve_newton_system_jax_with_restarts(
             parameters,
             residual_fn=residual_fn,
-            jacobian_fn=jax.jacrev(residual_fn),
+            jacobian_fn=_make_safe_jacobian_fn_jax(
+                residual_fn,
+                jax.jacrev(residual_fn),
+            ),
+            default_guess=parameters,
             lower_bounds=lower_bounds,
             upper_bounds=upper_bounds,
             tol=tol,
@@ -1598,10 +1602,22 @@ class MacroModel:
                     dtype=jnp.float64,
                 ).reshape(-1)
 
-            solution, converged, iterations, residual_norm = _solve_newton_system_jax(
+            solution, converged, iterations, residual_norm = _solve_newton_system_jax_with_restarts(
                 joint_initial,
                 residual_fn=residual_fn,
-                jacobian_fn=jax.jacrev(residual_fn),
+                jacobian_fn=_make_safe_jacobian_fn_jax(
+                    residual_fn,
+                    jax.jacrev(residual_fn),
+                ),
+                default_guess=jnp.concatenate(
+                    [
+                        jnp.asarray(
+                            self._coerce_steady_state_guess(None),
+                            dtype=jnp.float64,
+                        ),
+                        initial_parameters,
+                    ]
+                ),
                 lower_bounds=lower_bounds,
                 upper_bounds=upper_bounds,
                 tol=tol,
@@ -1624,10 +1640,17 @@ class MacroModel:
                     dtype=jnp.float64,
                 ).reshape(-1)
 
-            base_steady_state, converged, iterations, residual_norm = _solve_newton_system_jax(
+            base_steady_state, converged, iterations, residual_norm = _solve_newton_system_jax_with_restarts(
                 guess,
                 residual_fn=residual_fn,
-                jacobian_fn=jax.jacrev(residual_fn),
+                jacobian_fn=_make_safe_jacobian_fn_jax(
+                    residual_fn,
+                    jax.jacrev(residual_fn),
+                ),
+                default_guess=jnp.asarray(
+                    self._coerce_steady_state_guess(None),
+                    dtype=jnp.float64,
+                ),
                 lower_bounds=self._bounds_vector(self.steady_state_names)[0],
                 upper_bounds=self._bounds_vector(self.steady_state_names)[1],
                 tol=tol,
@@ -5750,6 +5773,67 @@ def _make_safe_jacobian_fn(
     return jacobian_fn
 
 
+def _finite_difference_jacobian_jax(
+    residual_fn: object,
+    x: Sequence[float],
+    *,
+    step_scale: float = 1e-6,
+) -> jax.Array:
+    point = jnp.asarray(x, dtype=jnp.float64)
+    base = jnp.asarray(residual_fn(point), dtype=jnp.float64).reshape(-1)
+    steps = step_scale * jnp.maximum(1.0, jnp.abs(point))
+
+    def _column(idx: int) -> jax.Array:
+        step = steps[idx]
+        basis = jax.nn.one_hot(idx, point.shape[0], dtype=point.dtype)
+        forward = point + step * basis
+        backward = point - step * basis
+        forward_residual = jnp.asarray(
+            residual_fn(forward),
+            dtype=jnp.float64,
+        ).reshape(-1)
+        backward_residual = jnp.asarray(
+            residual_fn(backward),
+            dtype=jnp.float64,
+        ).reshape(-1)
+        forward_finite = jnp.all(jnp.isfinite(forward_residual))
+        backward_finite = jnp.all(jnp.isfinite(backward_residual))
+        central = (forward_residual - backward_residual) / (2.0 * step)
+        forward_only = (forward_residual - base) / step
+        backward_only = (base - backward_residual) / step
+        return jnp.where(
+            forward_finite & backward_finite,
+            central,
+            jnp.where(
+                forward_finite,
+                forward_only,
+                jnp.where(
+                    backward_finite,
+                    backward_only,
+                    jnp.full_like(base, jnp.nan),
+                ),
+            ),
+        )
+
+    return jax.vmap(_column)(jnp.arange(point.shape[0])).T
+
+
+def _make_safe_jacobian_fn_jax(
+    residual_fn: object,
+    symbolic_jacobian_fn: object,
+) -> object:
+    def jacobian_fn(x: jax.Array) -> jax.Array:
+        jacobian = jnp.asarray(symbolic_jacobian_fn(x), dtype=jnp.float64)
+        return lax.cond(
+            jnp.all(jnp.isfinite(jacobian)),
+            lambda _: jacobian,
+            lambda _: _finite_difference_jacobian_jax(residual_fn, x),
+            operand=None,
+        )
+
+    return jacobian_fn
+
+
 def _newton_restart_candidates(
     initial: Sequence[float],
     *,
@@ -5814,6 +5898,65 @@ def _newton_restart_candidates(
     return tuple(candidates)
 
 
+def _newton_restart_candidates_jax(
+    initial: Sequence[float],
+    *,
+    default_guess: Optional[Sequence[float]] = None,
+    lower_bounds: Optional[Sequence[float]] = None,
+    upper_bounds: Optional[Sequence[float]] = None,
+) -> jax.Array:
+    initial_arr = jnp.asarray(initial, dtype=jnp.float64)
+    default_arr = (
+        jnp.asarray(default_guess, dtype=jnp.float64)
+        if default_guess is not None
+        else initial_arr
+    )
+    lower = (
+        jnp.asarray(lower_bounds, dtype=jnp.float64)
+        if lower_bounds is not None
+        else jnp.full_like(initial_arr, -jnp.inf)
+    )
+    upper = (
+        jnp.asarray(upper_bounds, dtype=jnp.float64)
+        if upper_bounds is not None
+        else jnp.full_like(initial_arr, jnp.inf)
+    )
+
+    positive_seed = jnp.where(jnp.abs(default_arr) > 0.0, jnp.abs(default_arr), 1.0)
+    sign_preserving_candidates = []
+    for scale in (0.5, 2.0, 4.0, 8.0):
+        sign_preserving_candidates.append(default_arr * scale)
+        sign_preserving_candidates.append(
+            jnp.where(default_arr >= 0.0, positive_seed * scale, -positive_seed * scale)
+        )
+
+    finite_lower = jnp.isfinite(lower)
+    finite_upper = jnp.isfinite(upper)
+    lower_nudge = lower + jnp.maximum(1e-3, 0.05 * jnp.maximum(1.0, jnp.abs(lower)))
+    upper_nudge = upper - jnp.maximum(1e-3, 0.05 * jnp.maximum(1.0, jnp.abs(upper)))
+    nudged_bounds = jnp.where(
+        finite_lower,
+        jnp.maximum(default_arr, lower_nudge),
+        default_arr,
+    )
+    nudged_bounds = jnp.where(
+        finite_upper,
+        jnp.minimum(nudged_bounds, upper_nudge),
+        nudged_bounds,
+    )
+    midpoint = jnp.where(
+        finite_lower & finite_upper,
+        0.5 * (lower + upper),
+        default_arr,
+    )
+
+    candidates = jnp.stack(
+        [initial_arr, default_arr, *sign_preserving_candidates, nudged_bounds, midpoint],
+        axis=0,
+    )
+    return jnp.clip(candidates, lower, upper)
+
+
 def _solve_newton_system_with_restarts(
     initial: Sequence[float],
     *,
@@ -5866,6 +6009,94 @@ def _solve_newton_system_with_restarts(
     if last_error is not None:
         raise last_error
     raise ValueError(nonfinite_message)
+
+
+def _solve_newton_system_jax_with_restarts(
+    initial: Sequence[float],
+    *,
+    residual_fn: object,
+    jacobian_fn: object,
+    default_guess: Optional[Sequence[float]] = None,
+    lower_bounds: Optional[Sequence[float]] = None,
+    upper_bounds: Optional[Sequence[float]] = None,
+    tol: float,
+    max_iter: int,
+    line_search_min_step: float,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    candidates = _newton_restart_candidates_jax(
+        initial,
+        default_guess=default_guess,
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
+    )
+
+    first_result = _solve_newton_system_jax(
+        candidates[0],
+        residual_fn=residual_fn,
+        jacobian_fn=jacobian_fn,
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
+        tol=tol,
+        max_iter=max_iter,
+        line_search_min_step=line_search_min_step,
+    )
+
+    def _maybe_update_best(
+        best: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+        candidate: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+        best_x, best_converged, best_iterations, best_residual_norm = best
+        cand_x, cand_converged, cand_iterations, cand_residual_norm = candidate
+        candidate_better = (cand_converged & (~best_converged)) | (
+            (cand_converged == best_converged)
+            & (
+                (jnp.isfinite(cand_residual_norm) & (~jnp.isfinite(best_residual_norm)))
+                | (
+                    jnp.isfinite(cand_residual_norm)
+                    & jnp.isfinite(best_residual_norm)
+                    & (cand_residual_norm < best_residual_norm)
+                )
+            )
+        )
+        return (
+            jnp.where(candidate_better, cand_x, best_x),
+            jnp.where(candidate_better, cand_converged, best_converged),
+            jnp.where(candidate_better, cand_iterations, best_iterations),
+            jnp.where(candidate_better, cand_residual_norm, best_residual_norm),
+        )
+
+    def _scan_body(
+        carry: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+        candidate: jax.Array,
+    ) -> tuple[tuple[jax.Array, jax.Array, jax.Array, jax.Array], None]:
+        best_result = carry
+        best_converged = best_result[1]
+
+        def _solve_and_update(
+            _: None,
+        ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+            candidate_result = _solve_newton_system_jax(
+                candidate,
+                residual_fn=residual_fn,
+                jacobian_fn=jacobian_fn,
+                lower_bounds=lower_bounds,
+                upper_bounds=upper_bounds,
+                tol=tol,
+                max_iter=max_iter,
+                line_search_min_step=line_search_min_step,
+            )
+            return _maybe_update_best(best_result, candidate_result)
+
+        updated = lax.cond(
+            best_converged,
+            lambda _: best_result,
+            _solve_and_update,
+            operand=None,
+        )
+        return updated, None
+
+    final_result, _ = lax.scan(_scan_body, first_result, candidates[1:])
+    return final_result
 
 
 def _solve_newton_system_jax(

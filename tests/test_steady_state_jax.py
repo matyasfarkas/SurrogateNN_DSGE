@@ -42,6 +42,16 @@ end
 """
 
 
+NONFINITE_DEFAULT_GUESS_SOURCE = """
+@model sqrt_domain begin
+    sqrt(n[0] - 2.0)
+end
+
+@parameters sqrt_domain begin
+end
+"""
+
+
 def test_jax_steady_state_solver_matches_numpy_path() -> None:
     model = parse_macro_model(STEADY_STATE_SOURCE)
     parameter_vector = jnp.asarray(model.parameter_values, dtype=jnp.float64)
@@ -111,4 +121,19 @@ def test_jax_steady_state_solver_supports_calibration_equations() -> None:
         numpy_result.parameter_values,
         rtol=0,
         atol=1e-12,
+    )
+
+
+def test_jax_steady_state_solver_restarts_when_default_guess_is_nonfinite() -> None:
+    model = parse_macro_model(NONFINITE_DEFAULT_GUESS_SOURCE)
+
+    jax_result = solve_steady_state_jax(model)
+    numpy_result = solve_steady_state(model)
+
+    assert bool(np.asarray(jax_result.converged))
+    np.testing.assert_allclose(
+        jax_result.steady_state,
+        numpy_result.steady_state,
+        rtol=0,
+        atol=1e-8,
     )
