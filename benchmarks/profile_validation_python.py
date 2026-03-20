@@ -15,10 +15,15 @@ from surrogatenn_dsge import (
     RegimeSwitchConfig,
     SEPConfig,
     SwitchingLikelihoodConfig,
+    compute_linear_gate_stats_from_filter,
+    estimate_observed_shocks_matrix,
+    estimate_observed_variables_matrix,
     kalman_loglikelihood_from_model_jax,
+    kalman_loglikelihood_per_period_from_model,
     inversion_loglikelihood_from_model,
     parse_macro_model,
     solve_first_order_model,
+    switching_loglikelihood_from_model_jax,
     switching_loglikelihood_from_model_filter_gates_jax,
 )
 
@@ -101,6 +106,46 @@ def _scalar_result(value: Any) -> dict[str, Any]:
     }
 
 
+def _first_order_result(value: Any) -> dict[str, Any]:
+    solution_matrix = np.asarray(value.solution.solution_matrix, dtype=np.float64)
+    steady_state = np.asarray(value.steady_state, dtype=np.float64)
+    stacked = np.column_stack([steady_state, solution_matrix]).T
+    return {
+        "converged": bool(value.solution.converged),
+        "solution_matrix": stacked.tolist(),
+        "shape": list(stacked.shape),
+    }
+
+
+def _gradient_result(value: Any) -> dict[str, Any]:
+    primary, grad = value
+    grad_array = np.asarray(grad, dtype=np.float64)
+    return {
+        "value": float(np.asarray(primary, dtype=np.float64)),
+        "grad": grad_array.tolist(),
+        "grad_l2": float(np.linalg.norm(grad_array)),
+    }
+
+
+def _paths_result(value: Any) -> dict[str, Any]:
+    return {
+        key: np.asarray(array, dtype=np.float64).tolist()
+        for key, array in value.items()
+    }
+
+
+def _gate_stats_result(value: Any) -> dict[str, Any]:
+    return {
+        "linear_observations": np.asarray(
+            value.linear_observations,
+            dtype=np.float64,
+        ).tolist(),
+        "shocks": np.asarray(value.shocks, dtype=np.float64).tolist(),
+        "e_stat": np.asarray(value.e_stat, dtype=np.float64).tolist(),
+        "f_stat": np.asarray(value.f_stat, dtype=np.float64).tolist(),
+    }
+
+
 def _subset_indices(all_names: tuple[str, ...], subset_names: list[str]) -> np.ndarray:
     return np.asarray([all_names.index(name) for name in subset_names], dtype=np.int64)
 
@@ -129,6 +174,7 @@ def _case_result(case: dict[str, Any]) -> dict[str, Any]:
     observations = np.asarray(case["observations"], dtype=np.float64)
     observation_names = tuple(case["observables"])
     state_names = tuple(case["state_names"])
+    shared_gate_probs = np.asarray(case["shared_gate_probs"], dtype=np.float64)
     obs_sigma = {name: float(case["obs_sigma"][name]) for name in observation_names}
     shock_sigmas = {name: float(case["shock_sigmas"][name]) for name in case["shock_names"]}
     parameter_values = np.asarray(model.parameter_values, dtype=np.float64)
@@ -166,6 +212,17 @@ def _case_result(case: dict[str, Any]) -> dict[str, Any]:
         qme_algorithm="doubling",
     )
     kalman_value_fn = jax.jit(kalman_objective)
+    kalman_per_period_fn = lambda: kalman_loglikelihood_per_period_from_model(
+        model,
+        observations,
+        observables=observation_names,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        measurement_error_scale=measurement_error_scale,
+        jitter=jitter,
+        on_failure_loglikelihood=-1.0e12,
+        qme_algorithm="schur",
+    )
     kalman_grad_fn = jax.jit(
         jax.value_and_grad(
             lambda x: kalman_objective_grad(
@@ -173,6 +230,52 @@ def _case_result(case: dict[str, Any]) -> dict[str, Any]:
             )
         )
     )
+    kalman_paths_fn = lambda: {
+        "filtered_variables": estimate_observed_variables_matrix(
+            model,
+            observations,
+            observables=observation_names,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            jitter=jitter,
+            smooth=False,
+            filter="kalman",
+            qme_algorithm="schur",
+        )[0],
+        "smoothed_variables": estimate_observed_variables_matrix(
+            model,
+            observations,
+            observables=observation_names,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            jitter=jitter,
+            smooth=True,
+            filter="kalman",
+            qme_algorithm="schur",
+        )[0],
+        "filtered_shocks": estimate_observed_shocks_matrix(
+            model,
+            observations,
+            observables=observation_names,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            jitter=jitter,
+            smooth=False,
+            filter="kalman",
+            qme_algorithm="schur",
+        ),
+        "smoothed_shocks": estimate_observed_shocks_matrix(
+            model,
+            observations,
+            observables=observation_names,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            jitter=jitter,
+            smooth=True,
+            filter="kalman",
+            qme_algorithm="schur",
+        ),
+    }
 
     regime_switch_config = RegimeSwitchConfig(
         gate_mode=str(case["gate_mode"]),
@@ -191,6 +294,34 @@ def _case_result(case: dict[str, Any]) -> dict[str, Any]:
         prob_floor=float(case["gate_prob_floor"]),
         prob_ceiling=float(case["gate_prob_ceiling"]),
         soft_mixture=str(case["soft_mixture"]),
+    )
+    gate_stats_fn = lambda: compute_linear_gate_stats_from_filter(
+        model,
+        observations,
+        obs_sigma,
+        shock_sigmas,
+        state_names,
+        observables=observation_names,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        qme_algorithm="schur",
+        filter="kalman",
+        algorithm="first_order",
+        smooth=False,
+    )
+    switching_fixed_fn = jax.jit(
+        lambda theta: switching_loglikelihood_from_model_jax(
+            model,
+            observations,
+            gate_probs=shared_gate_probs,
+            observables=observation_names,
+            parameter_values=theta,
+            steady_state=steady_state,
+            measurement_error_scale=measurement_error_scale,
+            jitter=jitter,
+            qme_algorithm="schur",
+            on_failure_loglikelihood=-1.0e12,
+        )
     )
     switching_value_fn = jax.jit(
         lambda theta: switching_loglikelihood_from_model_filter_gates_jax(
@@ -249,16 +380,38 @@ def _case_result(case: dict[str, Any]) -> dict[str, Any]:
             "first_order_solve": _measure_stage(
                 solve_fn,
                 steady_reps=int(case["solve_reps"]),
-                serializer=_scalar_result,
+                serializer=_first_order_result,
             ),
             "kalman_value": _measure_stage(
                 lambda: kalman_value_fn(parameter_values),
                 steady_reps=int(case["kalman_value_reps"]),
                 serializer=_scalar_result,
             ),
+            "kalman_per_period": _measure_stage(
+                kalman_per_period_fn,
+                steady_reps=int(case["kalman_per_period_reps"]),
+                serializer=lambda value: {
+                    "per_period": np.asarray(value, dtype=np.float64).tolist(),
+                },
+            ),
+            "kalman_paths": _measure_stage(
+                kalman_paths_fn,
+                steady_reps=int(case["kalman_paths_reps"]),
+                serializer=_paths_result,
+            ),
             "kalman_grad": _measure_stage(
                 lambda: kalman_grad_fn(x0),
                 steady_reps=int(case["kalman_grad_reps"]),
+                serializer=_gradient_result,
+            ),
+            "gate_stats": _measure_stage(
+                gate_stats_fn,
+                steady_reps=int(case["gate_stats_reps"]),
+                serializer=_gate_stats_result,
+            ),
+            "switching_fixed": _measure_stage(
+                lambda: switching_fixed_fn(parameter_values),
+                steady_reps=int(case["switching_fixed_reps"]),
                 serializer=_scalar_result,
             ),
             "switching_value": _measure_stage(

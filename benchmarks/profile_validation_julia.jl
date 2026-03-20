@@ -40,16 +40,43 @@ function inject_subset(base_theta::Vector{Float64}, subset_idx::Vector{Int}, x)
 end
 
 function scalar_result(value)
-    if value isa Tuple && length(value) == 2
-        return Dict(
-            "value" => Float64(value[1]),
-            "grad_l2" => Float64(norm(value[2])),
-        )
-    elseif value isa KeyedArray
-        return Dict("shape" => collect(size(value)))
-    else
-        return Dict("value" => Float64(value))
-    end
+    return Dict("value" => Float64(value))
+end
+
+function first_order_result(value)
+    matrix = permutedims(Array(value))
+    return Dict(
+        "converged" => true,
+        "solution_matrix" => matrix,
+        "shape" => collect(size(matrix)),
+    )
+end
+
+function gradient_result(value)
+    grad = Float64.(value[2])
+    return Dict(
+        "value" => Float64(value[1]),
+        "grad" => grad,
+        "grad_l2" => Float64(norm(grad)),
+    )
+end
+
+function paths_result(value)
+    return Dict(
+        "filtered_variables" => permutedims(value["filtered_variables"]),
+        "smoothed_variables" => permutedims(value["smoothed_variables"]),
+        "filtered_shocks" => permutedims(value["filtered_shocks"]),
+        "smoothed_shocks" => permutedims(value["smoothed_shocks"]),
+    )
+end
+
+function gate_stats_result(value)
+    return Dict(
+        "linear_observations" => permutedims(value["linear_observations"]),
+        "shocks" => permutedims(value["shocks"]),
+        "e_stat" => value["e_stat"],
+        "f_stat" => value["f_stat"],
+    )
 end
 
 function measure_stage(f::Function, steady_reps::Int; serializer = scalar_result)
@@ -118,6 +145,7 @@ function case_result(case::Dict{String,Any})
     state_names = Symbol.(case["state_names"])
     obs_sigma = Float64.([case["obs_sigma"][name] for name in case["observables"]])
     shock_sigmas = Float64.([case["shock_sigmas"][name] for name in case["shock_names"]])
+    shared_gate_probs = Float64.(case["shared_gate_probs"])
     subset_names = Symbol.(case["parameter_subset"])
     subset_idx = indexin(subset_names, model.parameters)
     any(isnothing, subset_idx) && error("Missing parameter subset indices.")
@@ -163,6 +191,17 @@ function case_result(case::Dict{String,Any})
         presample_periods = 0,
         verbose = false,
     )
+    kalman_per_period_fn = () -> MacroModelling.get_loglikelihood_per_period(
+        model,
+        obs_data,
+        params;
+        algorithm = :first_order,
+        filter = :kalman,
+        quadratic_matrix_equation_algorithm = :schur,
+        initial_covariance = :theoretical,
+        presample_periods = 0,
+        verbose = false,
+    )
     kalman_grad_fn = () -> begin
         objective = x -> begin
             theta = inject_subset(params, subset_idx, x)
@@ -181,6 +220,111 @@ function case_result(case::Dict{String,Any})
         value = objective(x0)
         grad = only(Zygote.gradient(objective, x0))
         return value, grad
+    end
+    kalman_paths_fn = () -> begin
+        filtered_variables, _ = Base.invokelatest(
+            MacroModelling.estimate_observed_variables_matrix,
+            model,
+            Array(obs_data),
+            obs_names;
+            parameters = params,
+            filter = :kalman,
+            algorithm = :first_order,
+            data_in_levels = true,
+            levels = true,
+            smooth = false,
+            verbose = false,
+        )
+        smoothed_variables, _ = Base.invokelatest(
+            MacroModelling.estimate_observed_variables_matrix,
+            model,
+            Array(obs_data),
+            obs_names;
+            parameters = params,
+            filter = :kalman,
+            algorithm = :first_order,
+            data_in_levels = true,
+            levels = true,
+            smooth = true,
+            verbose = false,
+        )
+        filtered_shocks = Base.invokelatest(
+            MacroModelling.estimate_observed_shocks_matrix,
+            model,
+            Array(obs_data),
+            obs_names;
+            parameters = params,
+            filter = :kalman,
+            algorithm = :first_order,
+            data_in_levels = true,
+            smooth = false,
+            verbose = false,
+        )
+        smoothed_shocks = Base.invokelatest(
+            MacroModelling.estimate_observed_shocks_matrix,
+            model,
+            Array(obs_data),
+            obs_names;
+            parameters = params,
+            filter = :kalman,
+            algorithm = :first_order,
+            data_in_levels = true,
+            smooth = true,
+            verbose = false,
+        )
+        return Dict(
+            "filtered_variables" => filtered_variables,
+            "smoothed_variables" => smoothed_variables,
+            "filtered_shocks" => filtered_shocks,
+            "smoothed_shocks" => smoothed_shocks,
+        )
+    end
+    gate_stats_fn = () -> begin
+        lin_obs, gate_shocks, e_stat, f_stat = Base.invokelatest(
+            MacroModelling.compute_linear_gate_stats_from_filter,
+            model,
+            Array(obs_data),
+            obs_names,
+            obs_sigma,
+            shock_sigmas,
+            state_names;
+            periods = size(obs_data, 2),
+            parameters = params,
+            filter = :kalman,
+            algorithm = :first_order,
+            shock_norm = :l2,
+            error_norm = :l2,
+        )
+        return Dict(
+            "linear_observations" => lin_obs,
+            "shocks" => gate_shocks,
+            "e_stat" => e_stat,
+            "f_stat" => f_stat,
+        )
+    end
+    switching_fixed_fn = () -> begin
+        ll_rom = MacroModelling.get_loglikelihood_per_period(
+            model,
+            obs_data,
+            params;
+            algorithm = :first_order,
+            filter = :kalman,
+            quadratic_matrix_equation_algorithm = :schur,
+            initial_covariance = :theoretical,
+            presample_periods = 0,
+            verbose = false,
+        )
+        ll_fom = MacroModelling.get_loglikelihood_per_period(
+            model,
+            obs_data,
+            params;
+            algorithm = :first_order,
+            filter = :inversion,
+            quadratic_matrix_equation_algorithm = :schur,
+            presample_periods = 0,
+            verbose = false,
+        )
+        MacroModelling.mix_loglikelihood(ll_fom, ll_rom, shared_gate_probs; config = switching_config)
     end
     switching_fn = () -> Base.invokelatest(() -> begin
         lin_obs, gate_shocks, e_stat, f_stat = MacroModelling.compute_linear_gate_stats_from_filter(
@@ -251,9 +395,36 @@ function case_result(case::Dict{String,Any})
         ),
         "stages" => Dict(
             "model_load" => load_stage,
-            "first_order_solve" => measure_stage(first_order_fn, Int(case["solve_reps"])),
+            "first_order_solve" => measure_stage(
+                first_order_fn,
+                Int(case["solve_reps"]);
+                serializer = first_order_result,
+            ),
             "kalman_value" => measure_stage(kalman_fn, Int(case["kalman_value_reps"])),
-            "kalman_grad" => measure_stage(kalman_grad_fn, Int(case["kalman_grad_reps"])),
+            "kalman_per_period" => measure_stage(
+                kalman_per_period_fn,
+                Int(case["kalman_per_period_reps"]);
+                serializer = value -> Dict("per_period" => value),
+            ),
+            "kalman_paths" => measure_stage(
+                kalman_paths_fn,
+                Int(case["kalman_paths_reps"]);
+                serializer = paths_result,
+            ),
+            "kalman_grad" => measure_stage(
+                kalman_grad_fn,
+                Int(case["kalman_grad_reps"]);
+                serializer = gradient_result,
+            ),
+            "gate_stats" => measure_stage(
+                gate_stats_fn,
+                Int(case["gate_stats_reps"]);
+                serializer = gate_stats_result,
+            ),
+            "switching_fixed" => measure_stage(
+                switching_fixed_fn,
+                Int(case["switching_fixed_reps"]),
+            ),
             "switching_value" => measure_stage(switching_fn, Int(case["switching_reps"])),
             "sep_inversion" => measure_stage(sep_fn, Int(case["sep_reps"])),
         ),

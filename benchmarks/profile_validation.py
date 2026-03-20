@@ -24,6 +24,7 @@ from surrogatenn_dsge import (
     RegimeSwitchConfig,
     SEPConfig,
     compute_linear_gate_stats_from_filter_model_jax,
+    gate_probabilities,
     parse_macro_model,
     rollout_first_order_solution,
     solve_first_order_model,
@@ -118,7 +119,7 @@ def _build_payloads(
             raise RuntimeError(f"First-order solve failed for {case['name']}.")
 
         shock_names = tuple(model.timings.exo)
-        observation_names = tuple(case["observables"])
+        observation_names = tuple(sorted(case["observables"]))
         state_names = tuple(case["state_names"])
         shock_scales = np.asarray(
             [float(case["shock_scale_by_exo"][name]) for name in shock_names],
@@ -168,6 +169,21 @@ def _build_payloads(
         f_stat = np.asarray(gate_stats.f_stat, dtype=np.float64)
         tau_eps = float(np.quantile(e_stat, gate_quantile))
         tau_y = float(np.quantile(f_stat, gate_quantile))
+        regime_switch_config = RegimeSwitchConfig(
+            gate_mode=str(case["gate_mode"]),
+            tau_eps=tau_eps,
+            tau_y=tau_y,
+            beta_eps=float(case["gate_beta_eps"]),
+            beta_y=float(case["gate_beta_y"]),
+            hard_threshold=float(case["gate_hard_threshold"]),
+            prob_floor=float(case["gate_prob_floor"]),
+            prob_ceiling=float(case["gate_prob_ceiling"]),
+            soft_mixture=str(case["soft_mixture"]),
+        )
+        shared_gate_probs = np.asarray(
+            gate_probabilities(e_stat, f_stat, regime_switch_config),
+            dtype=np.float64,
+        )
 
         cases_payload.append(
             {
@@ -187,7 +203,11 @@ def _build_payloads(
                 "jitter": float(case["jitter"]),
                 "solve_reps": int(case["solve_reps"]),
                 "kalman_value_reps": int(case["kalman_value_reps"]),
+                "kalman_per_period_reps": int(case["kalman_per_period_reps"]),
+                "kalman_paths_reps": int(case["kalman_paths_reps"]),
                 "kalman_grad_reps": int(case["kalman_grad_reps"]),
+                "gate_stats_reps": int(case["gate_stats_reps"]),
+                "switching_fixed_reps": int(case["switching_fixed_reps"]),
                 "switching_reps": int(case["switching_reps"]),
                 "sep_reps": int(case["sep_reps"]),
                 "gate_periods": None,
@@ -196,6 +216,7 @@ def _build_payloads(
                 "gate_prob_floor": float(case["gate_prob_floor"]),
                 "gate_prob_ceiling": float(case["gate_prob_ceiling"]),
                 "soft_mixture": str(case["soft_mixture"]),
+                "shared_gate_probs": shared_gate_probs.tolist(),
                 "regime_switch_config": {
                     "tau_eps": tau_eps,
                     "tau_y": tau_y,
@@ -264,7 +285,11 @@ def _stage_table(
         "model_load",
         "first_order_solve",
         "kalman_value",
+        "kalman_per_period",
+        "kalman_paths",
         "kalman_grad",
+        "gate_stats",
+        "switching_fixed",
         "switching_value",
         "sep_inversion",
     ]
@@ -328,6 +353,139 @@ def _stage_table(
     return "\n".join(lines)
 
 
+def _stage_value(case_results: dict[str, Any], stage: str) -> float | None:
+    value = case_results["stages"].get(stage, {}).get("result", {}).get("value")
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _stage_median(case_results: dict[str, Any], stage: str) -> float | None:
+    value = case_results["stages"].get(stage, {}).get("steady", {}).get("median_s")
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _stage_error(case_results: dict[str, Any], stage: str) -> str | None:
+    error = case_results["stages"].get(stage, {}).get("error")
+    return str(error) if isinstance(error, str) else None
+
+
+def _stage_result(case_results: dict[str, Any], stage: str) -> dict[str, Any]:
+    return case_results["stages"].get(stage, {}).get("result", {})
+
+
+def _array_diff(a: Any, b: Any) -> float | None:
+    try:
+        arr_a = np.asarray(a, dtype=np.float64)
+        arr_b = np.asarray(b, dtype=np.float64)
+    except Exception:
+        return None
+    if arr_a.shape != arr_b.shape:
+        return None
+    if arr_a.size == 0:
+        return 0.0
+    return float(np.max(np.abs(arr_a - arr_b)))
+
+
+def _scalar_diff(a: float | None, b: float | None) -> tuple[float | None, float | None]:
+    if a is None or b is None:
+        return None, None
+    abs_diff = abs(a - b)
+    rel_diff = abs_diff / max(abs(b), 1.0)
+    return abs_diff, rel_diff
+
+
+def _parity_table(
+    case_name: str,
+    python_case: dict[str, Any],
+    julia_case: dict[str, Any],
+) -> str:
+    python_solve = _stage_result(python_case, "first_order_solve")
+    julia_solve = _stage_result(julia_case, "first_order_solve")
+    python_per_period = _stage_result(python_case, "kalman_per_period")
+    julia_per_period = _stage_result(julia_case, "kalman_per_period")
+    python_paths = _stage_result(python_case, "kalman_paths")
+    julia_paths = _stage_result(julia_case, "kalman_paths")
+    python_grad = _stage_result(python_case, "kalman_grad")
+    julia_grad = _stage_result(julia_case, "kalman_grad")
+    python_gate = _stage_result(python_case, "gate_stats")
+    julia_gate = _stage_result(julia_case, "gate_stats")
+
+    rows = [
+        ("First-order solution matrix", _array_diff(
+            python_solve.get("solution_matrix"),
+            julia_solve.get("solution_matrix"),
+        )),
+        ("Kalman loglikelihood", _scalar_diff(
+            _stage_value(python_case, "kalman_value"),
+            _stage_value(julia_case, "kalman_value"),
+        )[0]),
+        ("Kalman per-period path", _array_diff(
+            python_per_period.get("per_period"),
+            julia_per_period.get("per_period"),
+        )),
+        ("Kalman grad value", _scalar_diff(
+            python_grad.get("value"),
+            julia_grad.get("value"),
+        )[0]),
+        ("Kalman grad vector", _array_diff(
+            python_grad.get("grad"),
+            julia_grad.get("grad"),
+        )),
+        ("Filtered variables", _array_diff(
+            python_paths.get("filtered_variables"),
+            julia_paths.get("filtered_variables"),
+        )),
+        ("Smoothed variables", _array_diff(
+            python_paths.get("smoothed_variables"),
+            julia_paths.get("smoothed_variables"),
+        )),
+        ("Filtered shocks", _array_diff(
+            python_paths.get("filtered_shocks"),
+            julia_paths.get("filtered_shocks"),
+        )),
+        ("Smoothed shocks", _array_diff(
+            python_paths.get("smoothed_shocks"),
+            julia_paths.get("smoothed_shocks"),
+        )),
+        ("Gate linear observations", _array_diff(
+            python_gate.get("linear_observations"),
+            julia_gate.get("linear_observations"),
+        )),
+        ("Gate shocks", _array_diff(
+            python_gate.get("shocks"),
+            julia_gate.get("shocks"),
+        )),
+        ("Gate e-stat", _array_diff(
+            python_gate.get("e_stat"),
+            julia_gate.get("e_stat"),
+        )),
+        ("Gate f-stat", _array_diff(
+            python_gate.get("f_stat"),
+            julia_gate.get("f_stat"),
+        )),
+        ("Switching fixed-gate", _scalar_diff(
+            _stage_value(python_case, "switching_fixed"),
+            _stage_value(julia_case, "switching_fixed"),
+        )[0]),
+        ("Switching auto-gated", _scalar_diff(
+            _stage_value(python_case, "switching_value"),
+            _stage_value(julia_case, "switching_value"),
+        )[0]),
+    ]
+
+    lines = [
+        f"### {case_name} Parity",
+        "",
+        "| Check | Max abs diff |",
+        "| --- | ---: |",
+    ]
+    for label, diff in rows:
+        lines.append(
+            f"| {label} | {'n/a' if diff is None else f'{diff:.3e}'} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _report_text(
     config: dict[str, Any],
     payload: dict[str, Any],
@@ -337,18 +495,6 @@ def _report_text(
     julia_process: dict[str, float],
     system_info: dict[str, str],
 ) -> str:
-    def _stage_value(case_results: dict[str, Any], stage: str) -> float | None:
-        value = case_results["stages"].get(stage, {}).get("result", {}).get("value")
-        return float(value) if isinstance(value, (int, float)) else None
-
-    def _stage_median(case_results: dict[str, Any], stage: str) -> float | None:
-        value = case_results["stages"].get(stage, {}).get("steady", {}).get("median_s")
-        return float(value) if isinstance(value, (int, float)) else None
-
-    def _stage_error(case_results: dict[str, Any], stage: str) -> str | None:
-        error = case_results["stages"].get(stage, {}).get("error")
-        return str(error) if isinstance(error, str) else None
-
     small_case_name = payload["cases"][0]["name"]
     medium_case_name = payload["cases"][1]["name"]
     small_python = python_results["cases"][small_case_name]
@@ -357,27 +503,51 @@ def _report_text(
     medium_julia = julia_results["cases"][medium_case_name]
     python_wall = python_process.get("real_s")
     julia_wall = julia_process.get("real_s")
-    small_kalman_python = _stage_value(small_python, "kalman_value")
-    small_kalman_julia = _stage_value(small_julia, "kalman_value")
-    medium_kalman_python = _stage_value(medium_python, "kalman_value")
-    medium_kalman_julia = _stage_value(medium_julia, "kalman_value")
-    small_switch_python = _stage_median(small_python, "switching_value")
-    small_switch_julia = _stage_median(small_julia, "switching_value")
-    grad_error = _stage_error(small_python, "kalman_grad") or _stage_error(
-        medium_python, "kalman_grad"
+
+    small_solution_diff = _array_diff(
+        _stage_result(small_python, "first_order_solve").get("solution_matrix"),
+        _stage_result(small_julia, "first_order_solve").get("solution_matrix"),
     )
-    small_kalman_rel = None
-    if small_kalman_python is not None and small_kalman_julia is not None:
-        small_kalman_rel = abs(small_kalman_python - small_kalman_julia) / max(
-            abs(small_kalman_julia),
-            1.0,
-        )
-    medium_kalman_rel = None
-    if medium_kalman_python is not None and medium_kalman_julia is not None:
-        medium_kalman_rel = abs(medium_kalman_python - medium_kalman_julia) / max(
-            abs(medium_kalman_julia),
-            1.0,
-        )
+    medium_solution_diff = _array_diff(
+        _stage_result(medium_python, "first_order_solve").get("solution_matrix"),
+        _stage_result(medium_julia, "first_order_solve").get("solution_matrix"),
+    )
+    small_kalman_abs, small_kalman_rel = _scalar_diff(
+        _stage_value(small_python, "kalman_value"),
+        _stage_value(small_julia, "kalman_value"),
+    )
+    medium_kalman_abs, medium_kalman_rel = _scalar_diff(
+        _stage_value(medium_python, "kalman_value"),
+        _stage_value(medium_julia, "kalman_value"),
+    )
+    small_filter_diff = _array_diff(
+        _stage_result(small_python, "kalman_paths").get("filtered_variables"),
+        _stage_result(small_julia, "kalman_paths").get("filtered_variables"),
+    )
+    medium_filter_diff = _array_diff(
+        _stage_result(medium_python, "kalman_paths").get("filtered_variables"),
+        _stage_result(medium_julia, "kalman_paths").get("filtered_variables"),
+    )
+    small_switch_fixed_abs, small_switch_fixed_rel = _scalar_diff(
+        _stage_value(small_python, "switching_fixed"),
+        _stage_value(small_julia, "switching_fixed"),
+    )
+    medium_switch_fixed_abs, medium_switch_fixed_rel = _scalar_diff(
+        _stage_value(medium_python, "switching_fixed"),
+        _stage_value(medium_julia, "switching_fixed"),
+    )
+    small_switch_auto_abs, small_switch_auto_rel = _scalar_diff(
+        _stage_value(small_python, "switching_value"),
+        _stage_value(small_julia, "switching_value"),
+    )
+    medium_switch_auto_abs, medium_switch_auto_rel = _scalar_diff(
+        _stage_value(medium_python, "switching_value"),
+        _stage_value(medium_julia, "switching_value"),
+    )
+    grad_error = _stage_error(small_python, "kalman_grad") or _stage_error(
+        medium_python,
+        "kalman_grad",
+    )
 
     report_lines = [
         "# Python/JAX vs Julia Profile",
@@ -399,54 +569,91 @@ def _report_text(
         "",
         "- Small model: `FS2000`.",
         "- Medium model: `Smets_Wouters_2007_HLT`.",
-        "- Workload: first-order Schur solve, Kalman loglikelihood, Kalman gradient on the differentiable doubling path, automatic filter-gated switching likelihood, and bounded SEP inversion smoke.",
-        "- Shared synthetic observations were generated once in Python from the reference first-order solution and then reused in both environments.",
-        "- Important caveat: the Python HLT benchmark uses a Julia-exported reference steady state because cold-start HLT steady-state recovery is still not robust enough in the port for a fair timing comparison.",
+        "- Shared synthetic observations are generated once from the reference first-order solution and reused in both environments.",
+        "- The report validates solution parity first, then Kalman likelihood/filter parity, then gate/switching parity, and only then compares timings.",
+        "- Important caveat: the Python HLT benchmark still uses a Julia-exported reference steady state so the comparison isolates already-ported solve/filter code instead of cold-start steady-state recovery.",
         "",
         "## Key Findings",
         "",
     ]
     if isinstance(python_wall, float) and isinstance(julia_wall, float) and python_wall > 0:
         report_lines.append(
-            f"- Whole-process wall time: Python finished in {python_wall:.2f}s and Julia in {julia_wall:.2f}s, so Python was {julia_wall / python_wall:.2f}x faster on this benchmark harness."
+            f"- Whole-process wall time: Python finished in {python_wall:.2f}s and Julia in {julia_wall:.2f}s, so Julia/Python = {julia_wall / python_wall:.2f}x."
         )
-    if small_kalman_rel is not None:
+    if small_solution_diff is not None:
         report_lines.append(
-            f"- Small-model Kalman likelihood parity is good: FS2000 differs by {small_kalman_rel:.3%} between Python and Julia."
+            f"- Small-model first-order solution parity max abs diff: {small_solution_diff:.3e}."
         )
-    if medium_kalman_rel is not None:
+    if medium_solution_diff is not None:
         report_lines.append(
-            f"- Medium-model Kalman likelihood parity is not yet good: HLT differs by {medium_kalman_rel:.3%} between Python and Julia on the shared payload, so medium-model timings should be treated as a runtime stress test, not a validated apples-to-apples estimation benchmark."
+            f"- Medium-model first-order solution parity max abs diff: {medium_solution_diff:.3e}."
+        )
+    if small_kalman_abs is not None and small_kalman_rel is not None:
+        report_lines.append(
+            f"- Small-model Kalman total loglikelihood abs/rel diff: {small_kalman_abs:.3e} / {small_kalman_rel:.3e}."
+        )
+    if medium_kalman_abs is not None and medium_kalman_rel is not None:
+        report_lines.append(
+            f"- Medium-model Kalman total loglikelihood abs/rel diff: {medium_kalman_abs:.3e} / {medium_kalman_rel:.3e}."
+        )
+    if small_filter_diff is not None:
+        report_lines.append(
+            f"- Small-model filtered-variable path parity max abs diff: {small_filter_diff:.3e}."
+        )
+    if medium_filter_diff is not None:
+        report_lines.append(
+            f"- Medium-model filtered-variable path parity max abs diff: {medium_filter_diff:.3e}."
+        )
+    if small_switch_fixed_abs is not None and small_switch_fixed_rel is not None:
+        report_lines.append(
+            f"- Small-model fixed-gate switching abs/rel diff: {small_switch_fixed_abs:.3e} / {small_switch_fixed_rel:.3e}."
+        )
+    if medium_switch_fixed_abs is not None and medium_switch_fixed_rel is not None:
+        report_lines.append(
+            f"- Medium-model fixed-gate switching abs/rel diff: {medium_switch_fixed_abs:.3e} / {medium_switch_fixed_rel:.3e}."
+        )
+    if small_switch_auto_abs is not None and small_switch_auto_rel is not None:
+        report_lines.append(
+            f"- Small-model automatic switching abs/rel diff: {small_switch_auto_abs:.3e} / {small_switch_auto_rel:.3e}."
+        )
+    if medium_switch_auto_abs is not None and medium_switch_auto_rel is not None:
+        report_lines.append(
+            f"- Medium-model automatic switching abs/rel diff: {medium_switch_auto_abs:.3e} / {medium_switch_auto_rel:.3e}."
         )
     if grad_error is not None:
         report_lines.append(
-            f"- Python/JAX reverse-mode likelihood differentiation failed on these benchmark models with `{grad_error}`. Julia completed the same stage."
-        )
-    if (
-        isinstance(small_switch_python, float)
-        and isinstance(small_switch_julia, float)
-        and small_switch_python > 0
-        and small_switch_julia > 0
-    ):
-        report_lines.append(
-            f"- On the small model, steady-state switching likelihood evaluation was faster in Python ({small_switch_python:.6f}s median) than Julia ({small_switch_julia:.6f}s median)."
+            f"- Python/JAX reverse-mode likelihood differentiation still failed during the benchmark with `{grad_error}`."
         )
     report_lines.extend(
         [
-            "- JAX only exposed `TFRT_CPU_0` in this environment, so none of these runs exercised a live GPU backend.",
-            "- SEP here is a bounded robustness smoke stage. Both environments produced non-finite or failure-style SEP outputs on these settings, so SEP timings are not a validated matched-likelihood comparison.",
-        "",
-        "## Whole Process",
-        "",
-        f"- Python wall/user/sys: {python_process.get('real_s', float('nan')):.3f}s / {python_process.get('user_s', float('nan')):.3f}s / {python_process.get('sys_s', float('nan')):.3f}s",
-        f"- Python max RSS (raw `time -l` units): {python_process.get('max_rss_raw', float('nan')):.0f}",
-        f"- Python peak memory footprint: {python_process.get('peak_memory_bytes', float('nan')) / (1024.0 ** 2):.1f} MiB",
-        f"- Julia wall/user/sys: {julia_process.get('real_s', float('nan')):.3f}s / {julia_process.get('user_s', float('nan')):.3f}s / {julia_process.get('sys_s', float('nan')):.3f}s",
-        f"- Julia max RSS (raw `time -l` units): {julia_process.get('max_rss_raw', float('nan')):.0f}",
-        f"- Julia peak memory footprint: {julia_process.get('peak_memory_bytes', float('nan')) / (1024.0 ** 2):.1f} MiB",
-        "",
-        "## Stage Results",
-        "",
+            "- JAX only exposed `TFRT_CPU_0` in this environment, so this remains a CPU benchmark rather than a live GPU benchmark.",
+            "- SEP remains a bounded robustness smoke stage here; it is still reported for runtime coverage, not as a validated matched-likelihood parity stage on these large models.",
+            "",
+            "## Whole Process",
+            "",
+            f"- Python wall/user/sys: {python_process.get('real_s', float('nan')):.3f}s / {python_process.get('user_s', float('nan')):.3f}s / {python_process.get('sys_s', float('nan')):.3f}s",
+            f"- Python max RSS (raw `time -l` units): {python_process.get('max_rss_raw', float('nan')):.0f}",
+            f"- Python peak memory footprint: {python_process.get('peak_memory_bytes', float('nan')) / (1024.0 ** 2):.1f} MiB",
+            f"- Julia wall/user/sys: {julia_process.get('real_s', float('nan')):.3f}s / {julia_process.get('user_s', float('nan')):.3f}s / {julia_process.get('sys_s', float('nan')):.3f}s",
+            f"- Julia max RSS (raw `time -l` units): {julia_process.get('max_rss_raw', float('nan')):.0f}",
+            f"- Julia peak memory footprint: {julia_process.get('peak_memory_bytes', float('nan')) / (1024.0 ** 2):.1f} MiB",
+            "",
+            "## Parity Results",
+            "",
+        ]
+    )
+    for case in payload["cases"]:
+        report_lines.append(
+            _parity_table(
+                case["name"],
+                python_results["cases"][case["name"]],
+                julia_results["cases"][case["name"]],
+            )
+        )
+    report_lines.extend(
+        [
+            "## Stage Timings",
+            "",
         ]
     )
     for case in payload["cases"]:
@@ -461,11 +668,11 @@ def _report_text(
         [
             "## Interpretation",
             "",
-            "- `first_call` includes language-specific JIT or XLA compilation overhead.",
+            "- `first_call` includes compilation and one-off setup overhead.",
             "- `steady median` is the more relevant figure for repeated estimation inner loops.",
-            "- `kalman_grad` uses the doubling QME path in both environments because the current JAX Schur path is not reverse-mode differentiable.",
-            "- Julia stage timings are public-API timings. They include its own steady-state and solution preparation work when the API does so.",
-            "- Python medium-model timings are inner-loop timings conditional on a supplied reference steady state.",
+            "- `kalman_grad` still uses the doubling QME path in both environments because the current JAX Schur path is not reverse-mode differentiable.",
+            "- Fixed-gate switching isolates the likelihood mixer on shared gates; automatic switching also exercises gate reconstruction and filtering in each environment.",
+            "- The parity tables should be read before the timing tables. Any stage with weak parity should not be used to make strong runtime claims.",
         ]
     )
     return "\n".join(report_lines) + "\n"
