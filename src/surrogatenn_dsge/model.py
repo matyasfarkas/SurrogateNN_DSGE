@@ -374,6 +374,43 @@ class MacroModel:
         )
 
     @cached_property
+    def _symbolic_steady_state_seed_entries(self) -> tuple[tuple[int, sp.Expr], ...]:
+        if not bool(self.parameter_options.get("symbolic", False)):
+            return ()
+        return _build_symbolic_steady_state_seed_entries(
+            self._steady_state_expressions,
+            self._steady_state_symbols,
+            self._parameter_symbols,
+        )
+
+    @cached_property
+    def _symbolic_steady_state_seed_indices(self) -> tuple[int, ...]:
+        return tuple(index for index, _ in self._symbolic_steady_state_seed_entries)
+
+    @cached_property
+    def _symbolic_steady_state_seed_matrix(self) -> sp.Matrix:
+        expressions = [expr for _, expr in self._symbolic_steady_state_seed_entries]
+        if not expressions:
+            return sp.Matrix.zeros(0, 1)
+        return sp.Matrix(expressions)
+
+    @cached_property
+    def _symbolic_steady_state_seed_fn(self) -> object:
+        return sp.lambdify(
+            self._parameter_symbols,
+            self._symbolic_steady_state_seed_matrix,
+            modules=_numpy_lambdify_modules(),
+        )
+
+    @cached_property
+    def _symbolic_steady_state_seed_jax_fn(self) -> object:
+        return sp.lambdify(
+            self._parameter_symbols,
+            self._symbolic_steady_state_seed_matrix,
+            modules=_jax_lambdify_modules(),
+        )
+
+    @cached_property
     def _steady_state_expansion_indices(self) -> tuple[int, ...]:
         base_lookup = {name: idx for idx, name in enumerate(self.steady_state_names)}
         indices: list[int] = []
@@ -609,6 +646,38 @@ class MacroModel:
                 f"({n},), got {guess.shape}."
             )
         return guess
+
+    def _apply_symbolic_steady_state_seed(
+        self,
+        guess: np.ndarray,
+        parameter_values: Sequence[float],
+    ) -> np.ndarray:
+        if not self._symbolic_steady_state_seed_indices:
+            return guess
+        values = np.asarray(
+            self._symbolic_steady_state_seed_fn(*np.asarray(parameter_values, dtype=np.float64)),
+            dtype=np.float64,
+        ).reshape(-1)
+        updated = np.asarray(guess, dtype=np.float64).copy()
+        for idx, value in zip(self._symbolic_steady_state_seed_indices, values):
+            if np.isfinite(value):
+                updated[idx] = float(value)
+        return updated
+
+    def _apply_symbolic_steady_state_seed_jax(
+        self,
+        guess: jax.Array,
+        parameter_values: Sequence[float],
+    ) -> jax.Array:
+        if not self._symbolic_steady_state_seed_indices:
+            return guess
+        indices = jnp.asarray(self._symbolic_steady_state_seed_indices, dtype=jnp.int32)
+        values = jnp.asarray(
+            self._symbolic_steady_state_seed_jax_fn(*parameter_values),
+            dtype=jnp.float64,
+        ).reshape(-1)
+        seeded = guess[indices]
+        return guess.at[indices].set(jnp.where(jnp.isfinite(values), values, seeded))
 
     def _expand_to_full_steady_state(
         self,
@@ -1710,6 +1779,13 @@ class MacroModel:
             self._coerce_parameter_values(parameter_values),
             parameter_values_provided=parameter_values is not None,
         )
+        if initial_guess is None:
+            guess = self._apply_symbolic_steady_state_seed(guess, initial_parameters)
+        default_guess = self._coerce_steady_state_guess(None)
+        default_guess = self._apply_symbolic_steady_state_seed(
+            default_guess,
+            initial_parameters,
+        )
 
         if self._parameter_equations_depend_on_steady_state:
             joint_initial = np.concatenate([guess, initial_parameters])
@@ -1737,7 +1813,7 @@ class MacroModel:
                 jacobian_fn=_make_safe_jacobian_fn(residual_fn, symbolic_jacobian_fn),
                 default_guess=np.concatenate(
                     [
-                        self._coerce_steady_state_guess(None),
+                        default_guess,
                         initial_parameters,
                     ]
                 ),
@@ -1759,6 +1835,15 @@ class MacroModel:
                     line_search_min_step=line_search_min_step,
                 ),
                 dtype=np.float64,
+            )
+            if initial_guess is None:
+                guess = self._apply_symbolic_steady_state_seed(
+                    guess,
+                    resolved_parameters,
+                )
+            default_guess = self._apply_symbolic_steady_state_seed(
+                self._coerce_steady_state_guess(None),
+                resolved_parameters,
             )
 
             def residual_fn(x: np.ndarray) -> np.ndarray:
@@ -1782,7 +1867,7 @@ class MacroModel:
                 guess,
                 residual_fn=residual_fn,
                 jacobian_fn=_make_safe_jacobian_fn(residual_fn, symbolic_jacobian_fn),
-                default_guess=self._coerce_steady_state_guess(None),
+                default_guess=default_guess,
                 lower_bounds=self._bounds_vector(self.steady_state_names)[0],
                 upper_bounds=self._bounds_vector(self.steady_state_names)[1],
                 tol=tol,
@@ -1818,6 +1903,15 @@ class MacroModel:
             self._coerce_parameter_values_jax(parameter_values),
             parameter_values_provided=parameter_values is not None,
         )
+        if initial_guess is None:
+            guess = self._apply_symbolic_steady_state_seed_jax(
+                guess,
+                initial_parameters,
+            )
+        default_guess = self._apply_symbolic_steady_state_seed_jax(
+            jnp.asarray(self._coerce_steady_state_guess(None), dtype=jnp.float64),
+            initial_parameters,
+        )
 
         if self._parameter_equations_depend_on_steady_state:
             joint_initial = jnp.concatenate([guess, initial_parameters])
@@ -1838,15 +1932,7 @@ class MacroModel:
                     residual_fn,
                     jax.jacrev(residual_fn),
                 ),
-                default_guess=jnp.concatenate(
-                    [
-                        jnp.asarray(
-                            self._coerce_steady_state_guess(None),
-                            dtype=jnp.float64,
-                        ),
-                        initial_parameters,
-                    ]
-                ),
+                default_guess=jnp.concatenate([default_guess, initial_parameters]),
                 lower_bounds=lower_bounds,
                 upper_bounds=upper_bounds,
                 tol=tol,
@@ -1862,6 +1948,15 @@ class MacroModel:
                 max_iter=max_iter,
                 line_search_min_step=line_search_min_step,
             )
+            if initial_guess is None:
+                guess = self._apply_symbolic_steady_state_seed_jax(
+                    guess,
+                    resolved_parameters,
+                )
+            default_guess = self._apply_symbolic_steady_state_seed_jax(
+                jnp.asarray(self._coerce_steady_state_guess(None), dtype=jnp.float64),
+                resolved_parameters,
+            )
 
             def residual_fn(x: jax.Array) -> jax.Array:
                 return jnp.asarray(
@@ -1876,10 +1971,7 @@ class MacroModel:
                     residual_fn,
                     jax.jacrev(residual_fn),
                 ),
-                default_guess=jnp.asarray(
-                    self._coerce_steady_state_guess(None),
-                    dtype=jnp.float64,
-                ),
+                default_guess=default_guess,
                 lower_bounds=self._bounds_vector(self.steady_state_names)[0],
                 upper_bounds=self._bounds_vector(self.steady_state_names)[1],
                 tol=tol,
@@ -7334,6 +7426,80 @@ def _parse_bound_value(text: str) -> float:
 
 def _expression_contains_obc(expr: sp.Expr) -> bool:
     return bool(expr.has(sp.Max, sp.Min))
+
+
+def _build_symbolic_steady_state_seed_entries(
+    equations: Sequence[sp.Expr],
+    variables: Sequence[sp.Symbol],
+    parameter_symbols: Sequence[sp.Symbol],
+) -> tuple[tuple[int, sp.Expr], ...]:
+    remaining_equations = [sp.simplify(expr) for expr in equations]
+    remaining_variables = list(variables)
+    remaining_variable_set = set(remaining_variables)
+    parameter_symbol_set = set(parameter_symbols)
+    solved: dict[sp.Symbol, sp.Expr] = {}
+
+    while remaining_equations and remaining_variables:
+        best_candidate: Optional[tuple[int, sp.Symbol, sp.Expr, tuple[int, int, str]]] = None
+        for eq_idx, equation in enumerate(remaining_equations):
+            free_symbols = equation.free_symbols & remaining_variable_set
+            if not free_symbols:
+                continue
+            for variable in tuple(remaining_variables):
+                if variable not in free_symbols:
+                    continue
+                try:
+                    solutions = sp.solve(sp.Eq(equation, 0), variable)
+                except Exception:
+                    continue
+                normalized: list[sp.Expr] = []
+                seen: set[str] = set()
+                for solution in solutions:
+                    simplified = sp.simplify(solution)
+                    if variable in simplified.free_symbols:
+                        continue
+                    unresolved = simplified.free_symbols & remaining_variable_set
+                    if unresolved - {variable}:
+                        continue
+                    if simplified.free_symbols - parameter_symbol_set - remaining_variable_set:
+                        continue
+                    key = sp.srepr(simplified)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    normalized.append(simplified)
+                if len(normalized) != 1:
+                    continue
+                candidate = normalized[0]
+                score = (
+                    len(candidate.free_symbols),
+                    int(sp.count_ops(candidate, visual=False)),
+                    str(variable),
+                )
+                if best_candidate is None or score < best_candidate[3]:
+                    best_candidate = (eq_idx, variable, candidate, score)
+        if best_candidate is None:
+            break
+
+        eq_idx, variable, expression, _ = best_candidate
+        solved[variable] = expression
+        remaining_variables.remove(variable)
+        remaining_variable_set.remove(variable)
+
+        next_equations: list[sp.Expr] = []
+        for current_idx, equation in enumerate(remaining_equations):
+            if current_idx == eq_idx:
+                continue
+            substituted = sp.simplify(equation.subs(variable, expression))
+            if substituted != 0:
+                next_equations.append(substituted)
+        remaining_equations = next_equations
+
+    return tuple(
+        (idx, solved[symbol])
+        for idx, symbol in enumerate(variables)
+        if symbol in solved
+    )
 
 
 def _obc_calls_in_expression(expr: sp.Expr) -> tuple[sp.Expr, ...]:

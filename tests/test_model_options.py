@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from surrogatenn_dsge import SEPConfig, parse_macro_model
+from surrogatenn_dsge import (
+    SEPConfig,
+    parse_macro_model,
+    solve_steady_state,
+    solve_steady_state_jax,
+)
 
 
 _OPTION_SOURCE = """
@@ -16,6 +21,19 @@ end
 end
 """
 
+_SYMBOLIC_OPTION_SOURCE = """
+@model symbolic_option_model begin
+    k[0] = beta
+    c[0] = k[0] + alpha
+    y[0] = c[0] + 1
+end
+
+@parameters symbolic_option_model silent = true symbolic = true perturbation_order = 1 begin
+    alpha = 0.25
+    beta = 2.0
+end
+"""
+
 
 def test_parser_records_model_and_parameter_options() -> None:
     model = parse_macro_model(_OPTION_SOURCE)
@@ -25,6 +43,50 @@ def test_parser_records_model_and_parameter_options() -> None:
     assert model.parameter_options["simplify"] is False
     assert model.parameter_options["verbose"] is True
     assert model.default_initial_guess["r"] == 1.1
+
+
+def test_parser_records_remaining_parameter_directives() -> None:
+    model = parse_macro_model(_SYMBOLIC_OPTION_SOURCE)
+
+    assert model.parameter_options["silent"] is True
+    assert model.parameter_options["symbolic"] is True
+    assert model.parameter_options["perturbation_order"] == 1
+
+
+def test_symbolic_parameter_option_seeds_exact_numpy_steady_state() -> None:
+    model = parse_macro_model(_SYMBOLIC_OPTION_SOURCE)
+
+    result = solve_steady_state(model)
+    values = dict(
+        zip(
+            model.steady_state_names,
+            np.asarray(result.base_steady_state, dtype=np.float64),
+        )
+    )
+
+    assert values["k"] == 2.0
+    assert values["c"] == 2.25
+    assert values["y"] == 3.25
+    assert bool(result.converged)
+    assert int(result.iterations) == 0
+
+
+def test_symbolic_parameter_option_seeds_exact_jax_steady_state() -> None:
+    model = parse_macro_model(_SYMBOLIC_OPTION_SOURCE)
+
+    result = solve_steady_state_jax(model)
+    values = dict(
+        zip(
+            model.steady_state_names,
+            np.asarray(result.base_steady_state, dtype=np.float64),
+        )
+    )
+
+    assert values["k"] == 2.0
+    assert values["c"] == 2.25
+    assert values["y"] == 3.25
+    assert bool(result.converged)
+    assert int(np.asarray(result.iterations)) == 0
 
 
 def test_first_order_obc_sep_fallback_uses_model_max_obc_horizon(monkeypatch) -> None:

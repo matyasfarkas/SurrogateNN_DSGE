@@ -786,14 +786,15 @@ Python/JAX status:
 
 Julia reference:
 
-- `src/MacroModelling.jl` (`max_obc_horizon`, `simplify`, `verbose`, steady-state solve surface)
+- `src/MacroModelling.jl` (`max_obc_horizon`, `simplify`, `verbose`, `silent`, `symbolic`, `perturbation_order`, steady-state solve surface)
 - `src/algorithms/lyapunov.jl`
 
 Python/JAX status:
 
-- parsed `@model` and `@parameters` options now record the common upstream directives `max_obc_horizon`, `simplify`, and `verbose` instead of silently dropping them
+- parsed `@model` and `@parameters` options now record the common upstream directives `max_obc_horizon`, `simplify`, `verbose`, `silent`, `symbolic`, and `perturbation_order` instead of silently dropping them
 - first-order OBC runtime requests now preserve user SEP horizons and also respect `max_obc_horizon` as a lower bound, with zero-padded deterministic shocks when the runtime SEP horizon exceeds the requested output horizon
 - the steady-state and calibrated-parameter Newton path now has symbolic-Jacobian safety fallbacks plus restart heuristics on both the NumPy and JAX implementations, so non-finite default guesses and singular autodiff Jacobians no longer fail immediately on the compiled first-order path
+- when `@parameters ... symbolic = true`, the steady-state solver now also applies a conservative symbolic seeding pass that recursively substitutes uniquely solvable steady-state equations before Newton starts, on both the NumPy and JAX paths
 - the Lyapunov layer now accepts the Julia-compatible algorithm names `bartels_stewart`, `bicgstab`, and `gmres`, with iterative fallback back to the existing dense direct solve when needed
 - the discrete Sylvester layer now accepts the Julia-compatible iterative algorithm names `bicgstab` and `gmres`, with parity against the dense direct solve and iterative fallback back to that direct solve when the Krylov path is cut short
 - tests cover parsed option capture, OBC runtime horizon routing, steady-state recovery from a non-finite default guess, Bartels-Stewart parity, iterative Lyapunov/Sylvester convergence, and iterative-to-direct fallback
@@ -806,7 +807,7 @@ Python/JAX status:
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current `algorithm="direct"` Lyapunov fallback is still a direct Kronecker solve even though the separate `algorithm="bartels_stewart"` path is now implemented.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
-- The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess`, bounds, and the common `simplify` / `verbose` options.
+- The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess`, bounds, `silent`, `symbolic`, `perturbation_order`, and the common `simplify` / `verbose` options.
 - The current parsed front end now supports basic `max` / `min` OBC syntax, branch-frozen linearization around the active steady-state branch, parsed-model OBC violation diagnostics, and a dedicated first-order enforcement path for simple direct `max` / `min` equations, but the Julia-specific enforcement layer around kinks, including explicit OBC shock-sequence optimization, subdifferential Newton options, and the broader OBC runtime surface, is still unported.
 - Parsed-model `get_irf` and `simulate_model` are now available, including Julia-style `shocks = :simulate` random-shock semantics, grouped nested runtime name selections, and the main selector tokens `:all_excluding_obc` / `:all_excluding_auxiliary_and_obc`, but the full Julia runtime surface is still broader because general first-order OBC enforcement still falls back to deterministic SEP outside the newly supported direct-constraint subset.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.

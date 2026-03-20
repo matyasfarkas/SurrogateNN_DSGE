@@ -45,7 +45,7 @@ Implemented:
 - explicit Schur / ordered-QZ determinacy diagnostics for first-order models, including stable-root counts, unique/indeterminate/no-stable classification, and parsed-model wrappers to inspect the Schur branch directly
 - parsed-model state-space, likelihood, filtering, gate-stat, and concrete/compiled NumPyro helpers now expose `qme_algorithm` so first-order workflows can explicitly choose between the doubling and Schur/QZ solution branches
 - MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
-- parsed model and parameter block options for common upstream directives, including `max_obc_horizon`, `simplify`, and `verbose`
+- parsed model and parameter block options for common upstream directives, including `max_obc_horizon`, `simplify`, `verbose`, `silent`, `symbolic`, and `perturbation_order`
 - basic `max` / `min` OBC syntax parsing with parsed-model `has_obc` detection, steady-state support, inactive-branch first-order solves, and SEP path solves on simple bound models
 - branch-frozen OBC derivative evaluation around active steady-state branches, so binding `max` / `min` constraints no longer linearize with spurious `0.5` derivatives at the kink
 - SEP Jacobian selection via `jacobian_method=\"auto\" | \"autodiff\" | \"finite_difference\" | \"subgradient\"`, with parsed OBC SEP solves automatically switching `auto` to a branch-frozen subgradient Jacobian on the Gauss-Hermite path
@@ -64,6 +64,7 @@ Implemented:
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
 - damped Newton non-stochastic steady-state solver
 - steady-state and calibrated-parameter Newton restart heuristics plus finite-difference Jacobian fallback on both the NumPy and JAX paths, so compiled first-order estimation no longer fails immediately on non-finite default guesses or singular autodiff Jacobians
+- conservative symbolic steady-state seeding from uniquely solvable steady-state equations when `@parameters ... symbolic = true`, on both the NumPy and JAX steady-state paths
 - calibrated-parameter resolution from either the joint steady-state solve or a supplied steady state
 - first-order DSGE perturbation solver with Julia `RBC_CME` fixture coverage
 - second-order DSGE perturbation solver with Julia-compatible compression matrices and Sylvester solve
@@ -83,7 +84,7 @@ Not implemented yet:
 
 - perturbation orders above third
 - ambiguous multi-family calibration-equation broadcasting remains guarded rather than inferred
-- the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess`, bounds, and the common upstream `simplify` / `verbose` options
+- the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess`, bounds, `silent`, `symbolic`, `perturbation_order`, and the common upstream `simplify` / `verbose` options
 - full Julia-style occasionally binding constraint enforcement around kinks, including horizon-level OBC shock-sequence optimization, full kink-aware runtime switching, and the broader OBC runtime surface beyond the new parsed-model violation diagnostics
 - the new first-order OBC runtime path only covers direct current-variable `max` / `min` equations whose branch arguments do not depend on leads or the constrained variable itself; more general parsed OBC models still fall back to deterministic SEP when `ignore_obc = false`
 - the broader Julia runtime selection surface is still narrower here than upstream, even though grouped nested name inputs and the main selector tokens like `:all_excluding_obc` and `:all_excluding_auxiliary_and_obc` are now supported
