@@ -496,6 +496,48 @@ def test_get_irf_ignore_obc_is_overridden_when_obc_shocks_are_selected() -> None
     assert np.all(np.asarray(ignored.responses, dtype=np.float64) >= 1.0 - 1e-8)
 
 
+def test_get_irf_supported_obc_path_recovers_implied_obc_shocks() -> None:
+    model = parse_macro_model(OBC_AUX_SHOCK_SOURCE)
+
+    ignored = get_irf(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks="eps_r",
+        shock_size=2.0,
+        negative_shock=True,
+        levels=True,
+        ignore_obc=True,
+    )
+    enforced = get_irf(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks="eps_r",
+        shock_size=2.0,
+        negative_shock=True,
+        levels=True,
+        ignore_obc=False,
+    )
+
+    obc_index = model.timings.exo.index("eps_zlbᵒᵇᶜ")
+    assert enforced.algorithm_used == "first_order"
+    assert np.all(np.asarray(enforced.responses, dtype=np.float64) >= 1.0 - 1e-8)
+    assert np.allclose(
+        np.asarray(ignored.shocks, dtype=np.float64)[obc_index, :, 0],
+        0.0,
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert np.max(np.abs(np.asarray(enforced.shocks, dtype=np.float64)[obc_index, :, 0])) > 1e-6
+    np.testing.assert_allclose(
+        np.asarray(enforced.shocks, dtype=np.float64)[obc_index, 0, 0],
+        1.8,
+        rtol=0.0,
+        atol=1e-10,
+    )
+
+
 def test_simulate_model_ignore_obc_is_overridden_when_obc_shocks_are_present() -> None:
     model = parse_macro_model(OBC_AUX_SHOCK_SOURCE)
 
@@ -524,6 +566,44 @@ def test_simulate_model_ignore_obc_is_overridden_when_obc_shocks_are_present() -
         atol=1e-8,
     )
     assert np.all(np.asarray(ignored.data, dtype=np.float64) >= 1.0 - 1e-8)
+
+
+def test_simulate_model_supported_obc_path_recovers_implied_obc_shocks() -> None:
+    model = parse_macro_model(OBC_AUX_SHOCK_SOURCE)
+
+    ignored = simulate_model(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks={"eps_r": [-2.0, 0.0, 0.0]},
+        levels=True,
+        ignore_obc=True,
+    )
+    enforced = simulate_model(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks={"eps_r": [-2.0, 0.0, 0.0]},
+        levels=True,
+        ignore_obc=False,
+    )
+
+    obc_index = model.timings.exo.index("eps_zlbᵒᵇᶜ")
+    assert enforced.algorithm_used == "first_order"
+    assert np.all(np.asarray(enforced.data, dtype=np.float64) >= 1.0 - 1e-8)
+    assert np.allclose(
+        np.asarray(ignored.shocks, dtype=np.float64)[obc_index],
+        0.0,
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert np.max(np.abs(np.asarray(enforced.shocks, dtype=np.float64)[obc_index])) > 1e-6
+    np.testing.assert_allclose(
+        np.asarray(enforced.shocks, dtype=np.float64)[obc_index, 0],
+        1.8,
+        rtol=0.0,
+        atol=1e-10,
+    )
 
 
 def test_upstream_models_support_random_simulation_token() -> None:

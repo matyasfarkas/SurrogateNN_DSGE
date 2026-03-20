@@ -204,6 +204,11 @@ class _FirstOrderOBCProjectionSpec(NamedTuple):
     right_expr: sp.Expr
 
 
+class _FirstOrderOBCSimulationResult(NamedTuple):
+    state_path: np.ndarray
+    shocks: np.ndarray
+
+
 @dataclass(frozen=True)
 class MacroModel:
     name: str
@@ -803,6 +808,16 @@ class MacroModel:
             dtype=np.int64,
         )
 
+    @cached_property
+    def _dynamic_exogenous_symbols(self) -> tuple[sp.Symbol, ...]:
+        start = (
+            self.timings.nFuture_not_past_and_mixed
+            + self.timings.nVars
+            + self.timings.nPast_not_future_and_mixed
+        )
+        end = start + self.timings.nExo
+        return tuple(self._dynamic_input_symbols[start:end])
+
     def _obc_shocks_included(
         self,
         shocks: np.ndarray,
@@ -1165,7 +1180,7 @@ class MacroModel:
         first_order_result: ParsedModelFirstOrderResult,
         steady_state: np.ndarray,
         initial_state: Optional[Sequence[float]] = None,
-    ) -> np.ndarray:
+    ) -> _FirstOrderOBCSimulationResult:
         specs = self._first_order_obc_projection_specs
         if specs is None:
             raise ValueError(
@@ -1194,31 +1209,98 @@ class MacroModel:
             first_order_result.solution.solution_matrix,
             dtype=np.float64,
         )
+        shock_matrix = np.asarray(shocks, dtype=np.float64).copy()
+        exogenous_impact = solution_matrix[:, self.timings.nPast_not_future_and_mixed :]
+        exo_symbol_to_index = {
+            symbol: idx for idx, symbol in enumerate(self._dynamic_exogenous_symbols)
+        }
+        spec_shock_indices: list[tuple[int, ...]] = []
+        obc_shock_index_set = set(int(idx) for idx in np.asarray(self._obc_shock_indices, dtype=np.int64))
+        for spec in specs:
+            relevant_symbols = spec.left_expr.free_symbols | spec.right_expr.free_symbols
+            indices = tuple(
+                sorted(
+                    idx
+                    for symbol, idx in exo_symbol_to_index.items()
+                    if idx in obc_shock_index_set and symbol in relevant_symbols
+                )
+            )
+            spec_shock_indices.append(indices)
         state_path = np.zeros((self.timings.nVars, periods), dtype=np.float64)
         lag_state = np.asarray(initial_state_values, dtype=np.float64)
 
         for period in range(periods):
-            deviation = np.asarray(
-                first_order_state_update(
-                    solution_matrix,
-                    self.timings,
-                    reduced_state,
-                    shocks[:, period],
-                ),
-                dtype=np.float64,
-            )
-            unconstrained_state = deviation + steady_state
-            constrained_state = self._project_first_order_obc_state(
-                lag_state,
-                unconstrained_state,
-                shocks[:, period],
-                parameter_values=parameter_values,
-                steady_reference_values=steady_refs,
-            )
+            period_shocks = np.asarray(shock_matrix[:, period], dtype=np.float64).copy()
+            constrained_state: Optional[np.ndarray] = None
+            for _ in range(max(1, len(specs) + len(spec_shock_indices) + 1)):
+                deviation = np.asarray(
+                    first_order_state_update(
+                        solution_matrix,
+                        self.timings,
+                        reduced_state,
+                        period_shocks,
+                    ),
+                    dtype=np.float64,
+                )
+                unconstrained_state = deviation + steady_state
+                projected_state = self._project_first_order_obc_state(
+                    lag_state,
+                    unconstrained_state,
+                    period_shocks,
+                    parameter_values=parameter_values,
+                    steady_reference_values=steady_refs,
+                )
+                constrained_state = projected_state
+                desired_change = projected_state[[spec.variable_index for spec in specs]] - unconstrained_state[
+                    [spec.variable_index for spec in specs]
+                ]
+                if np.allclose(desired_change, 0.0, rtol=0.0, atol=1e-12):
+                    break
+                active_shock_indices = tuple(
+                    sorted(
+                        {
+                            idx
+                            for spec_idx, spec in enumerate(specs)
+                            if abs(desired_change[spec_idx]) > 1e-12
+                            for idx in spec_shock_indices[spec_idx]
+                        }
+                    )
+                )
+                if not active_shock_indices:
+                    break
+                coefficient_matrix = exogenous_impact[
+                    [spec.variable_index for spec in specs], :
+                ][:, list(active_shock_indices)]
+                if coefficient_matrix.size == 0:
+                    break
+                delta, *_ = np.linalg.lstsq(
+                    coefficient_matrix,
+                    desired_change,
+                    rcond=None,
+                )
+                if not np.all(np.isfinite(delta)):
+                    break
+                updated_shocks = period_shocks.copy()
+                updated_shocks[list(active_shock_indices)] += np.asarray(delta, dtype=np.float64)
+                if np.allclose(updated_shocks, period_shocks, rtol=0.0, atol=1e-12):
+                    break
+                period_shocks = updated_shocks
+            if constrained_state is None:
+                deviation = np.asarray(
+                    first_order_state_update(
+                        solution_matrix,
+                        self.timings,
+                        reduced_state,
+                        period_shocks,
+                    ),
+                    dtype=np.float64,
+                )
+                constrained_state = deviation + steady_state
             state_path[:, period] = constrained_state
+            shock_matrix[:, period] = period_shocks
             lag_state = constrained_state
             reduced_state = constrained_state[state_indices] - steady_state[state_indices]
-        return state_path
+        return _FirstOrderOBCSimulationResult(state_path=state_path, shocks=shock_matrix)
 
     def _simulate_sep_path(
         self,
@@ -3682,6 +3764,7 @@ class MacroModel:
             algorithm_used = "stochastic_extended_path"
             parameter_output = np.asarray(resolved_parameters, dtype=np.float64)
             steady_output = np.asarray(full_steady_state, dtype=np.float64)
+            shock_output = np.asarray(shock_matrix, dtype=np.float64)
         else:
             parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
                 first_order_result=first_order_result,
@@ -3695,12 +3778,14 @@ class MacroModel:
             if parsed_result is None or full_steady_state is None:
                 raise ValueError("Could not prepare a converged first-order solution for simulation.")
             if use_first_order_obc:
-                state_path = self._simulate_first_order_obc_path(
+                obc_result = self._simulate_first_order_obc_path(
                     shock_matrix,
                     first_order_result=parsed_result,
                     steady_state=np.asarray(full_steady_state, dtype=np.float64),
                     initial_state=initial_state,
                 )
+                state_path = obc_result.state_path
+                shock_output = obc_result.shocks
             else:
                 state_path = self._simulate_first_order_path(
                     shock_matrix,
@@ -3708,6 +3793,7 @@ class MacroModel:
                     steady_state=np.asarray(full_steady_state, dtype=np.float64),
                     initial_state=initial_state,
                 )
+                shock_output = np.asarray(shock_matrix, dtype=np.float64)
             algorithm_used = "first_order"
             parameter_output = np.asarray(parsed_result.parameter_values, dtype=np.float64)
             steady_output = np.asarray(full_steady_state, dtype=np.float64)
@@ -3719,7 +3805,7 @@ class MacroModel:
             variables=selected_variables,
             data=jnp.asarray(data, dtype=jnp.float64),
             state_path=jnp.asarray(state_path, dtype=jnp.float64),
-            shocks=jnp.asarray(shock_matrix, dtype=jnp.float64),
+            shocks=jnp.asarray(shock_output, dtype=jnp.float64),
             algorithm_used=algorithm_used,
             steady_state=jnp.asarray(steady_output, dtype=jnp.float64),
             parameter_values=jnp.asarray(parameter_output, dtype=jnp.float64),
@@ -3821,6 +3907,7 @@ class MacroModel:
                 )
             parameter_output = np.asarray(resolved_parameters, dtype=np.float64)
             steady_output = np.asarray(full_steady_state, dtype=np.float64)
+            shock_output = np.asarray(shock_scenarios, dtype=np.float64)
         else:
             parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
                 first_order_result=first_order_result,
@@ -3833,14 +3920,17 @@ class MacroModel:
             )
             if parsed_result is None or full_steady_state is None:
                 raise ValueError("Could not prepare a converged first-order solution for IRFs.")
+            shock_output = np.asarray(shock_scenarios, dtype=np.float64).copy()
             for scenario_idx in range(shock_scenarios.shape[2]):
                 if use_first_order_obc:
-                    state_paths[:, :, scenario_idx] = self._simulate_first_order_obc_path(
+                    obc_result = self._simulate_first_order_obc_path(
                         shock_scenarios[:, :, scenario_idx],
                         first_order_result=parsed_result,
                         steady_state=np.asarray(full_steady_state, dtype=np.float64),
                         initial_state=initial_state,
                     )
+                    state_paths[:, :, scenario_idx] = obc_result.state_path
+                    shock_output[:, :, scenario_idx] = obc_result.shocks
                 else:
                     state_paths[:, :, scenario_idx] = self._simulate_first_order_path(
                         shock_scenarios[:, :, scenario_idx],
@@ -3859,7 +3949,7 @@ class MacroModel:
             shock_names=shock_names,
             responses=jnp.asarray(responses, dtype=jnp.float64),
             state_paths=jnp.asarray(state_paths, dtype=jnp.float64),
-            shocks=jnp.asarray(shock_scenarios, dtype=jnp.float64),
+            shocks=jnp.asarray(shock_output, dtype=jnp.float64),
             algorithm_used=algorithm_used,
             steady_state=jnp.asarray(steady_output, dtype=jnp.float64),
             parameter_values=jnp.asarray(parameter_output, dtype=jnp.float64),
