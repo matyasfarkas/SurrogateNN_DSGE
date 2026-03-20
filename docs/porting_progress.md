@@ -795,11 +795,12 @@ Python/JAX status:
 - first-order OBC runtime requests now preserve user SEP horizons and also respect `max_obc_horizon` as a lower bound, with zero-padded deterministic shocks when the runtime SEP horizon exceeds the requested output horizon
 - the steady-state and calibrated-parameter Newton path now has symbolic-Jacobian safety fallbacks plus restart heuristics on both the NumPy and JAX implementations, so non-finite default guesses and singular autodiff Jacobians no longer fail immediately on the compiled first-order path
 - the Lyapunov layer now accepts the Julia-compatible algorithm names `bartels_stewart`, `bicgstab`, and `gmres`, with iterative fallback back to the existing dense direct solve when needed
-- tests cover parsed option capture, OBC runtime horizon routing, steady-state recovery from a non-finite default guess, Bartels-Stewart parity, iterative Lyapunov convergence, and iterative-to-direct fallback
+- the discrete Sylvester layer now accepts the Julia-compatible iterative algorithm names `bicgstab` and `gmres`, with parity against the dense direct solve and iterative fallback back to that direct solve when the Krylov path is cut short
+- tests cover parsed option capture, OBC runtime horizon routing, steady-state recovery from a non-finite default guess, Bartels-Stewart parity, iterative Lyapunov/Sylvester convergence, and iterative-to-direct fallback
 
 ## Explicit gaps
 
-- The Julia `:bartels_stewart`, `:bicgstab`, `:dqgmres`, and `:gmres` Sylvester variants are not ported yet.
+- The Julia `:bartels_stewart` and `:dqgmres` Sylvester variants are not ported yet.
 - The Julia QME `:schur` variant is now ported, but the JAX-facing primal solve is not fully GPU-native yet; until JAX exposes generalized `qz` / `ordqz`, the ordered-QZ step runs through SciPy on the host and only the reverse-mode derivative is native JAX.
 - The Python port now defaults public first-order workflows to `schur` for Julia parity, which means the default compiled JAX likelihood path also uses the host-callback ordered-QZ branch unless `qme_algorithm="doubling"` is requested explicitly.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.

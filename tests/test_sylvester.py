@@ -94,6 +94,54 @@ def test_direct_solver_is_autodiff_friendly() -> None:
     np.testing.assert_allclose(grad_value, expected, rtol=1e-10, atol=1e-10)
 
 
+def test_iterative_sylvester_algorithms_match_direct_solution() -> None:
+    a = jnp.array([[0.2, 0.05], [0.0, 0.3]])
+    b = jnp.array([[0.15, 0.02], [0.0, 0.1]])
+    c = jnp.array([[0.8, 0.1], [0.2, 0.4]])
+    direct = solve_discrete_sylvester_direct(a, b, c)
+
+    for algorithm in ("bicgstab", "gmres"):
+        outcome = solve_discrete_sylvester(
+            a,
+            b,
+            c,
+            algorithm=algorithm,
+            tol=1e-12,
+            acceptance_tol=1e-10,
+            max_iter=200,
+        )
+        assert outcome.algorithm == algorithm
+        assert outcome.converged
+        assert outcome.relative_residual < 1e-10
+        np.testing.assert_allclose(
+            outcome.solution,
+            direct.solution,
+            rtol=1e-9,
+            atol=1e-9,
+        )
+
+
+def test_iterative_sylvester_falls_back_to_direct_when_cut_short() -> None:
+    a = jnp.array([[0.3, 0.1], [0.0, 0.2]])
+    b = jnp.array([[0.2, 0.0], [0.05, 0.1]])
+    c = jnp.array([[0.7, 0.1], [0.2, 0.4]])
+
+    outcome = solve_discrete_sylvester(
+        a,
+        b,
+        c,
+        algorithm="gmres",
+        max_iter=1,
+        tol=1e-30,
+        fallback_to_direct=True,
+    )
+
+    assert outcome.algorithm == "direct"
+    assert outcome.fallback_used
+    assert outcome.converged
+    assert outcome.relative_residual < 1e-10
+
+
 def test_doubling_kernel_is_jittable() -> None:
     a = jnp.array([[0.2, 0.0], [0.1, 0.15]])
     b = jnp.array([[0.1, 0.05], [0.0, 0.2]])

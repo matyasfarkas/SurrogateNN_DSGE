@@ -11,7 +11,7 @@ import scipy.sparse.linalg as scipy_sparse_linalg
 from jax import lax
 
 LyapunovAlgorithm = Literal["doubling", "direct", "bartels_stewart", "bicgstab", "gmres"]
-SylvesterAlgorithm = Literal["doubling", "direct"]
+SylvesterAlgorithm = Literal["doubling", "direct", "bicgstab", "gmres"]
 
 
 class LyapunovResult(NamedTuple):
@@ -63,6 +63,18 @@ class _SylvesterDoublingState(NamedTuple):
     iterations: jax.Array
     rel_change: jax.Array
     done: jax.Array
+
+
+def _flatten_sylvester_matrix(x: np.ndarray) -> np.ndarray:
+    return np.asarray(x, dtype=np.float64).T.reshape(-1)
+
+
+def _unflatten_sylvester_matrix(
+    values: np.ndarray,
+    shape: tuple[int, int],
+) -> np.ndarray:
+    rows, cols = shape
+    return np.asarray(values, dtype=np.float64).reshape((cols, rows)).T
 
 
 def _cast_matrix_inputs(
@@ -493,6 +505,87 @@ def solve_discrete_sylvester_doubling(
     return SylvesterResult(solution, converged, final.iterations, rel_residual)
 
 
+def _solve_discrete_sylvester_iterative(
+    a: Union[jax.Array, np.ndarray],
+    b: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+    *,
+    algorithm: Literal["bicgstab", "gmres"],
+    initial_guess: Optional[Union[jax.Array, np.ndarray]] = None,
+    tol: float = 1e-14,
+    acceptance_tol: float = 1e-10,
+    max_iter: int = 500,
+) -> SylvesterResult:
+    a_arr, b_arr, c_arr = _cast_sylvester_inputs(a, b, c)
+    a_np = np.asarray(a_arr, dtype=np.float64)
+    b_np = np.asarray(b_arr, dtype=np.float64)
+    c_np = np.asarray(c_arr, dtype=np.float64)
+    n, m = c_np.shape
+
+    if initial_guess is None:
+        guess_np = np.zeros_like(c_np)
+    else:
+        guess_np = np.asarray(initial_guess, dtype=np.float64)
+        if guess_np.shape != c_np.shape:
+            raise ValueError(
+                f"initial_guess must match C's shape, got {guess_np.shape} and {c_np.shape}."
+            )
+
+    residual_rhs = a_np @ guess_np @ b_np + c_np - guess_np
+    rhs = _flatten_sylvester_matrix(residual_rhs)
+
+    def _matvec(vec: np.ndarray) -> np.ndarray:
+        x = _unflatten_sylvester_matrix(vec, (n, m))
+        return _flatten_sylvester_matrix(x - a_np @ x @ b_np)
+
+    operator = scipy_sparse_linalg.LinearOperator(
+        (n * m, n * m),
+        matvec=_matvec,
+        dtype=np.float64,
+    )
+    x0 = np.zeros(n * m, dtype=np.float64)
+    iterations = 0
+
+    def _callback(_: np.ndarray) -> None:
+        nonlocal iterations
+        iterations += 1
+
+    if algorithm == "bicgstab":
+        delta_vec, info = scipy_sparse_linalg.bicgstab(
+            operator,
+            rhs,
+            x0=x0,
+            rtol=tol,
+            atol=0.0,
+            maxiter=max_iter,
+            callback=_callback,
+        )
+    else:
+        delta_vec, info = scipy_sparse_linalg.gmres(
+            operator,
+            rhs,
+            x0=x0,
+            rtol=tol,
+            atol=0.0,
+            restart=min(max_iter, max(20, n * m)),
+            maxiter=max_iter,
+            callback=_callback,
+            callback_type="legacy",
+        )
+
+    delta = _unflatten_sylvester_matrix(np.asarray(delta_vec, dtype=np.float64), (n, m))
+    solution = jnp.asarray(delta + guess_np, dtype=a_arr.dtype)
+    rel_residual = discrete_sylvester_residual(a_arr, solution, b_arr, c_arr)
+    converged = (info == 0) & (rel_residual < acceptance_tol)
+    iteration_count = iterations if iterations > 0 else max(int(info), 0)
+    return SylvesterResult(
+        solution,
+        converged,
+        jnp.asarray(iteration_count),
+        rel_residual,
+    )
+
+
 def solve_discrete_sylvester(
     a: Union[jax.Array, np.ndarray],
     b: Union[jax.Array, np.ndarray],
@@ -505,10 +598,10 @@ def solve_discrete_sylvester(
     max_iter: int = 500,
     fallback_to_direct: bool = True,
 ) -> SylvesterOutcome:
-    if algorithm not in ("doubling", "direct"):
+    if algorithm not in ("doubling", "direct", "bicgstab", "gmres"):
         raise ValueError(
             f"Unsupported Sylvester algorithm {algorithm!r}. "
-            "Only 'doubling' and 'direct' are implemented in this port."
+            "Supported algorithms are 'doubling', 'direct', 'bicgstab', and 'gmres'."
         )
     a_arr, b_arr, c_arr = _cast_sylvester_inputs(a, b, c)
     _validate_finite_sylvester_inputs(a_arr, b_arr, c_arr)
@@ -549,6 +642,17 @@ def solve_discrete_sylvester(
             acceptance_tol=acceptance_tol,
             max_iter=max_iter,
         )
+    elif algorithm in ("bicgstab", "gmres"):
+        result = _solve_discrete_sylvester_iterative(
+            a_arr,
+            b_arr,
+            c_arr,
+            algorithm=algorithm,
+            initial_guess=initial_guess,
+            tol=tol,
+            acceptance_tol=acceptance_tol,
+            max_iter=max_iter,
+        )
     else:
         result = solve_discrete_sylvester_direct(
             a_arr,
@@ -561,7 +665,11 @@ def solve_discrete_sylvester(
     algorithm_used: SylvesterAlgorithm = algorithm
     fallback_used = False
 
-    if fallback_to_direct and algorithm == "doubling" and not bool(np.asarray(result.converged)):
+    if (
+        fallback_to_direct
+        and algorithm in ("doubling", "bicgstab", "gmres")
+        and not bool(np.asarray(result.converged))
+    ):
         direct_result = solve_discrete_sylvester_direct(
             a_arr,
             b_arr,
