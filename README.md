@@ -65,6 +65,7 @@ Implemented:
 - damped Newton non-stochastic steady-state solver
 - steady-state and calibrated-parameter Newton restart heuristics plus finite-difference Jacobian fallback on both the NumPy and JAX paths, so compiled first-order estimation no longer fails immediately on non-finite default guesses or singular autodiff Jacobians
 - conservative symbolic steady-state seeding from uniquely solvable steady-state equations when `@parameters ... symbolic = true`, on both the NumPy and JAX steady-state paths
+- a small nearest-parameter steady-state cache on both the NumPy and JAX paths, so repeated solves reuse nearby converged steady states as the default guess instead of restarting from the generic heuristic every time
 - calibrated-parameter resolution from either the joint steady-state solve or a supplied steady state
 - first-order DSGE perturbation solver with Julia `RBC_CME` fixture coverage
 - second-order DSGE perturbation solver with Julia-compatible compression matrices and Sylvester solve

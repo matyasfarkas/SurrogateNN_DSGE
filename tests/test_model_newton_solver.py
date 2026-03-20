@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import jax.numpy as jnp
 import numpy as np
 
 import surrogatenn_dsge.model as model_module
-from surrogatenn_dsge import parse_macro_model, solve_steady_state
+from surrogatenn_dsge import parse_macro_model, solve_steady_state, solve_steady_state_jax
 
 
 def test_newton_solver_falls_back_to_regularized_normal_equations(
@@ -78,4 +79,117 @@ end
         np.asarray([2.0], dtype=np.float64),
         rtol=0.0,
         atol=1e-8,
+    )
+
+
+_CACHE_SOURCE = """
+@model cache_model begin
+    x[0] = level
+end
+
+@parameters cache_model begin
+    level = 2.0
+end
+"""
+
+
+def test_steady_state_solver_uses_cached_guess_for_nearby_parameters(
+    monkeypatch,
+) -> None:
+    model = parse_macro_model(_CACHE_SOURCE)
+    baseline = solve_steady_state(model)
+    np.testing.assert_allclose(
+        np.asarray(baseline.base_steady_state, dtype=np.float64),
+        np.asarray([2.0], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+    captured: dict[str, np.ndarray] = {}
+
+    def fake_solver(
+        x0: np.ndarray,
+        *,
+        residual_fn,
+        jacobian_fn,
+        default_guess,
+        lower_bounds,
+        upper_bounds,
+        tol,
+        max_iter,
+        line_search_min_step,
+        nonfinite_message,
+    ):
+        del (
+            residual_fn,
+            jacobian_fn,
+            default_guess,
+            lower_bounds,
+            upper_bounds,
+            tol,
+            max_iter,
+            line_search_min_step,
+            nonfinite_message,
+        )
+        captured["x0"] = np.asarray(x0, dtype=np.float64)
+        return np.asarray(x0, dtype=np.float64), True, 0, 0.0
+
+    monkeypatch.setattr(model_module, "_solve_newton_system_with_restarts", fake_solver)
+    solve_steady_state(model, parameter_values=[2.1])
+
+    np.testing.assert_allclose(
+        captured["x0"],
+        np.asarray([2.0], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_jax_steady_state_solver_uses_cached_guess_for_nearby_parameters(
+    monkeypatch,
+) -> None:
+    model = parse_macro_model(_CACHE_SOURCE)
+    baseline = solve_steady_state(model)
+    np.testing.assert_allclose(
+        np.asarray(baseline.base_steady_state, dtype=np.float64),
+        np.asarray([2.0], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+    captured: dict[str, np.ndarray] = {}
+
+    def fake_solver(
+        x0,
+        *,
+        residual_fn,
+        jacobian_fn,
+        default_guess,
+        lower_bounds,
+        upper_bounds,
+        tol,
+        max_iter,
+        line_search_min_step,
+    ):
+        del (
+            residual_fn,
+            jacobian_fn,
+            default_guess,
+            lower_bounds,
+            upper_bounds,
+            tol,
+            max_iter,
+            line_search_min_step,
+        )
+        captured["x0"] = np.asarray(x0, dtype=np.float64)
+        return jnp.asarray(x0, dtype=jnp.float64), True, 0, 0.0
+
+    monkeypatch.setattr(model_module, "_solve_newton_system_jax_with_restarts", fake_solver)
+    solve_steady_state_jax(model, parameter_values=[2.1])
+
+    np.testing.assert_allclose(
+        captured["x0"],
+        np.asarray([2.0], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
     )

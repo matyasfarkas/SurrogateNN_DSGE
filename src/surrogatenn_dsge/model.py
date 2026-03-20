@@ -379,6 +379,12 @@ class MacroModel:
         )
 
     @cached_property
+    def _steady_state_solution_cache(
+        self,
+    ) -> list[tuple[np.ndarray, np.ndarray]]:
+        return []
+
+    @cached_property
     def _symbolic_steady_state_seed_entries(self) -> tuple[tuple[int, sp.Expr], ...]:
         if not bool(self.parameter_options.get("symbolic", False)):
             return ()
@@ -651,6 +657,47 @@ class MacroModel:
                 f"({n},), got {guess.shape}."
             )
         return guess
+
+    def _cached_steady_state_guess_for_parameters(
+        self,
+        parameter_values: Sequence[float],
+    ) -> Optional[np.ndarray]:
+        cache = self._steady_state_solution_cache
+        if not cache:
+            return None
+        target = np.asarray(parameter_values, dtype=np.float64)
+        best_guess: Optional[np.ndarray] = None
+        best_distance: Optional[float] = None
+        for cached_parameters, cached_guess in cache:
+            if cached_parameters.shape != target.shape or cached_guess.shape != (
+                len(self.steady_state_names),
+            ):
+                continue
+            if not np.isfinite(cached_parameters).all() or not np.isfinite(cached_guess).all():
+                continue
+            distance = float(np.sum((cached_parameters - target) ** 2))
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_guess = np.asarray(cached_guess, dtype=np.float64).copy()
+        return best_guess
+
+    def _remember_steady_state_solution(
+        self,
+        parameter_values: Sequence[float],
+        base_steady_state: Sequence[float],
+    ) -> None:
+        cached_parameters = np.asarray(parameter_values, dtype=np.float64)
+        cached_guess = np.asarray(base_steady_state, dtype=np.float64)
+        if cached_parameters.shape != (len(self.parameter_names),):
+            return
+        if cached_guess.shape != (len(self.steady_state_names),):
+            return
+        if not np.isfinite(cached_parameters).all() or not np.isfinite(cached_guess).all():
+            return
+        cache = self._steady_state_solution_cache
+        cache.append((cached_parameters.copy(), cached_guess.copy()))
+        if len(cache) > 32:
+            del cache[: len(cache) - 32]
 
     def _apply_symbolic_steady_state_seed(
         self,
@@ -1861,13 +1908,26 @@ class MacroModel:
             self._coerce_parameter_values(parameter_values),
             parameter_values_provided=parameter_values is not None,
         )
-        if initial_guess is None:
-            guess = self._apply_symbolic_steady_state_seed(guess, initial_parameters)
-        default_guess = self._coerce_steady_state_guess(None)
-        default_guess = self._apply_symbolic_steady_state_seed(
-            default_guess,
-            initial_parameters,
+        cached_guess = (
+            None
+            if initial_guess is not None
+            else self._cached_steady_state_guess_for_parameters(initial_parameters)
         )
+        if cached_guess is not None:
+            guess = cached_guess
+        if initial_guess is None:
+            if cached_guess is None:
+                guess = self._apply_symbolic_steady_state_seed(guess, initial_parameters)
+        default_guess = (
+            np.asarray(cached_guess, dtype=np.float64).copy()
+            if cached_guess is not None
+            else self._coerce_steady_state_guess(None)
+        )
+        if cached_guess is None:
+            default_guess = self._apply_symbolic_steady_state_seed(
+                default_guess,
+                initial_parameters,
+            )
 
         if self._parameter_equations_depend_on_steady_state:
             joint_initial = np.concatenate([guess, initial_parameters])
@@ -1918,15 +1978,28 @@ class MacroModel:
                 ),
                 dtype=np.float64,
             )
-            if initial_guess is None:
-                guess = self._apply_symbolic_steady_state_seed(
-                    guess,
+            if initial_guess is None and cached_guess is None:
+                cached_guess = self._cached_steady_state_guess_for_parameters(
                     resolved_parameters,
                 )
-            default_guess = self._apply_symbolic_steady_state_seed(
-                self._coerce_steady_state_guess(None),
-                resolved_parameters,
+                if cached_guess is not None:
+                    guess = cached_guess
+            if initial_guess is None:
+                if cached_guess is None:
+                    guess = self._apply_symbolic_steady_state_seed(
+                        guess,
+                        resolved_parameters,
+                    )
+            default_guess = (
+                np.asarray(cached_guess, dtype=np.float64).copy()
+                if cached_guess is not None
+                else self._coerce_steady_state_guess(None)
             )
+            if cached_guess is None:
+                default_guess = self._apply_symbolic_steady_state_seed(
+                    default_guess,
+                    resolved_parameters,
+                )
 
             def residual_fn(x: np.ndarray) -> np.ndarray:
                 return np.asarray(
@@ -1959,6 +2032,12 @@ class MacroModel:
             )
 
         full = self._expand_to_full_steady_state(base_steady_state)
+        converged_python = _coerce_optional_python_bool(converged)
+        if converged_python:
+            self._remember_steady_state_solution(
+                resolved_parameters,
+                base_steady_state,
+            )
         return SteadyStateResult(
             steady_state=jnp.asarray(full, dtype=jnp.float64),
             base_steady_state=jnp.asarray(base_steady_state, dtype=jnp.float64),
@@ -1985,15 +2064,29 @@ class MacroModel:
             self._coerce_parameter_values_jax(parameter_values),
             parameter_values_provided=parameter_values is not None,
         )
+        cached_guess = (
+            None
+            if initial_guess is not None
+            else self._cached_steady_state_guess_for_parameters(initial_parameters)
+        )
+        if cached_guess is not None:
+            guess = jnp.asarray(cached_guess, dtype=jnp.float64)
         if initial_guess is None:
-            guess = self._apply_symbolic_steady_state_seed_jax(
-                guess,
+            if cached_guess is None:
+                guess = self._apply_symbolic_steady_state_seed_jax(
+                    guess,
+                    initial_parameters,
+                )
+        default_guess = (
+            jnp.asarray(cached_guess, dtype=jnp.float64)
+            if cached_guess is not None
+            else jnp.asarray(self._coerce_steady_state_guess(None), dtype=jnp.float64)
+        )
+        if cached_guess is None:
+            default_guess = self._apply_symbolic_steady_state_seed_jax(
+                default_guess,
                 initial_parameters,
             )
-        default_guess = self._apply_symbolic_steady_state_seed_jax(
-            jnp.asarray(self._coerce_steady_state_guess(None), dtype=jnp.float64),
-            initial_parameters,
-        )
 
         if self._parameter_equations_depend_on_steady_state:
             joint_initial = jnp.concatenate([guess, initial_parameters])
@@ -2030,15 +2123,28 @@ class MacroModel:
                 max_iter=max_iter,
                 line_search_min_step=line_search_min_step,
             )
-            if initial_guess is None:
-                guess = self._apply_symbolic_steady_state_seed_jax(
-                    guess,
+            if initial_guess is None and cached_guess is None:
+                cached_guess = self._cached_steady_state_guess_for_parameters(
                     resolved_parameters,
                 )
-            default_guess = self._apply_symbolic_steady_state_seed_jax(
-                jnp.asarray(self._coerce_steady_state_guess(None), dtype=jnp.float64),
-                resolved_parameters,
+                if cached_guess is not None:
+                    guess = jnp.asarray(cached_guess, dtype=jnp.float64)
+            if initial_guess is None:
+                if cached_guess is None:
+                    guess = self._apply_symbolic_steady_state_seed_jax(
+                        guess,
+                        resolved_parameters,
+                    )
+            default_guess = (
+                jnp.asarray(cached_guess, dtype=jnp.float64)
+                if cached_guess is not None
+                else jnp.asarray(self._coerce_steady_state_guess(None), dtype=jnp.float64)
             )
+            if cached_guess is None:
+                default_guess = self._apply_symbolic_steady_state_seed_jax(
+                    default_guess,
+                    resolved_parameters,
+                )
 
             def residual_fn(x: jax.Array) -> jax.Array:
                 return jnp.asarray(
@@ -2061,6 +2167,12 @@ class MacroModel:
                 line_search_min_step=line_search_min_step,
             )
         full = self._expand_to_full_steady_state_jax(base_steady_state)
+        converged_python = _coerce_optional_python_bool(converged)
+        if converged_python:
+            self._remember_steady_state_solution(
+                resolved_parameters,
+                base_steady_state,
+            )
         return SteadyStateResult(
             steady_state=full,
             base_steady_state=base_steady_state,
@@ -7653,6 +7765,13 @@ def _evaluate_obc_expression_value(
     if not np.isfinite(numeric.real) or abs(numeric.imag) > 1e-10:
         raise ValueError(f"OBC branch expression did not evaluate to a finite real value: {expr}")
     return float(numeric.real)
+
+
+def _coerce_optional_python_bool(value: object) -> Optional[bool]:
+    try:
+        return bool(np.asarray(value))
+    except Exception:
+        return None
 
 
 def _freeze_obc_expression(

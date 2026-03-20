@@ -796,9 +796,10 @@ Python/JAX status:
 - first-order OBC runtime requests now preserve user SEP horizons and also respect `max_obc_horizon` as a lower bound, with zero-padded deterministic shocks when the runtime SEP horizon exceeds the requested output horizon
 - the steady-state and calibrated-parameter Newton path now has symbolic-Jacobian safety fallbacks plus restart heuristics on both the NumPy and JAX implementations, so non-finite default guesses and singular autodiff Jacobians no longer fail immediately on the compiled first-order path
 - when `@parameters ... symbolic = true`, the steady-state solver now also applies a conservative symbolic seeding pass that recursively substitutes uniquely solvable steady-state equations before Newton starts, on both the NumPy and JAX paths
+- the steady-state solver now also keeps a small nearest-parameter cache of converged solutions and reuses the closest cached steady state as the default guess on subsequent nearby solves, on both the NumPy and JAX paths
 - the Lyapunov layer now accepts the Julia-compatible algorithm names `bartels_stewart`, `bicgstab`, and `gmres`, with iterative fallback back to the existing dense direct solve when needed
 - the discrete Sylvester layer now accepts the Julia-compatible iterative algorithm names `bicgstab` and `gmres`, with parity against the dense direct solve and iterative fallback back to that direct solve when the Krylov path is cut short
-- tests cover parsed option capture, OBC runtime horizon routing, steady-state recovery from a non-finite default guess, Bartels-Stewart parity, iterative Lyapunov/Sylvester convergence, and iterative-to-direct fallback
+- tests cover parsed option capture, OBC runtime horizon routing, steady-state recovery from a non-finite default guess, nearest-solution steady-state cache reuse on both NumPy and JAX paths, Bartels-Stewart parity, iterative Lyapunov/Sylvester convergence, and iterative-to-direct fallback
 
 ## Explicit gaps
 
