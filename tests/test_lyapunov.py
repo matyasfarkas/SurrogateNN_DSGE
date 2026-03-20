@@ -7,6 +7,7 @@ import numpy as np
 from surrogatenn_dsge import (
     discrete_lyapunov_residual,
     solve_discrete_lyapunov,
+    solve_discrete_lyapunov_bartels_stewart,
     solve_discrete_lyapunov_direct,
     solve_discrete_lyapunov_doubling,
     solve_lyapunov_equation,
@@ -106,3 +107,55 @@ def test_residual_helper_matches_solver_output() -> None:
         rtol=1e-12,
         atol=1e-12,
     )
+
+
+def test_bartels_stewart_matches_direct_solution() -> None:
+    a = jnp.array([[0.2, -0.05], [0.1, 0.3]])
+    c = jnp.array([[1.0, 0.1], [0.1, 0.6]])
+
+    bartels_stewart = solve_discrete_lyapunov_bartels_stewart(a, c)
+    direct = solve_discrete_lyapunov_direct(a, c)
+
+    np.testing.assert_allclose(
+        bartels_stewart.solution,
+        direct.solution,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    assert bool(np.asarray(bartels_stewart.converged))
+
+
+def test_iterative_lyapunov_algorithms_converge() -> None:
+    a = jnp.array([[0.2, 0.05], [0.0, 0.3]])
+    c = jnp.array([[0.8, 0.1], [0.1, 0.4]])
+
+    for algorithm in ("bicgstab", "gmres"):
+        outcome = solve_discrete_lyapunov(
+            a,
+            c,
+            algorithm=algorithm,
+            tol=1e-12,
+            acceptance_tol=1e-10,
+            max_iter=200,
+        )
+        assert outcome.algorithm == algorithm
+        assert outcome.converged
+        assert outcome.relative_residual < 1e-10
+
+
+def test_iterative_lyapunov_falls_back_to_direct_when_cut_short() -> None:
+    a = jnp.array([[0.25, 0.1], [0.0, 0.35]])
+    c = jnp.array([[0.8, 0.1], [0.1, 0.4]])
+
+    outcome = solve_discrete_lyapunov(
+        a,
+        c,
+        algorithm="gmres",
+        max_iter=1,
+        tol=1e-30,
+        fallback_to_direct=True,
+    )
+
+    assert outcome.algorithm == "direct"
+    assert outcome.fallback_used
+    assert outcome.converged

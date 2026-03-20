@@ -203,6 +203,9 @@ class MacroModel:
     calibrated_parameter_names: tuple[str, ...]
     default_initial_guess: dict[str, float]
     bounds: dict[str, tuple[float, float]]
+    model_options: dict[str, object]
+    parameter_options: dict[str, object]
+    max_obc_horizon: int
     has_obc: bool
     timings: DSGETimings
     steady_state_names: tuple[str, ...]
@@ -930,6 +933,11 @@ class MacroModel:
         config: SEPConfig,
     ) -> np.ndarray:
         periods = shocks.shape[1]
+        runtime_periods = max(int(config.periods), periods)
+        runtime_shocks = shocks
+        if runtime_periods > periods:
+            runtime_shocks = np.zeros((shocks.shape[0], runtime_periods), dtype=np.float64)
+            runtime_shocks[:, :periods] = shocks
         initial_state_values = (
             np.asarray(steady_state, dtype=np.float64)
             if initial_state is None
@@ -947,28 +955,28 @@ class MacroModel:
             )
         )
         runtime_config = config
-        if runtime_config.periods != periods:
-            runtime_config = dataclass_replace(runtime_config, periods=periods)
+        if runtime_config.periods != runtime_periods:
+            runtime_config = dataclass_replace(runtime_config, periods=runtime_periods)
         sep_result = self.solve_stochastic_extended_path(
             parameter_values=parameter_values,
             steady_state=steady_state,
             initial_state=initial_state_values,
             terminal_state=terminal_state_values,
             config=runtime_config,
-            deterministic_shocks=shocks,
+            deterministic_shocks=runtime_shocks,
         )
         if not sep_result.solution.converged:
             raise ValueError("Stochastic extended path solve did not converge.")
         state_path = np.asarray(
-            sep_result.solution.mean_path[:, 1 : periods + 1],
+            sep_result.solution.mean_path[:, 1 : runtime_periods + 1],
             dtype=np.float64,
         )
-        if state_path.shape != (self.timings.nVars, periods):
+        if state_path.shape != (self.timings.nVars, runtime_periods):
             raise ValueError(
                 "SEP path returned an unexpected shape "
-                f"{state_path.shape}, expected ({self.timings.nVars}, {periods})."
+                f"{state_path.shape}, expected ({self.timings.nVars}, {runtime_periods})."
             )
-        return state_path
+        return state_path[:, :periods]
 
     def _evaluate_dynamic_residual_with_context(
         self,
@@ -1308,7 +1316,7 @@ class MacroModel:
                     "Resolving parameter values requires `steady_state` when the "
                     "`@parameters` block contains calibration equations."
                 )
-            base_steady_state = np.ones(len(self.steady_state_names), dtype=np.float64)
+            base_steady_state = self._coerce_steady_state_guess(None)
             residual_fn = lambda x: np.asarray(
                     self._parameter_equation_fn(*base_steady_state, *x),
                     dtype=np.float64,
@@ -1368,21 +1376,11 @@ class MacroModel:
                     axis=0,
                 )
 
-        jacobian_mode = {"use_finite_difference": False}
-
-        def jacobian_fn(x: np.ndarray) -> np.ndarray:
-            if jacobian_mode["use_finite_difference"]:
-                return _finite_difference_jacobian(residual_fn, x)
-            try:
-                return symbolic_jacobian_fn(x)
-            except Exception:
-                jacobian_mode["use_finite_difference"] = True
-                return _finite_difference_jacobian(residual_fn, x)
-
-        resolved, _, _, _ = _solve_newton_system(
+        resolved, _, _, _ = _solve_newton_system_with_restarts(
             parameters,
             residual_fn=residual_fn,
-            jacobian_fn=jacobian_fn,
+            jacobian_fn=_make_safe_jacobian_fn(residual_fn, symbolic_jacobian_fn),
+            default_guess=parameters,
             lower_bounds=lower_bounds,
             upper_bounds=upper_bounds,
             tol=tol,
@@ -1417,8 +1415,8 @@ class MacroModel:
                     "Resolving parameter values requires `steady_state` when the "
                     "`@parameters` block contains calibration equations."
                 )
-            base_steady_state = jnp.ones(
-                (len(self.steady_state_names),),
+            base_steady_state = jnp.asarray(
+                self._coerce_steady_state_guess(None),
                 dtype=jnp.float64,
             )
 
@@ -1492,7 +1490,7 @@ class MacroModel:
                     dtype=np.float64,
                 ).reshape(-1)
 
-            def jacobian_fn(x: np.ndarray) -> np.ndarray:
+            def symbolic_jacobian_fn(x: np.ndarray) -> np.ndarray:
                 if self.has_obc:
                     return self._evaluate_joint_steady_state_obc_jacobian(x)
                 return np.asarray(
@@ -1500,10 +1498,16 @@ class MacroModel:
                     dtype=np.float64,
                 )
 
-            solution, converged, iterations, residual_norm = _solve_newton_system(
+            solution, converged, iterations, residual_norm = _solve_newton_system_with_restarts(
                 joint_initial,
                 residual_fn=residual_fn,
-                jacobian_fn=jacobian_fn,
+                jacobian_fn=_make_safe_jacobian_fn(residual_fn, symbolic_jacobian_fn),
+                default_guess=np.concatenate(
+                    [
+                        self._coerce_steady_state_guess(None),
+                        initial_parameters,
+                    ]
+                ),
                 lower_bounds=lower_bounds,
                 upper_bounds=upper_bounds,
                 tol=tol,
@@ -1530,7 +1534,7 @@ class MacroModel:
                     dtype=np.float64,
                 ).reshape(-1)
 
-            def jacobian_fn(x: np.ndarray) -> np.ndarray:
+            def symbolic_jacobian_fn(x: np.ndarray) -> np.ndarray:
                 if self.has_obc:
                     return self._evaluate_steady_state_obc_jacobian(
                         x,
@@ -1541,10 +1545,11 @@ class MacroModel:
                     dtype=np.float64,
                 )
 
-            base_steady_state, converged, iterations, residual_norm = _solve_newton_system(
+            base_steady_state, converged, iterations, residual_norm = _solve_newton_system_with_restarts(
                 guess,
                 residual_fn=residual_fn,
-                jacobian_fn=jacobian_fn,
+                jacobian_fn=_make_safe_jacobian_fn(residual_fn, symbolic_jacobian_fn),
+                default_guess=self._coerce_steady_state_guess(None),
                 lower_bounds=self._bounds_vector(self.steady_state_names)[0],
                 upper_bounds=self._bounds_vector(self.steady_state_names)[1],
                 tol=tol,
@@ -3303,7 +3308,11 @@ class MacroModel:
                 raise ValueError("Could not prepare a converged steady state for simulation.")
             runtime_config = config
             if algorithm_token == "first_order":
-                runtime_config = dataclass_replace(runtime_config, periods=periods, branching_order=0)
+                runtime_config = dataclass_replace(
+                    runtime_config,
+                    periods=max(runtime_config.periods, periods, self.max_obc_horizon),
+                    branching_order=0,
+                )
             state_path = self._simulate_sep_path(
                 shock_matrix,
                 parameter_values=resolved_parameters,
@@ -3416,7 +3425,11 @@ class MacroModel:
                 raise ValueError("Could not prepare a converged steady state for IRFs.")
             runtime_config = config
             if algorithm_token == "first_order":
-                runtime_config = dataclass_replace(runtime_config, periods=periods, branching_order=0)
+                runtime_config = dataclass_replace(
+                    runtime_config,
+                    periods=max(runtime_config.periods, periods, self.max_obc_horizon),
+                    branching_order=0,
+                )
             for scenario_idx in range(shock_scenarios.shape[2]):
                 state_paths[:, :, scenario_idx] = self._simulate_sep_path(
                     shock_scenarios[:, :, scenario_idx],
@@ -4370,7 +4383,9 @@ def parse_macro_model(source: str) -> MacroModel:
         raise ValueError(
             "The `@parameters` block must target the same model name as `@model`."
         )
+    model_options = _parse_block_options(model_block["options"])
     raw_default_guess = _parse_parameter_block_guess(parameter_block["options"])
+    parameter_options = _parse_block_options(parameter_block["options"])
     loop_collections = _parse_source_loop_collections(
         source,
         (
@@ -4537,6 +4552,11 @@ def parse_macro_model(source: str) -> MacroModel:
         calibrated_parameter_names=parsed_parameter_block.calibrated_target_names,
     )
     has_obc = any(_expression_contains_obc(expr) for expr in dynamic_exprs)
+    max_obc_horizon = int(model_options.get("max_obc_horizon", 0) or 0)
+    if max_obc_horizon < 0:
+        raise ValueError(
+            f"`max_obc_horizon` must be non-negative, got {max_obc_horizon}."
+        )
 
     return MacroModel(
         name=model_block["name"],
@@ -4548,6 +4568,9 @@ def parse_macro_model(source: str) -> MacroModel:
         ),
         default_initial_guess=default_initial_guess,
         bounds=parsed_parameter_block.bounds,
+        model_options=model_options,
+        parameter_options=parameter_options,
+        max_obc_horizon=max_obc_horizon,
         has_obc=has_obc,
         timings=timings,
         steady_state_names=steady_state_names,
@@ -5705,6 +5728,146 @@ def _finite_difference_jacobian(
     return jacobian
 
 
+def _make_safe_jacobian_fn(
+    residual_fn: object,
+    symbolic_jacobian_fn: object,
+) -> object:
+    jacobian_mode = {"use_finite_difference": False}
+
+    def jacobian_fn(x: np.ndarray) -> np.ndarray:
+        if jacobian_mode["use_finite_difference"]:
+            return _finite_difference_jacobian(residual_fn, x)
+        try:
+            jacobian = np.asarray(symbolic_jacobian_fn(x), dtype=np.float64)
+        except Exception:
+            jacobian_mode["use_finite_difference"] = True
+            return _finite_difference_jacobian(residual_fn, x)
+        if not np.isfinite(jacobian).all():
+            jacobian_mode["use_finite_difference"] = True
+            return _finite_difference_jacobian(residual_fn, x)
+        return jacobian
+
+    return jacobian_fn
+
+
+def _newton_restart_candidates(
+    initial: Sequence[float],
+    *,
+    default_guess: Optional[Sequence[float]] = None,
+    lower_bounds: Optional[Sequence[float]] = None,
+    upper_bounds: Optional[Sequence[float]] = None,
+) -> tuple[np.ndarray, ...]:
+    initial_arr = np.asarray(initial, dtype=np.float64)
+    default_arr = (
+        np.asarray(default_guess, dtype=np.float64)
+        if default_guess is not None
+        else initial_arr
+    )
+    lower = (
+        np.asarray(lower_bounds, dtype=np.float64)
+        if lower_bounds is not None
+        else np.full_like(initial_arr, -np.inf)
+    )
+    upper = (
+        np.asarray(upper_bounds, dtype=np.float64)
+        if upper_bounds is not None
+        else np.full_like(initial_arr, np.inf)
+    )
+
+    candidates: list[np.ndarray] = []
+    candidate_keys: list[np.ndarray] = []
+
+    def _add(candidate: np.ndarray) -> None:
+        raw = np.asarray(candidate, dtype=np.float64)
+        clipped = np.clip(raw, lower, upper)
+        if any(np.allclose(clipped, existing, rtol=0.0, atol=1e-12) for existing in candidate_keys):
+            return
+        candidates.append(raw)
+        candidate_keys.append(clipped)
+
+    _add(initial_arr)
+    _add(default_arr)
+
+    positive_seed = np.where(np.abs(default_arr) > 0.0, np.abs(default_arr), 1.0)
+    for scale in (0.5, 2.0, 4.0, 8.0):
+        _add(default_arr * scale)
+        _add(np.where(default_arr >= 0.0, positive_seed * scale, -positive_seed * scale))
+
+    nudged_bounds = default_arr.copy()
+    finite_lower = np.isfinite(lower)
+    finite_upper = np.isfinite(upper)
+    nudged_bounds[finite_lower] = np.maximum(
+        nudged_bounds[finite_lower],
+        lower[finite_lower] + np.maximum(1e-3, 0.05 * np.maximum(1.0, np.abs(lower[finite_lower]))),
+    )
+    nudged_bounds[finite_upper] = np.minimum(
+        nudged_bounds[finite_upper],
+        upper[finite_upper] - np.maximum(1e-3, 0.05 * np.maximum(1.0, np.abs(upper[finite_upper]))),
+    )
+    _add(nudged_bounds)
+
+    midpoint = default_arr.copy()
+    finite_box = finite_lower & finite_upper
+    midpoint[finite_box] = 0.5 * (lower[finite_box] + upper[finite_box])
+    _add(midpoint)
+
+    return tuple(candidates)
+
+
+def _solve_newton_system_with_restarts(
+    initial: Sequence[float],
+    *,
+    residual_fn: object,
+    jacobian_fn: object,
+    default_guess: Optional[Sequence[float]] = None,
+    lower_bounds: Optional[Sequence[float]] = None,
+    upper_bounds: Optional[Sequence[float]] = None,
+    tol: float,
+    max_iter: int,
+    line_search_min_step: float,
+    nonfinite_message: str,
+) -> tuple[np.ndarray, bool, int, float]:
+    best_result: tuple[np.ndarray, bool, int, float] | None = None
+    last_error: Exception | None = None
+    for candidate in _newton_restart_candidates(
+        initial,
+        default_guess=default_guess,
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
+    ):
+        try:
+            result = _solve_newton_system(
+                candidate,
+                residual_fn=residual_fn,
+                jacobian_fn=jacobian_fn,
+                lower_bounds=lower_bounds,
+                upper_bounds=upper_bounds,
+                tol=tol,
+                max_iter=max_iter,
+                line_search_min_step=line_search_min_step,
+                nonfinite_message=nonfinite_message,
+            )
+        except ValueError as err:
+            last_error = err
+            continue
+        if best_result is None:
+            best_result = result
+        else:
+            _, best_converged, _, best_residual = best_result
+            _, converged, _, residual_norm = result
+            if (converged and not best_converged) or (
+                converged == best_converged and residual_norm < best_residual
+            ):
+                best_result = result
+        if result[1]:
+            return result
+    if best_result is not None:
+        return best_result
+    if last_error is not None:
+        raise last_error
+    raise ValueError(nonfinite_message)
+
+
 def _solve_newton_system_jax(
     initial: Sequence[float],
     *,
@@ -6453,6 +6616,75 @@ def _parse_parameter_block_guess(options_text: str) -> dict[str, float]:
         key_text, value_text = _split_top_level_operator(entry, "=>")
         guesses[_parse_guess_key(key_text)] = _parse_guess_value(value_text)
     return guesses
+
+
+def _strip_guess_option(options_text: str) -> str:
+    match = re.search(r"\bguess\s*=\s*Dict\s*\(", options_text)
+    if match is None:
+        return options_text
+    open_idx = options_text.find("(", match.start())
+    close_idx = _find_matching_delimiter(options_text, open_idx, "(", ")")
+    return (options_text[: match.start()] + " " + options_text[close_idx + 1 :]).strip()
+
+
+def _parse_block_options(options_text: str) -> dict[str, object]:
+    stripped = _strip_guess_option(options_text).strip()
+    if not stripped:
+        return {}
+
+    assignment_re = re.compile(
+        rf"(?P<name>{_IDENTIFIER_PATTERN})\s*=\s*",
+        re.UNICODE,
+    )
+    parsed: dict[str, object] = {}
+    cursor = 0
+    while True:
+        match = assignment_re.search(stripped, cursor)
+        if match is None:
+            break
+        value_start = match.end()
+        next_match = assignment_re.search(stripped, value_start)
+        value_end = next_match.start() if next_match is not None else len(stripped)
+        value_text = stripped[value_start:value_end].strip().rstrip(",")
+        if value_text:
+            parsed[match.group("name")] = _parse_block_option_value(value_text)
+        cursor = value_end
+    return parsed
+
+
+def _parse_block_option_value(text: str) -> object:
+    token = text.strip()
+    lowered = token.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if token.startswith(":") and len(token) > 1:
+        return token[1:]
+    if len(token) >= 2 and token[0] == token[-1] == '"':
+        return token[1:-1]
+    try:
+        value = parse_expr(
+            token,
+            local_dict=_function_locals(),
+            transformations=_TRANSFORMATIONS,
+        )
+    except Exception:
+        return token
+    if isinstance(value, sp.Integer):
+        return int(value)
+    if isinstance(value, (sp.Float, sp.Rational)):
+        numeric = float(value)
+        if numeric.is_integer():
+            return int(numeric)
+        return numeric
+    if value is sp.true:
+        return True
+    if value is sp.false:
+        return False
+    if isinstance(value, sp.Symbol):
+        return str(value)
+    return token
 
 
 def _parse_guess_key(text: str) -> str:

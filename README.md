@@ -16,6 +16,7 @@ Implemented:
 - discrete Lyapunov solver for `A X A^T + C = X`
 - JAX-native doubling kernel
 - JAX-native dense direct solver fallback
+- Julia-compatible Lyapunov algorithm names `bartels_stewart`, `bicgstab`, and `gmres`, with tested residual parity and direct fallback when the iterative path is cut short
 - discrete Sylvester solver for `A X B + C = X`
 - linear Gaussian state-space simulation, Kalman likelihood, filtering, and RTS smoothing
 - first-order inversion-filter likelihoods with per-period contributions and warmup support
@@ -43,11 +44,12 @@ Implemented:
 - explicit Schur / ordered-QZ determinacy diagnostics for first-order models, including stable-root counts, unique/indeterminate/no-stable classification, and parsed-model wrappers to inspect the Schur branch directly
 - parsed-model state-space, likelihood, filtering, gate-stat, and concrete/compiled NumPyro helpers now expose `qme_algorithm` so first-order workflows can explicitly choose between the doubling and Schur/QZ solution branches
 - MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
+- parsed model and parameter block options for common upstream directives, including `max_obc_horizon`, `simplify`, and `verbose`
 - basic `max` / `min` OBC syntax parsing with parsed-model `has_obc` detection, steady-state support, inactive-branch first-order solves, and SEP path solves on simple bound models
 - branch-frozen OBC derivative evaluation around active steady-state branches, so binding `max` / `min` constraints no longer linearize with spurious `0.5` derivatives at the kink
 - SEP Jacobian selection via `jacobian_method=\"auto\" | \"autodiff\" | \"finite_difference\" | \"subgradient\"`, with parsed OBC SEP solves automatically switching `auto` to a branch-frozen subgradient Jacobian on the Gauss-Hermite path
 - parsed-model OBC violation diagnostics, including single-period violation evaluation, full-path violation checks, and first-order rollout diagnostics that flag when the linearized path breaches a `max` / `min` bound
-- parsed-model `get_irf` and `simulate_model` runtime helpers for first-order and deterministic SEP paths, including named shock selection, grouped nested variable/shock-name inputs, Julia-style selector tokens such as `:all_excluding_obc` and `:all_excluding_auxiliary_and_obc`, explicit shock histories, Julia-style `shocks="simulate"` random simulations with deterministic seeding, variable selection, and OBC-aware `ignore_obc` routing
+- parsed-model `get_irf` and `simulate_model` runtime helpers for first-order and deterministic SEP paths, including named shock selection, grouped nested variable/shock-name inputs, Julia-style selector tokens such as `:all_excluding_obc` and `:all_excluding_auxiliary_and_obc`, explicit shock histories, Julia-style `shocks="simulate"` random simulations with deterministic seeding, variable selection, OBC-aware `ignore_obc` routing, and `max_obc_horizon`-aware SEP horizon extension for first-order OBC runtime requests
 - MacroModelling-style inline time-index `for` loops inside `@model` equations, including additive and `operator = :*` forms
 - explicit curly-brace indexed identifiers such as `y{H}[0]` and `rho{H}{F}` across parsed model and parameter blocks
 - top-level `for`-block expansion in `@model` for explicit identifier lists like `[H, F]`, named source-level collections like `countries = [:H, :F]`, and integer ranges
@@ -60,6 +62,7 @@ Implemented:
 - lazy symbolic matrix construction and cached `sympy.lambdify` compilation for parsed models, so large MacroModelling-style sources parse without eagerly compiling every derivative object
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
 - damped Newton non-stochastic steady-state solver
+- steady-state and calibrated-parameter Newton restart heuristics plus finite-difference Jacobian fallback for non-finite/singular symbolic starts, which materially improves raw-source solve robustness on hard steady states
 - calibrated-parameter resolution from either the joint steady-state solve or a supplied steady state
 - first-order DSGE perturbation solver with Julia `RBC_CME` fixture coverage
 - second-order DSGE perturbation solver with Julia-compatible compression matrices and Sylvester solve
@@ -79,7 +82,7 @@ Not implemented yet:
 
 - perturbation orders above third
 - ambiguous multi-family calibration-equation broadcasting remains guarded rather than inferred
-- the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds
+- the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess`, bounds, and the common upstream `simplify` / `verbose` options
 - full Julia-style occasionally binding constraint enforcement around kinks, including horizon-level OBC shock-sequence optimization, full kink-aware runtime switching, and the broader OBC runtime surface beyond the new parsed-model violation diagnostics
 - the exact first-order OBC shock-enforcement solver is still unported; the current runtime helpers enforce OBC models by routing first-order requests through deterministic SEP when `ignore_obc = false`
 - the broader Julia runtime selection surface is still narrower here than upstream, even though grouped nested name inputs and the main selector tokens like `:all_excluding_obc` and `:all_excluding_auxiliary_and_obc` are now supported

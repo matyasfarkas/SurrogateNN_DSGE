@@ -6,9 +6,11 @@ from typing import Literal, NamedTuple, Optional, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+import scipy.linalg as scipy_linalg
+import scipy.sparse.linalg as scipy_sparse_linalg
 from jax import lax
 
-LyapunovAlgorithm = Literal["doubling", "direct"]
+LyapunovAlgorithm = Literal["doubling", "direct", "bartels_stewart", "bicgstab", "gmres"]
 SylvesterAlgorithm = Literal["doubling", "direct"]
 
 
@@ -164,6 +166,80 @@ def solve_discrete_lyapunov_direct(
     return LyapunovResult(solution, converged, jnp.asarray(0), rel_residual)
 
 
+def solve_discrete_lyapunov_bartels_stewart(
+    a: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+    *,
+    acceptance_tol: float = 1e-12,
+) -> LyapunovResult:
+    a_arr, c_arr = _cast_matrix_inputs(a, c)
+    solution_np = scipy_linalg.solve_discrete_lyapunov(
+        np.asarray(a_arr, dtype=np.float64),
+        np.asarray(c_arr, dtype=np.float64),
+    )
+    solution = jnp.asarray(solution_np, dtype=a_arr.dtype)
+    rel_residual = discrete_lyapunov_residual(a_arr, solution, c_arr)
+    converged = rel_residual < acceptance_tol
+    return LyapunovResult(solution, converged, jnp.asarray(0), rel_residual)
+
+
+def _solve_discrete_lyapunov_iterative(
+    a: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+    *,
+    algorithm: Literal["bicgstab", "gmres"],
+    tol: float = 1e-14,
+    acceptance_tol: float = 1e-12,
+    max_iter: int = 500,
+) -> LyapunovResult:
+    a_arr, c_arr = _cast_matrix_inputs(a, c)
+    a_np = np.asarray(a_arr, dtype=np.float64)
+    c_np = np.asarray(c_arr, dtype=np.float64)
+    n = a_np.shape[0]
+    system = np.eye(n * n, dtype=np.float64) - np.kron(a_np, a_np)
+    rhs = c_np.T.reshape(-1)
+    iterations = 0
+
+    def _callback(_: np.ndarray) -> None:
+        nonlocal iterations
+        iterations += 1
+
+    if algorithm == "bicgstab":
+        solution_vec, info = scipy_sparse_linalg.bicgstab(
+            system,
+            rhs,
+            rtol=tol,
+            atol=0.0,
+            maxiter=max_iter,
+            callback=_callback,
+        )
+    else:
+        solution_vec, info = scipy_sparse_linalg.gmres(
+            system,
+            rhs,
+            rtol=tol,
+            atol=0.0,
+            restart=min(max_iter, max(20, n * n)),
+            maxiter=max_iter,
+            callback=_callback,
+            callback_type="legacy",
+        )
+
+    solution = jnp.asarray(
+        np.asarray(solution_vec, dtype=np.float64).reshape((n, n)).T,
+        dtype=a_arr.dtype,
+    )
+    rel_residual = discrete_lyapunov_residual(a_arr, solution, c_arr)
+    converged = (info == 0) & (rel_residual < acceptance_tol)
+    iteration_count = iterations if iterations > 0 else max(int(info), 0)
+    return LyapunovResult(
+        solution,
+        converged,
+        jnp.asarray(iteration_count),
+        rel_residual,
+    )
+
+
 def solve_discrete_lyapunov_doubling(
     a: Union[jax.Array, np.ndarray],
     c: Union[jax.Array, np.ndarray],
@@ -234,10 +310,11 @@ def solve_discrete_lyapunov(
     max_iter: int = 500,
     fallback_to_direct: bool = True,
 ) -> LyapunovOutcome:
-    if algorithm not in ("doubling", "direct"):
+    if algorithm not in ("doubling", "direct", "bartels_stewart", "bicgstab", "gmres"):
         raise ValueError(
             f"Unsupported Lyapunov algorithm {algorithm!r}. "
-            "Only 'doubling' and 'direct' are implemented in this port."
+            "Supported algorithms are 'doubling', 'direct', 'bartels_stewart', "
+            "'bicgstab', and 'gmres'."
         )
     _validate_finite_inputs(a, c)
 
@@ -245,6 +322,21 @@ def solve_discrete_lyapunov(
         result = solve_discrete_lyapunov_doubling(
             a,
             c,
+            tol=tol,
+            acceptance_tol=acceptance_tol,
+            max_iter=max_iter,
+        )
+    elif algorithm == "bartels_stewart":
+        result = solve_discrete_lyapunov_bartels_stewart(
+            a,
+            c,
+            acceptance_tol=acceptance_tol,
+        )
+    elif algorithm in ("bicgstab", "gmres"):
+        result = _solve_discrete_lyapunov_iterative(
+            a,
+            c,
+            algorithm=algorithm,
             tol=tol,
             acceptance_tol=acceptance_tol,
             max_iter=max_iter,
@@ -259,7 +351,11 @@ def solve_discrete_lyapunov(
     algorithm_used: LyapunovAlgorithm = algorithm
     fallback_used = False
 
-    if fallback_to_direct and algorithm == "doubling" and not bool(np.asarray(result.converged)):
+    if (
+        fallback_to_direct
+        and algorithm in ("doubling", "bicgstab", "gmres")
+        and not bool(np.asarray(result.converged))
+    ):
         direct_result = solve_discrete_lyapunov_direct(
             a,
             c,

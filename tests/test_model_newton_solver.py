@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 import surrogatenn_dsge.model as model_module
+from surrogatenn_dsge import parse_macro_model, solve_steady_state
 
 
 def test_newton_solver_falls_back_to_regularized_normal_equations(
@@ -57,3 +58,24 @@ def test_newton_solver_falls_back_to_regularized_normal_equations(
     assert converged
     assert iterations <= 2
     assert residual_norm <= 1e-8
+
+
+def test_steady_state_solver_restarts_when_default_guess_is_nonfinite() -> None:
+    source = """
+@model sqrt_domain begin
+    sqrt(n[0] - 2.0)
+end
+
+@parameters sqrt_domain begin
+end
+"""
+    model = parse_macro_model(source)
+    result = solve_steady_state(model)
+
+    assert result.converged
+    np.testing.assert_allclose(
+        np.asarray(result.steady_state, dtype=np.float64),
+        np.asarray([2.0], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-8,
+    )

@@ -782,16 +782,30 @@ Python/JAX status:
 - raw `models/QIPF/testttfmodel_ttf_minimum.jl` now parses successfully, with finite `SS_U` and `SS_U_ST` values under `sigma = 1`
 - tests cover synthetic tail-`if` and tail-`if`/`else` overrides plus the upstream QIPF minimum source file
 
+### 30. Steady-state restarts, common macro options, OBC runtime horizon plumbing, and Lyapunov variants
+
+Julia reference:
+
+- `src/MacroModelling.jl` (`max_obc_horizon`, `simplify`, `verbose`, steady-state solve surface)
+- `src/algorithms/lyapunov.jl`
+
+Python/JAX status:
+
+- parsed `@model` and `@parameters` options now record the common upstream directives `max_obc_horizon`, `simplify`, and `verbose` instead of silently dropping them
+- first-order OBC runtime requests now preserve user SEP horizons and also respect `max_obc_horizon` as a lower bound, with zero-padded deterministic shocks when the runtime SEP horizon exceeds the requested output horizon
+- the steady-state and calibrated-parameter Newton path now has symbolic-Jacobian safety fallbacks plus restart heuristics, so non-finite default guesses and singular symbolic Jacobians no longer fail immediately on the NumPy path
+- the Lyapunov layer now accepts the Julia-compatible algorithm names `bartels_stewart`, `bicgstab`, and `gmres`, with iterative fallback back to the existing dense direct solve when needed
+- tests cover parsed option capture, OBC runtime horizon routing, steady-state recovery from a non-finite default guess, Bartels-Stewart parity, iterative Lyapunov convergence, and iterative-to-direct fallback
+
 ## Explicit gaps
 
-- The Julia `:bartels_stewart`, `:bicgstab`, and `:gmres` Lyapunov variants are not ported yet.
 - The Julia `:bartels_stewart`, `:bicgstab`, `:dqgmres`, and `:gmres` Sylvester variants are not ported yet.
 - The Julia QME `:schur` variant is now ported, but the JAX-facing primal solve is not fully GPU-native yet; until JAX exposes generalized `qz` / `ordqz`, the ordered-QZ step runs through SciPy on the host and only the reverse-mode derivative is native JAX.
 - The Python port now defaults public first-order workflows to `schur` for Julia parity, which means the default compiled JAX likelihood path also uses the host-callback ordered-QZ branch unless `qme_algorithm="doubling"` is requested explicitly.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
-- The current dense Lyapunov fallback is also a direct Kronecker solve.
+- The current `algorithm="direct"` Lyapunov fallback is still a direct Kronecker solve even though the separate `algorithm="bartels_stewart"` path is now implemented.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.
-- The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess` and bounds.
+- The current parsed front end does not yet port the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess`, bounds, and the common `simplify` / `verbose` options.
 - The current parsed front end now supports basic `max` / `min` OBC syntax, branch-frozen linearization around the active steady-state branch, and parsed-model OBC violation diagnostics, but the Julia-specific enforcement layer around kinks, including explicit OBC shock-sequence optimization, subdifferential Newton options, and the broader OBC runtime surface, is still unported.
 - Parsed-model `get_irf` and `simulate_model` are now available, including Julia-style `shocks = :simulate` random-shock semantics, grouped nested runtime name selections, and the main selector tokens `:all_excluding_obc` / `:all_excluding_auxiliary_and_obc`, but the full Julia runtime surface is still broader, especially the exact first-order OBC artificial-shock enforcement path.
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
