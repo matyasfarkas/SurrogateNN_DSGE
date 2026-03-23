@@ -3,6 +3,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import warnings
 
 from surrogatenn_dsge import (
     parse_macro_model,
@@ -58,6 +59,16 @@ UNIT_RESTART_SOURCE = """
 end
 
 @parameters capital_unit_restart begin
+end
+"""
+
+
+GEOMETRIC_RESTART_SOURCE = """
+@model asset_geometric_restart begin
+    sqrt(asset[0] - 10.0)
+end
+
+@parameters asset_geometric_restart begin
 end
 """
 
@@ -165,6 +176,29 @@ def test_jax_steady_state_solver_uses_unit_scale_restart_candidates() -> None:
     np.testing.assert_allclose(
         numpy_result.steady_state,
         np.asarray([1.0], dtype=np.float64),
+        rtol=0,
+        atol=1e-8,
+    )
+
+
+def test_jax_steady_state_solver_uses_large_geometric_restart_candidates() -> None:
+    model = parse_macro_model(GEOMETRIC_RESTART_SOURCE)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        numpy_result = solve_steady_state(model)
+    jax_result = solve_steady_state_jax(model)
+
+    assert bool(np.asarray(jax_result.converged))
+    np.testing.assert_allclose(
+        jax_result.steady_state,
+        numpy_result.steady_state,
+        rtol=0,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        numpy_result.steady_state,
+        np.asarray([10.0], dtype=np.float64),
         rtol=0,
         atol=1e-8,
     )

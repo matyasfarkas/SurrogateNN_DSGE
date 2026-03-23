@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import jax.numpy as jnp
 import numpy as np
 
@@ -98,6 +100,29 @@ end
     np.testing.assert_allclose(
         np.asarray(result.steady_state, dtype=np.float64),
         np.asarray([1.0], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-8,
+    )
+
+
+def test_steady_state_solver_uses_large_geometric_restart_candidates() -> None:
+    source = """
+@model asset_geometric_restart begin
+    sqrt(asset[0] - 10.0)
+end
+
+@parameters asset_geometric_restart begin
+end
+"""
+    model = parse_macro_model(source)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        result = solve_steady_state(model)
+
+    assert result.converged
+    np.testing.assert_allclose(
+        np.asarray(result.steady_state, dtype=np.float64),
+        np.asarray([10.0], dtype=np.float64),
         rtol=0.0,
         atol=1e-8,
     )

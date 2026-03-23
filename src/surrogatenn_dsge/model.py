@@ -74,6 +74,7 @@ _TRANSFORMATIONS = standard_transformations + (
     convert_xor,
     implicit_multiplication_application,
 )
+_NEWTON_GEOMETRIC_RESTART_SCALES = (0.5, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
 
 _STEADY_STATE_ALIASES = {"ss", "stst", "steady", "steadystate", "steady_state"}
 _EXOGENOUS_ALIASES = {"x", "ex", "exo", "exogenous"}
@@ -6714,7 +6715,7 @@ def _newton_restart_candidates(
     unit_seed = np.where(default_arr >= 0.0, 1.0, -1.0)
     for scale in (1.0, 0.5, 0.1):
         _add(unit_seed * scale)
-    for scale in (0.5, 2.0, 4.0, 8.0):
+    for scale in _NEWTON_GEOMETRIC_RESTART_SCALES:
         _add(default_arr * scale)
         _add(np.where(default_arr >= 0.0, positive_seed * scale, -positive_seed * scale))
 
@@ -6768,7 +6769,7 @@ def _newton_restart_candidates_jax(
     sign_preserving_candidates = []
     for scale in (1.0, 0.5, 0.1):
         sign_preserving_candidates.append(unit_seed * scale)
-    for scale in (0.5, 2.0, 4.0, 8.0):
+    for scale in _NEWTON_GEOMETRIC_RESTART_SCALES:
         sign_preserving_candidates.append(default_arr * scale)
         sign_preserving_candidates.append(
             jnp.where(default_arr >= 0.0, positive_seed * scale, -positive_seed * scale)
