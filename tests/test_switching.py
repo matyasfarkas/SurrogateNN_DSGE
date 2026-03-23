@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from surrogatenn_dsge import (
+    SEPConfig,
     SwitchingLikelihoodConfig,
     RegimeSwitchConfig,
     apply_gate_padding,
@@ -16,11 +17,14 @@ from surrogatenn_dsge import (
     compute_gate_stat_series_jax,
     gate_probabilities,
     gate_probabilities_jax,
+    get_sep_inversion_last_diagnostics,
     inversion_loglikelihood_per_period_from_model,
     kalman_loglikelihood_per_period_from_model,
     mix_loglikelihood,
     parse_macro_model,
+    reset_sep_inversion_last_diagnostics,
     solve_first_order_model,
+    solve_stochastic_extended_path_model,
     switching_loglikelihood_from_model,
 )
 
@@ -36,6 +40,17 @@ end
 end
 """
 
+NONLINEAR_SWITCHING_SOURCE = """
+@model switching_sep_nonlinear begin
+    y[0] = rho * y[-1] + gamma * y[1]^2 + u[x]
+end
+
+@parameters switching_sep_nonlinear begin
+    gamma = 0.1
+    rho = 0.35
+end
+"""
+
 
 def _switching_fixture():
     model = parse_macro_model(SWITCHING_SOURCE)
@@ -45,6 +60,24 @@ def _switching_fixture():
     )
     levels = np.asarray([[0.1, -0.05, 0.12, 0.03, -0.02]], dtype=np.float64)
     return model, first_order_result, levels
+
+
+def _nonlinear_switching_fixture():
+    model = parse_macro_model(NONLINEAR_SWITCHING_SOURCE)
+    config = SEPConfig(
+        periods=4,
+        branching_order=1,
+        nnodes=3,
+        sparse_tree=True,
+        tol=1e-10,
+    )
+    solution = solve_stochastic_extended_path_model(
+        model,
+        config=config,
+        deterministic_shocks={"u": [0.2, -0.05, 0.0, 0.0]},
+    )
+    levels = np.asarray(solution.solution.mean_path[:, 1:], dtype=np.float64)
+    return model, config, levels
 
 
 def test_compute_switching_loglikelihood_matches_manual_formulas() -> None:
@@ -253,3 +286,68 @@ def test_model_switching_bridge_matches_manual_component_mix() -> None:
         rtol=1e-12,
         atol=1e-12,
     )
+
+
+def test_model_switching_bridge_supports_sparse_tree_sep_fom() -> None:
+    model, config, levels = _nonlinear_switching_fixture()
+    gate_probs = np.asarray([0.15, 0.35, 0.65, 0.85], dtype=np.float64)
+    switching_config = SwitchingLikelihoodConfig(soft_mixture="logsumexp")
+
+    rom = kalman_loglikelihood_per_period_from_model(
+        model,
+        levels,
+        observables=("y",),
+        steady_state_initial_guess={"y": 0.0},
+        measurement_error_scale=0.0,
+    )
+    reset_sep_inversion_last_diagnostics()
+    fom = inversion_loglikelihood_per_period_from_model(
+        model,
+        levels,
+        observables=("y",),
+        algorithm="stochastic_extended_path",
+        config=config,
+        sep_sparse_tree=True,
+        steady_state_initial_guess={"y": 0.0},
+        on_failure_loglikelihood=-1e12,
+    )
+    manual = compute_switching_loglikelihood(
+        rom,
+        fom,
+        gate_probs=gate_probs,
+        config=switching_config,
+    )
+
+    reset_sep_inversion_last_diagnostics()
+    bridged = switching_loglikelihood_from_model(
+        model,
+        levels,
+        observables=("y",),
+        gate_probs=gate_probs,
+        fom_algorithm="stochastic_extended_path",
+        config=config,
+        sep_sparse_tree=True,
+        steady_state_initial_guess={"y": 0.0},
+        measurement_error_scale=0.0,
+        on_failure_loglikelihood=-1e12,
+        switching_config=switching_config,
+    )
+    diagnostics = get_sep_inversion_last_diagnostics()
+
+    np.testing.assert_allclose(bridged.total, manual.total, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(
+        bridged.per_period,
+        manual.per_period,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        bridged.gate_probs,
+        gate_probs,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert diagnostics is not None
+    assert diagnostics["status"] == "ok"
+    assert diagnostics["sep_sparse_tree"] is True
+    assert diagnostics["sep_carry_warm_start_strategy"] == "shifted_tree"

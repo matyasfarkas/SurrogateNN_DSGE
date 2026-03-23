@@ -30,6 +30,7 @@ class _SEPInversionPredictResult(NamedTuple):
     obs_dev: np.ndarray
     state_next_dev: np.ndarray
     solution_guess: Optional[np.ndarray]
+    carry_guess: Optional[np.ndarray]
     sep_flag: int
     sep_err: float
 
@@ -456,6 +457,7 @@ def _sep_predict_step(
             obs_dev=np.zeros((len(observable_indices),), dtype=np.float64),
             state_next_dev=np.zeros_like(steady_state),
             solution_guess=None,
+            carry_guess=None,
             sep_flag=sep_flag,
             sep_err=sep_err,
         )
@@ -467,6 +469,7 @@ def _sep_predict_step(
             obs_dev=np.zeros((len(observable_indices),), dtype=np.float64),
             state_next_dev=np.zeros_like(steady_state),
             solution_guess=None,
+            carry_guess=None,
             sep_flag=sep_flag,
             sep_err=sep_err,
         )
@@ -474,11 +477,19 @@ def _sep_predict_step(
     next_state = mean_path[:, 1]
     next_state_dev = next_state - steady_state
     obs_dev = next_state_dev[list(observable_indices)]
+    stacked_states = np.asarray(solution.stacked_states, dtype=np.float64)
+    carry_guess = _build_sep_period_warm_start(
+        stacked_states,
+        np.asarray(solution.mean_path, dtype=np.float64),
+        tuple(int(count) for count in solution.group_counts),
+        terminal_state,
+    )
     return _SEPInversionPredictResult(
         ok=bool(np.isfinite(obs_dev).all() and np.isfinite(next_state_dev).all()),
         obs_dev=obs_dev,
         state_next_dev=next_state_dev,
-        solution_guess=np.asarray(solution.stacked_states, dtype=np.float64),
+        solution_guess=stacked_states,
+        carry_guess=carry_guess,
         sep_flag=sep_flag,
         sep_err=sep_err,
     )
@@ -498,10 +509,11 @@ def _sep_fd_jacobian(
     shock_sigmas: np.ndarray,
     sep_accept_tol: float,
     initial_guess: Optional[np.ndarray],
-) -> tuple[bool, np.ndarray, _SEPInversionPredictResult]:
+) -> tuple[bool, np.ndarray, _SEPInversionPredictResult, int]:
     n_observables = len(observable_indices)
     n_structural = len(structural_indices)
     jacobian = np.zeros((n_observables, n_structural), dtype=np.float64)
+    predict_calls = 1
     base_full = np.zeros((model.timings.nExo,), dtype=np.float64)
     base_full[structural_indices] = eps_struct
     base_eval = _sep_predict_step(
@@ -517,7 +529,7 @@ def _sep_fd_jacobian(
         initial_guess=initial_guess,
     )
     if not base_eval.ok:
-        return False, jacobian, base_eval
+        return False, jacobian, base_eval, predict_calls
 
     for column_index in range(n_structural):
         step_scale = max(
@@ -531,6 +543,7 @@ def _sep_fd_jacobian(
         perturbed[column_index] += step_size
         full_shocks = np.zeros((model.timings.nExo,), dtype=np.float64)
         full_shocks[structural_indices] = perturbed
+        predict_calls += 1
         perturbed_eval = _sep_predict_step(
             model,
             state_dev,
@@ -544,12 +557,75 @@ def _sep_fd_jacobian(
             initial_guess=base_eval.solution_guess,
         )
         if not perturbed_eval.ok:
-            return False, jacobian, base_eval
+            return False, jacobian, base_eval, predict_calls
         jacobian[:, column_index] = (
             perturbed_eval.obs_dev - base_eval.obs_dev
         ) / step_size
 
-    return True, jacobian, base_eval
+    return True, jacobian, base_eval, predict_calls
+
+
+def _build_sep_period_warm_start(
+    stacked_states: np.ndarray,
+    mean_path: np.ndarray,
+    group_counts: Sequence[int],
+    terminal_state: np.ndarray,
+) -> Optional[np.ndarray]:
+    stacked_array = np.asarray(stacked_states, dtype=np.float64).reshape(-1)
+    mean_path_array = np.asarray(mean_path, dtype=np.float64)
+    terminal_state_array = np.asarray(terminal_state, dtype=np.float64).reshape(-1)
+    counts = tuple(int(count) for count in group_counts)
+    if len(counts) < 2:
+        return None
+    state_dim = int(terminal_state_array.size)
+    if mean_path_array.shape[0] != state_dim:
+        return None
+    offsets = [0]
+    for time_index in range(1, len(counts)):
+        offsets.append(offsets[-1] + counts[time_index] * state_dim)
+    if stacked_array.shape != (offsets[-1],):
+        return None
+
+    states_by_time = []
+    for time_index in range(1, len(counts)):
+        start = offsets[time_index - 1]
+        end = offsets[time_index]
+        states_by_time.append(
+            stacked_array[start:end].reshape((counts[time_index], state_dim))
+        )
+
+    periods = len(counts) - 1
+    shifted_blocks = []
+    for time_index in range(1, periods + 1):
+        target_count = counts[time_index]
+        if time_index < periods:
+            source_states = states_by_time[time_index]
+            if mean_path_array.shape[1] > time_index + 1:
+                source_mean = mean_path_array[:, time_index + 1]
+            else:
+                source_mean = np.mean(source_states, axis=0)
+            if source_states.shape[0] == target_count:
+                block = source_states
+            elif source_states.shape[0] == 1:
+                block = np.repeat(source_states, target_count, axis=0)
+            elif target_count == 1:
+                block = np.asarray(source_mean, dtype=np.float64)[None, :]
+            else:
+                block = np.repeat(
+                    np.asarray(source_mean, dtype=np.float64)[None, :],
+                    target_count,
+                    axis=0,
+                )
+        else:
+            block = np.repeat(terminal_state_array[None, :], target_count, axis=0)
+        shifted_blocks.append(block.reshape(-1))
+
+    if not shifted_blocks:
+        return None
+    shifted = np.concatenate(shifted_blocks, axis=0)
+    if not np.isfinite(shifted).all():
+        return None
+    return shifted
 
 
 def _run_sep_inversion_filter(
@@ -650,6 +726,9 @@ def _run_sep_inversion_filter(
     per_period = np.zeros((n_periods,), dtype=np.float64)
     ll_total = 0.0
     log_two_pi = float(np.log(2.0 * np.pi))
+    period_predict_calls = np.zeros((n_periods,), dtype=np.int64)
+    period_carry_warm_start_used = [False] * n_periods
+    total_predict_calls = 0
 
     def fail(
         code: str,
@@ -686,6 +765,10 @@ def _run_sep_inversion_filter(
             "sep_inv_step_tol": float(sep_inv_step_tol),
             "sep_inv_resid_tol": float(sep_inv_resid_tol),
             "sep_inv_lambda": float(sep_inv_lambda),
+            "sep_carry_warm_start_strategy": "shifted_tree",
+            "sep_period_carry_warm_start_used": list(period_carry_warm_start_used),
+            "sep_period_predict_calls": period_predict_calls.tolist(),
+            "sep_total_predict_calls": int(total_predict_calls),
         }
         if message is not None:
             diagnostics["message"] = message
@@ -712,13 +795,17 @@ def _run_sep_inversion_filter(
             np.full((n_periods,), on_failure_loglikelihood, dtype=np.float64),
         )
 
+    carry_guess = None
     for period_index in range(n_periods):
         observation_t = observation_array[:, period_index]
-        base_guess = None
+        base_guess = carry_guess
+        period_carry_warm_start_used[period_index] = base_guess is not None
         final_eval: Optional[_SEPInversionPredictResult] = None
         final_jacobian: Optional[np.ndarray] = None
 
         if n_structural == 0:
+            period_predict_calls[period_index] += 1
+            total_predict_calls += 1
             pred = _sep_predict_step(
                 model,
                 state_dev,
@@ -744,12 +831,13 @@ def _run_sep_inversion_filter(
                     float(np.sum(residual**2)) + n_observables * log_two_pi
                 )
             state_dev = pred.state_next_dev
+            carry_guess = pred.carry_guess
             continue
 
         last_iteration = 0
         for iteration in range(1, sep_inv_maxit + 1):
             last_iteration = iteration
-            ok, jacobian, base_eval = _sep_fd_jacobian(
+            ok, jacobian, base_eval, predict_calls = _sep_fd_jacobian(
                 model,
                 state_dev,
                 eps_struct,
@@ -763,6 +851,8 @@ def _run_sep_inversion_filter(
                 sep_accept_tol=sep_accept_tol,
                 initial_guess=base_guess,
             )
+            period_predict_calls[period_index] += predict_calls
+            total_predict_calls += predict_calls
             if not ok:
                 return fail(
                     "fd_jacobian_failed",
@@ -878,6 +968,7 @@ def _run_sep_inversion_filter(
             )
 
         state_dev = final_eval.state_next_dev
+        carry_guess = final_eval.carry_guess
         if not np.isfinite(state_dev).all():
             return fail(
                 "nonfinite_state_update",
@@ -910,6 +1001,10 @@ def _run_sep_inversion_filter(
             "sep_inv_step_tol": float(sep_inv_step_tol),
             "sep_inv_resid_tol": float(sep_inv_resid_tol),
             "sep_inv_lambda": float(sep_inv_lambda),
+            "sep_carry_warm_start_strategy": "shifted_tree",
+            "sep_period_carry_warm_start_used": list(period_carry_warm_start_used),
+            "sep_period_predict_calls": period_predict_calls.tolist(),
+            "sep_total_predict_calls": int(total_predict_calls),
             "ll_total": ll_total,
             "final_state_finite": bool(np.isfinite(state_dev).all()),
         }

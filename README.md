@@ -24,6 +24,7 @@ Implemented:
 - parsed-model observable-name resolution and first-order state-space construction for Kalman estimation
 - parsed-model Kalman loglikelihood helpers for named observable data in levels, including per-period likelihood contributions, Julia-style sorted-observable handling for array inputs, and verified `Smets_Wouters_2007_HLT` parity against Julia for total likelihood, per-period likelihood, and filtered/smoothed Kalman state extraction
 - parsed-model inversion loglikelihood helpers for both first-order and stochastic extended path likelihoods, including SEP inversion diagnostics and Julia-style runtime override keywords
+- SEP inversion now carries shifted nonlinear warm starts across observation periods and reports period-level carry usage plus SEP predict-call counts in the diagnostics, which materially improves the sparse-tree FOM path used by the switching-order workflow
 - regime-switching likelihood mixing with supplied hard masks or gate probabilities, plus a parsed-model bridge that mixes ROM Kalman and FOM inversion per-period likelihoods
 - gate-stat computation, threshold calibration, probability mapping, padding, and automatic hard-regime assignment utilities for the switching layer
 - first-order rollout helpers and parsed-model linear gate-stat computation from supplied shock paths, including named observable/shock sigma inputs
@@ -78,6 +79,7 @@ Implemented:
 - sparse fishbone stochastic extended path branching for callback-based and parsed-model SEP solves, including real `sep_sparse_tree` runtime support in the inversion bridge
 - adaptive Levenberg-Marquardt damping, Julia-style SEP config controls for `linear_solver`, `fallback_solver`, stall detection, and bounded backtracking line search, explicit config validation, and checked warm-start support for more robust nonlinear SEP solves
 - automatic first-order linear-path warm starts for parsed-model SEP solves and deterministic SEP runtime fallbacks, with explicit `initial_guess` still taking precedence
+- the high-level switching bridge is now regression-tested on a nonlinear sparse-tree SEP FOM path as well, so ROM Kalman plus sparse-tree SEP inversion can be compared end to end against a manual likelihood mixture on the same model
 - HMC expectation backend for both SEP callback APIs, including parsed-model SEP solves and optional parallel tempering
 - parsed-model stochastic extended path solve path with JAX dynamic residual evaluation and residual-expectation averaging over future branches
 - focused tests for residuals, symmetry, fallback behavior, JIT, autodiff, parser parity, inversion filtering, switching likelihoods, gate calibration, and multi-model JAX compile smoke across upstream model files

@@ -255,3 +255,36 @@ def test_sep_inversion_honors_sparse_tree_in_config() -> None:
     assert diagnostics["status"] == "ok"
     assert diagnostics["sep_sparse_tree"] is True
     assert diagnostics["sep_periods"] == 4
+
+
+def test_sep_inversion_reuses_shifted_period_warm_starts() -> None:
+    model, _, levels = _sep_inversion_fixture()
+    config = SEPConfig(
+        periods=4,
+        branching_order=1,
+        nnodes=3,
+        sparse_tree=True,
+        tol=1e-7,
+    )
+
+    reset_sep_inversion_last_diagnostics()
+    value = inversion_loglikelihood_from_model(
+        model,
+        levels,
+        observables=("y",),
+        algorithm="stochastic_extended_path",
+        config=config,
+        on_failure_loglikelihood=-1e12,
+    )
+    diagnostics = get_sep_inversion_last_diagnostics()
+
+    assert np.isfinite(value)
+    assert diagnostics is not None
+    assert diagnostics["status"] == "ok"
+    assert diagnostics["sep_carry_warm_start_strategy"] == "shifted_tree"
+    assert diagnostics["sep_period_carry_warm_start_used"] == [False, True, True]
+    assert diagnostics["sep_total_predict_calls"] >= levels.shape[1]
+    assert diagnostics["sep_period_predict_calls"][0] >= 1
+    assert diagnostics["sep_period_predict_calls"][1] >= 1
+    assert diagnostics["sep_period_predict_calls"][2] >= 1
+    assert sum(diagnostics["sep_period_predict_calls"]) == diagnostics["sep_total_predict_calls"]

@@ -810,6 +810,22 @@ Python/JAX status:
 - explicit `initial_guess` still takes precedence and bypasses the automatic warm-start builder
 - focused tests verify that parsed-model SEP receives the expected linear warm start on a toy nonlinear model, that explicit warm starts override it, and that the broader SEP/runtime regressions still pass
 
+### 53. Sparse-tree SEP inversion carry warm starts and switching-path coverage
+
+Julia reference:
+
+- `src/sep_solver.jl`
+- `src/sep_simulation.jl`
+- the ROM1/FOM switching-order workflow in `SurrogateNN_Estimation.jl`, where sparse-tree SEP is the scalable nonlinear leg that needs to be reused period by period rather than restarted from a flat guess
+
+Python/JAX status:
+
+- the SEP inversion filter now carries a shifted nonlinear tree warm start from one observation period to the next instead of restarting every period from `None`
+- the carry warm start is built from the previous SEP solution itself: branch-specific states are preserved when the sparse-tree group counts line up across adjacent horizons, and the weighted mean path is replicated when they do not
+- SEP inversion diagnostics now report the carry strategy, a per-period boolean showing whether a carried warm start was used, per-period SEP predict-call counts, and the total number of SEP predict calls across the sample
+- focused inversion tests now verify that sparse-tree SEP inversion actually reuses carried warm starts on later periods instead of only exposing the option in the API
+- the high-level switching bridge is now regression-tested on a nonlinear sparse-tree SEP FOM path, verifying that `switching_loglikelihood_from_model(..., fom_algorithm="stochastic_extended_path", sep_sparse_tree=True)` matches a manual ROM/FOM likelihood mixture and preserves the sparse-tree SEP diagnostics
+
 ### 30. Steady-state restarts, common macro options, OBC runtime horizon plumbing, and Lyapunov variants
 
 Julia reference:
