@@ -25,6 +25,7 @@ from surrogatenn_dsge import (
     reset_sep_inversion_last_diagnostics,
     solve_first_order_model,
     solve_stochastic_extended_path_model,
+    switching_pipeline_report_from_model,
     switching_loglikelihood_from_model,
 )
 
@@ -351,3 +352,53 @@ def test_model_switching_bridge_supports_sparse_tree_sep_fom() -> None:
     assert diagnostics["status"] == "ok"
     assert diagnostics["sep_sparse_tree"] is True
     assert diagnostics["sep_carry_warm_start_strategy"] == "shifted_tree"
+
+
+def test_switching_pipeline_report_collects_sparse_tree_sep_comparison() -> None:
+    model, config, levels = _nonlinear_switching_fixture()
+    gate_probs = np.asarray([0.15, 0.35, 0.65, 0.85], dtype=np.float64)
+
+    report = switching_pipeline_report_from_model(
+        model,
+        levels,
+        observables=("y",),
+        gate_probs=gate_probs,
+        fom_algorithm="stochastic_extended_path",
+        config=config,
+        sep_sparse_tree=True,
+        steady_state_initial_guess={"y": 0.0},
+        measurement_error_scale=0.0,
+        on_failure_loglikelihood=-1e12,
+        switching_config=SwitchingLikelihoodConfig(soft_mixture="logsumexp"),
+        benchmark_reps=1,
+    )
+
+    assert report["ll_rom"].shape == (levels.shape[1],)
+    assert report["ll_fom"].shape == (levels.shape[1],)
+    assert report["ll_switching"].shape == (levels.shape[1],)
+    np.testing.assert_allclose(
+        np.sum(report["ll_switching"]),
+        report["switching_total"],
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    assert report["comparison"]["n"] == levels.shape[1]
+    assert report["gate_stats"]["periods_total"] == levels.shape[1]
+    assert report["gate_stats"]["periods_nonlinear"] == 2
+    np.testing.assert_allclose(
+        report["decomposition"]["ll_mixed_total"],
+        np.sum(np.where(report["hard_mask"], report["ll_fom"], report["ll_rom"])),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    assert report["runtime"]["runtime_fom_s"] is not None
+    assert report["runtime"]["runtime_switching_s"] is not None
+    assert report["fom_sep_diagnostics"] is not None
+    assert report["switching_sep_diagnostics"] is not None
+    assert report["fom_sep_diagnostics"]["sep_sparse_tree"] is True
+    assert report["switching_sep_diagnostics"]["sep_sparse_tree"] is True
+    assert report["fom_sep_diagnostics"]["sep_carry_warm_start_strategy"] == "shifted_tree"
+    assert (
+        report["switching_sep_diagnostics"]["sep_carry_warm_start_strategy"]
+        == "shifted_tree"
+    )

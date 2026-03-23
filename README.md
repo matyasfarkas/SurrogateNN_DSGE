@@ -26,6 +26,7 @@ Implemented:
 - parsed-model inversion loglikelihood helpers for both first-order and stochastic extended path likelihoods, including SEP inversion diagnostics and Julia-style runtime override keywords
 - SEP inversion now carries shifted nonlinear warm starts across observation periods and reports period-level carry usage plus SEP predict-call counts in the diagnostics, which materially improves the sparse-tree FOM path used by the switching-order workflow
 - regime-switching likelihood mixing with supplied hard masks or gate probabilities, plus a parsed-model bridge that mixes ROM Kalman and FOM inversion per-period likelihoods
+- a parsed-model switching pipeline report helper that runs ROM likelihoods, FOM likelihoods, switching likelihoods, hard-mask decompositions, gate summaries, SEP diagnostics, and optional runtime comparisons in one call, so sparse-tree SEP switching paths can be compared without manual stitching
 - gate-stat computation, threshold calibration, probability mapping, padding, and automatic hard-regime assignment utilities for the switching layer
 - first-order rollout helpers and parsed-model linear gate-stat computation from supplied shock paths, including named observable/shock sigma inputs
 - JAX-native gate-stat kernels and a compiled parsed-model first-order supplied-shock gate-stat helper, so linear gate diagnostics can now be built under `jax.jit` from solved first-order paths as well

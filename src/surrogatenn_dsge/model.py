@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from time import perf_counter
 from dataclasses import dataclass, replace as dataclass_replace
 from functools import cached_property
 import re
-from typing import Mapping, NamedTuple, Optional, Sequence, Union
+from typing import Any, Mapping, NamedTuple, Optional, Sequence, Union
 
 import jax
 from jax import lax
@@ -42,6 +43,8 @@ from .dsge import (
 from .inversion import (
     first_order_inversion_loglikelihood,
     first_order_inversion_loglikelihood_per_period,
+    get_sep_inversion_last_diagnostics,
+    reset_sep_inversion_last_diagnostics,
     sep_inversion_loglikelihood,
     sep_inversion_loglikelihood_per_period,
 )
@@ -65,8 +68,12 @@ from .switching import (
     LinearGateStatsResult,
     SwitchingLikelihoodConfig,
     SwitchingLikelihoodResult,
+    compute_gate_stats,
     compute_gate_stat_series,
     compute_switching_loglikelihood,
+    evaluate_switching_vs_fom,
+    summarize_loglik_decomposition,
+    summarize_runtime,
 )
 from .linalg import solve_discrete_lyapunov_direct
 
@@ -3388,6 +3395,176 @@ class MacroModel:
             config=switching_config,
         )
 
+    def switching_pipeline_report(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        observables: Optional[Sequence[str] | str] = None,
+        gate_probs: Optional[Sequence[float]] = None,
+        hard_mask: Optional[Sequence[bool]] = None,
+        fom_algorithm: str = "stochastic_extended_path",
+        first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        qme_algorithm: str = "schur",
+        initial_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+        initial_covariance_strategy: str = "theoretical",
+        measurement_error_scale: float = 1e-9,
+        measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+        presample_periods: int = 0,
+        jitter: float = 1e-9,
+        on_failure_loglikelihood: float = -np.inf,
+        config: SEPConfig = SEPConfig(),
+        sep_periods: Optional[int] = None,
+        sep_order: Optional[int] = None,
+        sep_nnodes: Optional[int] = None,
+        sep_sparse_tree: Optional[bool] = None,
+        sep_maxit: Optional[int] = None,
+        sep_tol: Optional[float] = None,
+        sep_accept_tol: float = 1e-3,
+        sep_shock_scale: Optional[float] = None,
+        sep_inv_maxit: int = 8,
+        sep_inv_step_tol: float = 1e-6,
+        sep_inv_resid_tol: float = 1e-6,
+        sep_inv_lambda: float = 1e-4,
+        switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+        benchmark_reps: int = 0,
+    ) -> dict[str, Any]:
+        common_kwargs = dict(
+            observables=observables,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            qme_algorithm=qme_algorithm,
+            initial_state=initial_state,
+            terminal_state=terminal_state,
+            presample_periods=presample_periods,
+            on_failure_loglikelihood=on_failure_loglikelihood,
+            config=config,
+            sep_periods=sep_periods,
+            sep_order=sep_order,
+            sep_nnodes=sep_nnodes,
+            sep_sparse_tree=sep_sparse_tree,
+            sep_maxit=sep_maxit,
+            sep_tol=sep_tol,
+            sep_accept_tol=sep_accept_tol,
+            sep_shock_scale=sep_shock_scale,
+            sep_inv_maxit=sep_inv_maxit,
+            sep_inv_step_tol=sep_inv_step_tol,
+            sep_inv_resid_tol=sep_inv_resid_tol,
+            sep_inv_lambda=sep_inv_lambda,
+        )
+        kalman_kwargs = dict(
+            observables=observables,
+            first_order_result=first_order_result,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            qme_algorithm=qme_algorithm,
+            initial_covariance_strategy=initial_covariance_strategy,
+            measurement_error_scale=measurement_error_scale,
+            measurement_error_covariance=measurement_error_covariance,
+            presample_periods=presample_periods,
+            jitter=jitter,
+            on_failure_loglikelihood=on_failure_loglikelihood,
+        )
+
+        rom = np.asarray(
+            self.kalman_loglikelihood_per_period(observations, **kalman_kwargs),
+            dtype=np.float64,
+        )
+        reset_sep_inversion_last_diagnostics()
+        fom = np.asarray(
+            self.inversion_loglikelihood_per_period(
+                observations,
+                algorithm=fom_algorithm,
+                **common_kwargs,
+            ),
+            dtype=np.float64,
+        )
+        fom_sep_diagnostics = get_sep_inversion_last_diagnostics()
+        reset_sep_inversion_last_diagnostics()
+        switching = self.switching_loglikelihood(
+            observations,
+            gate_probs=gate_probs,
+            hard_mask=hard_mask,
+            fom_algorithm=fom_algorithm,
+            initial_covariance_strategy=initial_covariance_strategy,
+            measurement_error_scale=measurement_error_scale,
+            measurement_error_covariance=measurement_error_covariance,
+            jitter=jitter,
+            switching_config=switching_config,
+            **common_kwargs,
+        )
+        switching_sep_diagnostics = get_sep_inversion_last_diagnostics()
+
+        runtime_fom_s: Optional[float] = None
+        runtime_switching_s: Optional[float] = None
+        if benchmark_reps < 0:
+            raise ValueError("benchmark_reps must be >= 0.")
+        if benchmark_reps > 0:
+            start = perf_counter()
+            for _ in range(benchmark_reps):
+                reset_sep_inversion_last_diagnostics()
+                self.inversion_loglikelihood_per_period(
+                    observations,
+                    algorithm=fom_algorithm,
+                    **common_kwargs,
+                )
+            runtime_fom_s = (perf_counter() - start) / benchmark_reps
+
+            start = perf_counter()
+            for _ in range(benchmark_reps):
+                reset_sep_inversion_last_diagnostics()
+                self.switching_loglikelihood(
+                    observations,
+                    gate_probs=gate_probs,
+                    hard_mask=hard_mask,
+                    fom_algorithm=fom_algorithm,
+                    initial_covariance_strategy=initial_covariance_strategy,
+                    measurement_error_scale=measurement_error_scale,
+                    measurement_error_covariance=measurement_error_covariance,
+                    jitter=jitter,
+                    switching_config=switching_config,
+                    **common_kwargs,
+                )
+            runtime_switching_s = (perf_counter() - start) / benchmark_reps
+
+        hard_mask_array = np.asarray(switching.hard_mask, dtype=bool)
+        ll_switching = np.asarray(switching.per_period, dtype=np.float64)
+        comparison = evaluate_switching_vs_fom(
+            ll_switching,
+            fom,
+            runtime_switching=runtime_switching_s,
+            runtime_fom=runtime_fom_s,
+        )
+        return {
+            "ll_rom": rom,
+            "ll_fom": fom,
+            "ll_switching": ll_switching,
+            "switching_total": float(np.asarray(switching.total, dtype=np.float64)),
+            "gate_probs": np.asarray(switching.gate_probs, dtype=np.float64),
+            "hard_mask": hard_mask_array,
+            "comparison": comparison,
+            "decomposition": summarize_loglik_decomposition(rom, fom, hard_mask_array),
+            "gate_stats": compute_gate_stats(hard_mask_array),
+            "runtime": summarize_runtime(
+                runtime_switching_s=runtime_switching_s,
+                runtime_fom_s=runtime_fom_s,
+            ),
+            "fom_sep_diagnostics": fom_sep_diagnostics,
+            "switching_sep_diagnostics": switching_sep_diagnostics,
+        }
+
     def _normalize_linear_filter_options(
         self,
         *,
@@ -6173,6 +6350,84 @@ def switching_loglikelihood_from_model(
         sep_inv_resid_tol=sep_inv_resid_tol,
         sep_inv_lambda=sep_inv_lambda,
         switching_config=switching_config,
+    )
+
+
+def switching_pipeline_report_from_model(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    observables: Optional[Sequence[str] | str] = None,
+    gate_probs: Optional[Sequence[float]] = None,
+    hard_mask: Optional[Sequence[bool]] = None,
+    fom_algorithm: str = "stochastic_extended_path",
+    first_order_result: Optional[ParsedModelFirstOrderResult] = None,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    presample_periods: int = 0,
+    jitter: float = 1e-9,
+    on_failure_loglikelihood: float = -np.inf,
+    config: SEPConfig = SEPConfig(),
+    sep_periods: Optional[int] = None,
+    sep_order: Optional[int] = None,
+    sep_nnodes: Optional[int] = None,
+    sep_sparse_tree: Optional[bool] = None,
+    sep_maxit: Optional[int] = None,
+    sep_tol: Optional[float] = None,
+    sep_accept_tol: float = 1e-3,
+    sep_shock_scale: Optional[float] = None,
+    sep_inv_maxit: int = 8,
+    sep_inv_step_tol: float = 1e-6,
+    sep_inv_resid_tol: float = 1e-6,
+    sep_inv_lambda: float = 1e-4,
+    switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+    benchmark_reps: int = 0,
+) -> dict[str, Any]:
+    return model.switching_pipeline_report(
+        observations,
+        observables=observables,
+        gate_probs=gate_probs,
+        hard_mask=hard_mask,
+        fom_algorithm=fom_algorithm,
+        first_order_result=first_order_result,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        qme_algorithm=qme_algorithm,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        initial_covariance_strategy=initial_covariance_strategy,
+        measurement_error_scale=measurement_error_scale,
+        measurement_error_covariance=measurement_error_covariance,
+        presample_periods=presample_periods,
+        jitter=jitter,
+        on_failure_loglikelihood=on_failure_loglikelihood,
+        config=config,
+        sep_periods=sep_periods,
+        sep_order=sep_order,
+        sep_nnodes=sep_nnodes,
+        sep_sparse_tree=sep_sparse_tree,
+        sep_maxit=sep_maxit,
+        sep_tol=sep_tol,
+        sep_accept_tol=sep_accept_tol,
+        sep_shock_scale=sep_shock_scale,
+        sep_inv_maxit=sep_inv_maxit,
+        sep_inv_step_tol=sep_inv_step_tol,
+        sep_inv_resid_tol=sep_inv_resid_tol,
+        sep_inv_lambda=sep_inv_lambda,
+        switching_config=switching_config,
+        benchmark_reps=benchmark_reps,
     )
 
 

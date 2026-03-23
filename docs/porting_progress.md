@@ -826,6 +826,19 @@ Python/JAX status:
 - focused inversion tests now verify that sparse-tree SEP inversion actually reuses carried warm starts on later periods instead of only exposing the option in the API
 - the high-level switching bridge is now regression-tested on a nonlinear sparse-tree SEP FOM path, verifying that `switching_loglikelihood_from_model(..., fom_algorithm="stochastic_extended_path", sep_sparse_tree=True)` matches a manual ROM/FOM likelihood mixture and preserves the sparse-tree SEP diagnostics
 
+### 54. Parsed-model switching pipeline report helper
+
+Julia reference:
+
+- the reporting/diagnostic workflow around ROM-vs-FOM switching comparisons in `SurrogateNN_Estimation.jl`, where users need the mixed likelihood, the nonlinear reference, regime counts, and runtimes together rather than as disconnected helper calls
+
+Python/JAX status:
+
+- parsed models now expose `switching_pipeline_report(...)`, with the public wrapper `switching_pipeline_report_from_model(...)`
+- the helper runs ROM per-period likelihoods, FOM per-period likelihoods, the mixed switching likelihood, hard-mask gate statistics, hard-mask decomposition summaries, SEP inversion diagnostics, and optional timing loops in one parsed-model call
+- the timing layer measures the actual high-level FOM and switching pipelines, not only the low-level likelihood mixer, which makes sparse-tree SEP comparisons easier to run consistently
+- focused tests verify the helper on a nonlinear sparse-tree SEP FOM path, including gate counts, decomposition consistency, SEP diagnostics, and runtime reporting
+
 ### 30. Steady-state restarts, common macro options, OBC runtime horizon plumbing, and Lyapunov variants
 
 Julia reference:
