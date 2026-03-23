@@ -51,6 +51,13 @@ class SEPConfig:
     hmc_seed: int = 0
     max_iter: int = 80
     tol: float = 1e-7
+    linear_solver: str = "qr"
+    fallback_solver: Optional[str] = None
+    stall_iters: int = 25
+    stall_rel_tol: float = 1e-4
+    stall_abs_tol: float = 1e-10
+    line_search: bool = True
+    line_search_maxit: int = 6
     line_search_factor: float = 0.5
     line_search_min_alpha: float = 1e-4
     newton_regularization: float = 1e-8
@@ -122,6 +129,35 @@ def _validate_sep_config(config: SEPConfig, *, shock_dim: int) -> None:
         raise ValueError(f"SEPConfig.max_iter must be >= 1, got {config.max_iter}.")
     if config.tol <= 0.0:
         raise ValueError(f"SEPConfig.tol must be > 0, got {config.tol}.")
+    if config.linear_solver not in {"normal_equations", "qr"}:
+        raise ValueError(
+            "SEPConfig.linear_solver must be 'normal_equations' or 'qr', "
+            f"got {config.linear_solver!r}."
+        )
+    if config.fallback_solver is not None and config.fallback_solver not in {
+        "normal_equations",
+        "qr",
+    }:
+        raise ValueError(
+            "SEPConfig.fallback_solver must be None, 'normal_equations', or 'qr', "
+            f"got {config.fallback_solver!r}."
+        )
+    if config.stall_iters < 1:
+        raise ValueError(
+            f"SEPConfig.stall_iters must be >= 1, got {config.stall_iters}."
+        )
+    if config.stall_rel_tol < 0.0:
+        raise ValueError(
+            f"SEPConfig.stall_rel_tol must be >= 0, got {config.stall_rel_tol}."
+        )
+    if config.stall_abs_tol < 0.0:
+        raise ValueError(
+            f"SEPConfig.stall_abs_tol must be >= 0, got {config.stall_abs_tol}."
+        )
+    if config.line_search_maxit < 1:
+        raise ValueError(
+            f"SEPConfig.line_search_maxit must be >= 1, got {config.line_search_maxit}."
+        )
     if not 0.0 < config.line_search_factor < 1.0:
         raise ValueError(
             "SEPConfig.line_search_factor must be in (0, 1), "
@@ -920,6 +956,9 @@ def _solve_stochastic_extended_path_impl(
     iterations = 0
     current = guess
     current_lambda = float(config.newton_regularization)
+    active_solver = config.linear_solver
+    best_err = np.inf
+    stall_count = 0
 
     for iteration in range(1, config.max_iter + 1):
         residual = residual_vector(current)
@@ -935,36 +974,68 @@ def _solve_stochastic_extended_path_impl(
             jacobian = jnp.asarray(jacobian_fn(current), dtype=jnp.float64)
         else:
             jacobian = jax.jacobian(residual_vector)(current)
-        normal_matrix = jacobian.T @ jacobian
-        gradient = jacobian.T @ residual
-        eye = jnp.eye(normal_matrix.shape[0], dtype=normal_matrix.dtype)
 
         accepted = False
         candidate = current
+        err_after = residual_norm
         lambda_value = current_lambda
         while lambda_value <= config.lm_lambda_max:
-            lm_system = normal_matrix + lambda_value * eye
-            step = jnp.linalg.solve(lm_system, -gradient)
+            step = _solve_sep_newton_direction(
+                jacobian,
+                residual,
+                lambda_value=lambda_value,
+                solver=active_solver,
+            )
             if not bool(jnp.all(jnp.isfinite(step))):
                 lambda_value *= config.lm_lambda_scale
                 continue
 
-            alpha = 1.0
-            while True:
+            if config.line_search:
+                alpha = 1.0
+                line_iterations = 0
+                while True:
+                    trial = current + alpha * step
+                    trial_residual = residual_vector(trial)
+                    trial_norm = float(np.asarray(jnp.linalg.norm(trial_residual, ord=jnp.inf)))
+                    if np.isfinite(trial_norm) and trial_norm < residual_norm:
+                        candidate = trial
+                        err_after = trial_norm
+                        if active_solver == "normal_equations":
+                            current_lambda = max(
+                                lambda_value / config.lm_lambda_scale,
+                                config.lm_lambda_min,
+                            )
+                        accepted = True
+                        break
+                    line_iterations += 1
+                    if (
+                        line_iterations >= config.line_search_maxit
+                        or alpha <= config.line_search_min_alpha
+                    ):
+                        break
+                    alpha *= config.line_search_factor
+            else:
+                alpha = 1.0
                 trial = current + alpha * step
                 trial_residual = residual_vector(trial)
                 trial_norm = float(np.asarray(jnp.linalg.norm(trial_residual, ord=jnp.inf)))
-                if np.isfinite(trial_norm) and trial_norm < residual_norm:
+                if np.isfinite(trial_norm):
                     candidate = trial
-                    current_lambda = max(
-                        lambda_value / config.lm_lambda_scale,
-                        config.lm_lambda_min,
-                    )
+                    err_after = trial_norm
+                    if active_solver == "normal_equations":
+                        if trial_norm < residual_norm:
+                            current_lambda = max(
+                                lambda_value / config.lm_lambda_scale,
+                                config.lm_lambda_min,
+                            )
+                        else:
+                            current_lambda = min(
+                                lambda_value * config.lm_lambda_scale,
+                                config.lm_lambda_max,
+                            )
                     accepted = True
-                    break
-                if alpha <= config.line_search_min_alpha:
-                    break
-                alpha *= config.line_search_factor
+            if active_solver == "normal_equations" and accepted and config.line_search:
+                break
 
             if accepted:
                 break
@@ -976,6 +1047,27 @@ def _solve_stochastic_extended_path_impl(
 
         current = candidate
         iterations = iteration
+        if not np.isfinite(best_err):
+            best_err = err_after
+            stall_count = 0
+        else:
+            improvement_tol = max(
+                config.stall_abs_tol,
+                config.stall_rel_tol * best_err,
+            )
+            if err_after + improvement_tol < best_err:
+                best_err = err_after
+                stall_count = 0
+            else:
+                stall_count += 1
+
+        if (
+            active_solver == "normal_equations"
+            and config.fallback_solver is not None
+            and stall_count >= config.stall_iters
+        ):
+            active_solver = config.fallback_solver
+            stall_count = 0
 
     final_residual = residual_vector(current)
     residual_norm = float(np.asarray(jnp.linalg.norm(final_residual, ord=jnp.inf)))
@@ -995,4 +1087,34 @@ def _solve_stochastic_extended_path_impl(
         iterations=iterations,
         group_counts=counts,
         jacobian_method=jacobian_method_used,
+    )
+
+
+def _solve_sep_newton_direction(
+    jacobian: jax.Array,
+    residual: jax.Array,
+    *,
+    lambda_value: float,
+    solver: str,
+) -> jax.Array:
+    jacobian_arr = jnp.asarray(jacobian, dtype=jnp.float64)
+    residual_arr = jnp.asarray(residual, dtype=jnp.float64).reshape(-1)
+    ncols = int(jacobian_arr.shape[1])
+    if solver == "normal_equations":
+        normal_matrix = jacobian_arr.T @ jacobian_arr
+        gradient = jacobian_arr.T @ residual_arr
+        eye = jnp.eye(normal_matrix.shape[0], dtype=normal_matrix.dtype)
+        return jnp.linalg.solve(normal_matrix + float(lambda_value) * eye, -gradient)
+    if solver == "qr":
+        eye = jnp.eye(ncols, dtype=jacobian_arr.dtype)
+        sqrt_lambda = jnp.sqrt(jnp.asarray(lambda_value, dtype=jacobian_arr.dtype))
+        augmented_matrix = jnp.concatenate([jacobian_arr, sqrt_lambda * eye], axis=0)
+        augmented_rhs = jnp.concatenate(
+            [-residual_arr, jnp.zeros((ncols,), dtype=residual_arr.dtype)],
+            axis=0,
+        )
+        q, r = jnp.linalg.qr(augmented_matrix, mode="reduced")
+        return jnp.linalg.solve(r, q.T @ augmented_rhs)
+    raise ValueError(
+        f"Unknown SEP linear_solver={solver!r}. Use 'normal_equations' or 'qr'."
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
+import surrogatenn_dsge.sep as sep_module
 
 from surrogatenn_dsge import (
     SEPConfig,
@@ -285,6 +286,120 @@ def test_sep_validates_bad_config_values() -> None:
                 line_search_factor=1.0,
             ),
         )
+    with np.testing.assert_raises_regex(ValueError, "linear_solver"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(
+                periods=3,
+                branching_order=1,
+                nnodes=3,
+                linear_solver="bad_solver",
+            ),
+        )
+    with np.testing.assert_raises_regex(ValueError, "line_search_maxit"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(
+                periods=3,
+                branching_order=1,
+                nnodes=3,
+                line_search_maxit=0,
+            ),
+        )
+
+
+def test_sep_qr_linear_solver_matches_normal_equations_on_smooth_model() -> None:
+    deterministic_shocks = jnp.asarray([[0.2], [0.0], [0.0]], dtype=jnp.float64)
+
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        return y_curr - (0.2 * y_prev + 0.15 * y_next**2 + shock)
+
+    normal_solution = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            linear_solver="normal_equations",
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+    qr_solution = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            linear_solver="qr",
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+
+    assert normal_solution.converged
+    assert qr_solution.converged
+    np.testing.assert_allclose(
+        qr_solution.mean_path,
+        normal_solution.mean_path,
+        rtol=1e-8,
+        atol=1e-8,
+    )
+
+
+def test_sep_switches_to_fallback_solver_after_stall(monkeypatch) -> None:
+    deterministic_shocks = jnp.asarray([[0.2], [0.0], [0.0]], dtype=jnp.float64)
+    original_solver = sep_module._solve_sep_newton_direction
+    calls: list[str] = []
+
+    def recording_solver(jacobian, residual, *, lambda_value, solver):
+        calls.append(str(solver))
+        return original_solver(
+            jacobian,
+            residual,
+            lambda_value=lambda_value,
+            solver=solver,
+        )
+
+    monkeypatch.setattr(sep_module, "_solve_sep_newton_direction", recording_solver)
+
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        return y_curr - (
+            0.2 * y_prev + 0.15 * y_next**2 - 0.05 * y_curr**2 + shock
+        )
+
+    solution = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=1,
+        config=SEPConfig(
+            periods=3,
+            branching_order=1,
+            linear_solver="normal_equations",
+            fallback_solver="qr",
+            stall_iters=1,
+            stall_rel_tol=1.0,
+            stall_abs_tol=1.0,
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+
+    assert solution.converged
+    assert calls
+    assert calls[0] == "normal_equations"
+    assert "qr" in calls[1:]
 
 
 def test_sep_hmc_residual_expectation_is_deterministic_for_fixed_seed() -> None:
