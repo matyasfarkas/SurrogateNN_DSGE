@@ -205,6 +205,7 @@ class _FirstOrderOBCProjectionSpec(NamedTuple):
     right_expr: sp.Expr
     target_symbol: sp.Symbol
     inverse_expr: sp.Expr
+    mode: str = "branch_target"
 
 
 class _FirstOrderOBCSimulationResult(NamedTuple):
@@ -540,6 +541,81 @@ class MacroModel:
         )
         specs: list[_FirstOrderOBCProjectionSpec] = []
 
+        def _build_zero_binding_spec(
+            branch_expr: sp.Expr,
+            *,
+            operator: str,
+            left_expr: sp.Expr,
+            right_expr: sp.Expr,
+        ) -> Optional[_FirstOrderOBCProjectionSpec]:
+            branch_symbols = branch_expr.free_symbols
+            if branch_symbols & future_symbols:
+                return None
+            branch_current_symbols = tuple(
+                symbol for symbol in current_symbols if symbol in branch_symbols
+            )
+            if not branch_current_symbols:
+                return None
+
+            candidate_specs: list[
+                tuple[sp.Symbol, sp.Expr, int]
+            ] = []
+            for candidate_symbol in branch_current_symbols:
+                target_symbol = sp.Symbol("__obc_projection_target__", real=True)
+                try:
+                    inverse_solutions = sp.solve(
+                        sp.Eq(branch_expr, target_symbol),
+                        candidate_symbol,
+                    )
+                except Exception:
+                    continue
+                if len(inverse_solutions) != 1:
+                    continue
+                inverse_expr = sp.simplify(inverse_solutions[0])
+                inverse_symbols = inverse_expr.free_symbols - {target_symbol}
+                if candidate_symbol in inverse_symbols:
+                    continue
+                if inverse_symbols & future_symbols:
+                    continue
+                derivative = sp.simplify(sp.diff(branch_expr, candidate_symbol))
+                derivative_sign = 0
+                if not derivative.free_symbols:
+                    try:
+                        derivative_value = float(derivative)
+                    except (TypeError, ValueError):
+                        derivative_sign = 0
+                    else:
+                        if derivative_value < 0.0:
+                            derivative_sign = -1
+                        elif derivative_value > 0.0:
+                            derivative_sign = 1
+                candidate_specs.append(
+                    (candidate_symbol, inverse_expr, derivative_sign)
+                )
+
+            if len(candidate_specs) == 1:
+                chosen_symbol, inverse_expr, _ = candidate_specs[0]
+            else:
+                negative_candidates = [
+                    candidate for candidate in candidate_specs if candidate[2] < 0
+                ]
+                if len(negative_candidates) != 1:
+                    return None
+                chosen_symbol, inverse_expr, _ = negative_candidates[0]
+
+            variable_index = current_symbol_to_index[chosen_symbol]
+            return _FirstOrderOBCProjectionSpec(
+                variable_name=self.timings.var[variable_index],
+                variable_index=variable_index,
+                current_symbol=chosen_symbol,
+                operator=operator,
+                left_expr=left_expr,
+                right_expr=right_expr,
+                target_symbol=sp.Symbol("__obc_projection_target__", real=True),
+                inverse_expr=inverse_expr,
+                mode="zero_binding",
+            )
+
         for expr in self._dynamic_expressions:
             obc_calls = _obc_calls_in_expression(expr)
             if not obc_calls:
@@ -560,55 +636,76 @@ class MacroModel:
             if len(solutions) != 1:
                 return None
             solved_expr = sp.simplify(solutions[0])
+            left_expr = sp.simplify(obc_call.args[0])
+            right_expr = sp.simplify(obc_call.args[1])
             solved_symbols = solved_expr.free_symbols
             current_symbols_in_solution = tuple(
                 symbol for symbol in current_symbols if symbol in solved_symbols
             )
-            if len(current_symbols_in_solution) != 1:
-                return None
-            current_symbol = current_symbols_in_solution[0]
-            if solved_symbols & future_symbols:
-                return None
-            if solved_symbols & (current_symbol_set - {current_symbol}):
-                return None
-            target_symbol = sp.Symbol("__obc_projection_target__", real=True)
-            try:
-                inverse_solutions = sp.solve(
-                    sp.Eq(solved_expr, target_symbol),
-                    current_symbol,
+            operator = "max" if obc_call.func is sp.Max else "min"
+            if len(current_symbols_in_solution) == 1:
+                current_symbol = current_symbols_in_solution[0]
+                if solved_symbols & future_symbols:
+                    return None
+                if solved_symbols & (current_symbol_set - {current_symbol}):
+                    return None
+                target_symbol = sp.Symbol("__obc_projection_target__", real=True)
+                try:
+                    inverse_solutions = sp.solve(
+                        sp.Eq(solved_expr, target_symbol),
+                        current_symbol,
+                    )
+                except Exception:
+                    return None
+                if len(inverse_solutions) != 1:
+                    return None
+                inverse_expr = sp.simplify(inverse_solutions[0])
+                inverse_symbols = inverse_expr.free_symbols - {target_symbol}
+                if current_symbol in inverse_symbols:
+                    return None
+                if inverse_symbols & future_symbols:
+                    return None
+                if inverse_symbols & (current_symbol_set - {current_symbol}):
+                    return None
+                branch_symbols = left_expr.free_symbols | right_expr.free_symbols
+                if current_symbol in branch_symbols:
+                    return None
+                if branch_symbols & future_symbols:
+                    return None
+                variable_index = current_symbol_to_index[current_symbol]
+                specs.append(
+                    _FirstOrderOBCProjectionSpec(
+                        variable_name=self.timings.var[variable_index],
+                        variable_index=variable_index,
+                        current_symbol=current_symbol,
+                        operator=operator,
+                        left_expr=left_expr,
+                        right_expr=right_expr,
+                        target_symbol=target_symbol,
+                        inverse_expr=inverse_expr,
+                    )
                 )
-            except Exception:
+                continue
+
+            if solved_expr != 0:
                 return None
-            if len(inverse_solutions) != 1:
-                return None
-            inverse_expr = sp.simplify(inverse_solutions[0])
-            inverse_symbols = inverse_expr.free_symbols - {target_symbol}
-            if current_symbol in inverse_symbols:
-                return None
-            if inverse_symbols & future_symbols:
-                return None
-            if inverse_symbols & (current_symbol_set - {current_symbol}):
-                return None
-            left_expr = sp.simplify(obc_call.args[0])
-            right_expr = sp.simplify(obc_call.args[1])
-            branch_symbols = left_expr.free_symbols | right_expr.free_symbols
-            if current_symbol in branch_symbols:
-                return None
-            if branch_symbols & future_symbols:
-                return None
-            variable_index = current_symbol_to_index[current_symbol]
-            specs.append(
-                _FirstOrderOBCProjectionSpec(
-                    variable_name=self.timings.var[variable_index],
-                    variable_index=variable_index,
-                    current_symbol=current_symbol,
-                    operator="max" if obc_call.func is sp.Max else "min",
+            zero_specs = [
+                _build_zero_binding_spec(
+                    left_expr,
+                    operator=operator,
                     left_expr=left_expr,
                     right_expr=right_expr,
-                    target_symbol=target_symbol,
-                    inverse_expr=inverse_expr,
-                )
-            )
+                ),
+                _build_zero_binding_spec(
+                    right_expr,
+                    operator=operator,
+                    left_expr=left_expr,
+                    right_expr=right_expr,
+                ),
+            ]
+            if any(spec is None for spec in zero_specs):
+                return None
+            specs.extend(spec for spec in zero_specs if spec is not None)
 
         if not specs:
             return None
@@ -1243,13 +1340,16 @@ class MacroModel:
                 for symbol, value in zip(self._dynamic_input_symbols, numeric_args)
             }
             for spec in specs:
-                left_value = _evaluate_obc_expression_value(spec.left_expr, symbol_values)
-                right_value = _evaluate_obc_expression_value(spec.right_expr, symbol_values)
-                target_value = (
-                    max(left_value, right_value)
-                    if spec.operator == "max"
-                    else min(left_value, right_value)
-                )
+                if spec.mode == "zero_binding":
+                    target_value = 0.0
+                else:
+                    left_value = _evaluate_obc_expression_value(spec.left_expr, symbol_values)
+                    right_value = _evaluate_obc_expression_value(spec.right_expr, symbol_values)
+                    target_value = (
+                        max(left_value, right_value)
+                        if spec.operator == "max"
+                        else min(left_value, right_value)
+                    )
                 projected_value = _evaluate_obc_expression_value(
                     spec.inverse_expr,
                     {
