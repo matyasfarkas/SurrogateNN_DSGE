@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import surrogatenn_dsge.model as model_module
 
 from surrogatenn_dsge import (
     SEPConfig,
@@ -73,6 +75,20 @@ OBC_LOG_AUX_SHOCK_SOURCE = """
 end
 
 @parameters obc_log_aux_shock begin
+    rho = 0.8
+    mu = 1.2
+    zlb = 1.0
+end
+"""
+
+
+OBC_HORIZON_AUX_SHOCK_SOURCE = """
+@model obc_horizon_aux_shock max_obc_horizon = 2 begin
+    r[0] = max(r_star[0] + eps_zlbᵒᵇᶜ[x], zlb)
+    r_star[0] = rho * r_star[-1] + (1-rho) * mu + eps_r[x]
+end
+
+@parameters obc_horizon_aux_shock begin
     rho = 0.8
     mu = 1.2
     zlb = 1.0
@@ -650,6 +666,90 @@ def test_get_irf_recovers_implied_obc_shocks_for_log_constraints() -> None:
     np.testing.assert_allclose(
         np.asarray(enforced.shocks, dtype=np.float64)[obc_index, 0, 0],
         2.0 / 15.0,
+        rtol=0.0,
+        atol=1e-10,
+    )
+
+
+def test_simulate_model_uses_horizon_obc_shock_optimization(monkeypatch) -> None:
+    model = parse_macro_model(OBC_HORIZON_AUX_SHOCK_SOURCE)
+    calls: list[np.ndarray] = []
+    expected_obc = np.asarray([0.1, 0.04, 0.0], dtype=np.float64)
+
+    def fake_minimize(fun, x0, jac=None, method=None, constraints=(), options=None):
+        assert method == "SLSQP"
+        calls.append(np.asarray(x0, dtype=np.float64).copy())
+        candidate = expected_obc.copy()
+        assert jac is not None
+        np.testing.assert_allclose(
+            np.asarray(jac(candidate), dtype=np.float64),
+            2.0 * candidate,
+            rtol=0.0,
+            atol=0.0,
+        )
+        assert constraints
+        constraint_values = np.asarray(constraints[0]["fun"](candidate), dtype=np.float64)
+        assert np.min(constraint_values) >= -1e-10
+        return SimpleNamespace(x=candidate, success=True)
+
+    monkeypatch.setattr(model_module.scipy_optimize, "minimize", fake_minimize)
+
+    result = simulate_model(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks={"eps_r": [-0.3, 0.0, 0.0]},
+        levels=True,
+        ignore_obc=False,
+    )
+
+    obc_index = model.timings.exo.index("eps_zlbᵒᵇᶜ")
+    assert result.algorithm_used == "first_order"
+    assert len(calls) == 1
+    np.testing.assert_allclose(calls[0], np.zeros(3, dtype=np.float64), rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        np.asarray(result.shocks, dtype=np.float64)[obc_index],
+        expected_obc,
+        rtol=0.0,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        np.asarray(result.data, dtype=np.float64),
+        np.asarray([[1.0, 1.0, 1.008]], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-10,
+    )
+
+
+def test_simulate_model_obc_horizon_optimization_falls_back_to_local_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = parse_macro_model(OBC_HORIZON_AUX_SHOCK_SOURCE)
+    calls = 0
+
+    def failing_minimize(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("forced failure")
+
+    monkeypatch.setattr(model_module.scipy_optimize, "minimize", failing_minimize)
+
+    result = simulate_model(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks={"eps_r": [-0.3, 0.0, 0.0]},
+        levels=True,
+        ignore_obc=False,
+    )
+
+    obc_index = model.timings.exo.index("eps_zlbᵒᵇᶜ")
+    assert result.algorithm_used == "first_order"
+    assert calls >= 1
+    assert np.all(np.asarray(result.data, dtype=np.float64) >= 1.0 - 1e-10)
+    np.testing.assert_allclose(
+        np.asarray(result.shocks, dtype=np.float64)[obc_index],
+        np.asarray([0.1, 0.04, 0.0], dtype=np.float64),
         rtol=0.0,
         atol=1e-10,
     )

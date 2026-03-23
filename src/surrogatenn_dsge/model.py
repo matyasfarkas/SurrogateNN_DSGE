@@ -211,6 +211,11 @@ class _FirstOrderOBCSimulationResult(NamedTuple):
     shocks: np.ndarray
 
 
+class _FirstOrderOBCWindowOptimizationResult(NamedTuple):
+    shock_window: np.ndarray
+    state_window: np.ndarray
+
+
 @dataclass(frozen=True)
 class MacroModel:
     name: str
@@ -1316,7 +1321,28 @@ class MacroModel:
         for period in range(periods):
             period_shocks = np.asarray(shock_matrix[:, period], dtype=np.float64).copy()
             constrained_state: Optional[np.ndarray] = None
+            if self.max_obc_horizon > 0 and self._obc_shock_indices.size > 0:
+                window_result = self._optimize_first_order_obc_shock_window(
+                    shock_matrix,
+                    start_period=period,
+                    lag_state=lag_state,
+                    first_order_result=first_order_result,
+                    steady_state=steady_state,
+                )
+                if window_result is not None:
+                    horizon = window_result.shock_window.shape[1]
+                    shock_matrix[:, period : period + horizon] = window_result.shock_window
+                    period_shocks = np.asarray(
+                        window_result.shock_window[:, 0],
+                        dtype=np.float64,
+                    ).copy()
+                    constrained_state = np.asarray(
+                        window_result.state_window[:, 0],
+                        dtype=np.float64,
+                    ).copy()
             for _ in range(max(1, len(specs) + len(spec_shock_indices) + 1)):
+                if constrained_state is not None:
+                    break
                 deviation = np.asarray(
                     first_order_state_update(
                         solution_matrix,
@@ -1385,6 +1411,112 @@ class MacroModel:
             lag_state = constrained_state
             reduced_state = constrained_state[state_indices] - steady_state[state_indices]
         return _FirstOrderOBCSimulationResult(state_path=state_path, shocks=shock_matrix)
+
+    def _optimize_first_order_obc_shock_window(
+        self,
+        shock_matrix: np.ndarray,
+        *,
+        start_period: int,
+        lag_state: np.ndarray,
+        first_order_result: ParsedModelFirstOrderResult,
+        steady_state: np.ndarray,
+        tol: float = 1e-10,
+    ) -> Optional[_FirstOrderOBCWindowOptimizationResult]:
+        if self.max_obc_horizon <= 0 or self._obc_shock_indices.size == 0:
+            return None
+        remaining_periods = shock_matrix.shape[1] - start_period
+        if remaining_periods <= 0:
+            return None
+        horizon = min(remaining_periods, self.max_obc_horizon + 1)
+        obc_indices = np.asarray(self._obc_shock_indices, dtype=np.int64)
+        if obc_indices.size == 0:
+            return None
+
+        base_window = np.asarray(
+            shock_matrix[:, start_period : start_period + horizon],
+            dtype=np.float64,
+        ).copy()
+        parameter_values = np.asarray(first_order_result.parameter_values, dtype=np.float64)
+        horizon_columns = np.arange(horizon, dtype=np.int64)
+
+        def _unpack_window(flat_window: np.ndarray) -> np.ndarray:
+            candidate = base_window.copy()
+            candidate[np.ix_(obc_indices, horizon_columns)] = np.asarray(
+                flat_window,
+                dtype=np.float64,
+            ).reshape(obc_indices.size, horizon)
+            return candidate
+
+        def _simulate_window(
+            candidate_window: np.ndarray,
+        ) -> tuple[np.ndarray, np.ndarray]:
+            state_window = np.asarray(
+                self._simulate_first_order_path(
+                    candidate_window,
+                    first_order_result=first_order_result,
+                    steady_state=steady_state,
+                    initial_state=lag_state,
+                ),
+                dtype=np.float64,
+            )
+            full_path = np.concatenate(
+                [np.asarray(lag_state, dtype=np.float64)[:, None], state_window],
+                axis=1,
+            )
+            violations = np.asarray(
+                self.evaluate_obc_violations_along_path(
+                    full_path,
+                    shocks=candidate_window,
+                    parameter_values=parameter_values,
+                    steady_state=steady_state,
+                ),
+                dtype=np.float64,
+            )
+            return state_window, violations
+
+        initial_state_window, initial_violations = _simulate_window(base_window)
+        if not initial_violations.size or np.max(initial_violations) <= tol:
+            return _FirstOrderOBCWindowOptimizationResult(
+                shock_window=base_window,
+                state_window=initial_state_window,
+            )
+
+        x0 = np.asarray(base_window[obc_indices, :], dtype=np.float64).reshape(-1)
+
+        def _objective(flat_window: np.ndarray) -> float:
+            flat = np.asarray(flat_window, dtype=np.float64)
+            return float(np.dot(flat, flat))
+
+        def _objective_jac(flat_window: np.ndarray) -> np.ndarray:
+            return 2.0 * np.asarray(flat_window, dtype=np.float64)
+
+        def _constraint_fun(flat_window: np.ndarray) -> np.ndarray:
+            _, violations = _simulate_window(_unpack_window(flat_window))
+            return (tol - violations.reshape(-1)).astype(np.float64)
+
+        try:
+            result = scipy_optimize.minimize(
+                _objective,
+                x0,
+                jac=_objective_jac,
+                method="SLSQP",
+                constraints=({"type": "ineq", "fun": _constraint_fun},),
+                options={"ftol": tol, "maxiter": 500},
+            )
+        except Exception:
+            return None
+
+        candidate_vector = np.asarray(getattr(result, "x", x0), dtype=np.float64)
+        if candidate_vector.shape != x0.shape or not np.all(np.isfinite(candidate_vector)):
+            return None
+        candidate_window = _unpack_window(candidate_vector)
+        candidate_state_window, candidate_violations = _simulate_window(candidate_window)
+        if candidate_violations.size and np.max(candidate_violations) > tol:
+            return None
+        return _FirstOrderOBCWindowOptimizationResult(
+            shock_window=candidate_window,
+            state_window=candidate_state_window,
+        )
 
     def _build_sep_linear_initial_guess(
         self,
