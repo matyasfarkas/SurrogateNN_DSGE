@@ -834,6 +834,7 @@ Python/JAX status:
 
 - The Julia `:bartels_stewart` Sylvester variant is not ported yet, and `:dqgmres` is currently provided as a compatibility alias to the SciPy GMRES backend rather than as a distinct implementation.
 - The Julia QME `:schur` variant is now ported, but the JAX-facing primal solve is not fully GPU-native yet; until JAX exposes generalized `qz` / `ordqz`, the ordered-QZ step runs through SciPy on the host and only the reverse-mode derivative is native JAX.
+- The host-backed Schur path now explicitly guards empty/degenerate generalized pencils before calling SciPy `ordqz`, so static zero-state cases fail or short-circuit normally instead of risking a low-level interpreter crash.
 - The Python port now defaults public first-order workflows to `schur` for Julia parity, which means the default compiled JAX likelihood path also uses the host-callback ordered-QZ branch unless `qme_algorithm="doubling"` is requested explicitly.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current `algorithm="direct"` Lyapunov fallback is still a direct Kronecker solve even though the separate `algorithm="bartels_stewart"` path is now implemented.

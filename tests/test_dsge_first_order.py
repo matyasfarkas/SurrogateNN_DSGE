@@ -146,6 +146,42 @@ def _rbc_cme_qme_fixture():
     return timings, a_tilde_plus, a_tilde_zero, a_tilde_minus
 
 
+def _static_qme_timings():
+    return DSGETimings.from_julia(
+        present_only=[],
+        future_not_past=[],
+        past_not_future=[],
+        mixed=[],
+        future_not_past_and_mixed=[],
+        past_not_future_and_mixed=[],
+        present_but_not_only=[],
+        mixed_in_past=[],
+        not_mixed_in_past=[],
+        mixed_in_future=[],
+        exo=[],
+        var=[],
+        aux=[],
+        exo_present=[],
+        nPresent_only=0,
+        nMixed=0,
+        nFuture_not_past_and_mixed=0,
+        nPast_not_future_and_mixed=0,
+        nPresent_but_not_only=0,
+        nVars=0,
+        nExo=0,
+        present_only_idx=[],
+        present_but_not_only_idx=[],
+        future_not_past_and_mixed_idx=[],
+        not_mixed_in_past_idx=[],
+        past_not_future_and_mixed_idx=[],
+        mixed_in_past_idx=[],
+        mixed_in_future_idx=[],
+        past_not_future_idx=[],
+        reorder=[],
+        dynamic_order=[],
+    )
+
+
 def test_quadratic_matrix_equation_solver_converges_on_scalar_case() -> None:
     result = solve_quadratic_matrix_equation_doubling(
         jnp.array([[1.0]]),
@@ -224,6 +260,26 @@ def test_jax_schur_quadratic_matrix_equation_supports_reverse_mode_autodiff() ->
 
     finite_difference = (objective(epsilon) - objective(-epsilon)) / (2.0 * epsilon)
     np.testing.assert_allclose(autodiff_grad, finite_difference, rtol=5e-5, atol=5e-6)
+
+
+def test_quadratic_matrix_equation_schur_handles_empty_pencils_without_crashing() -> None:
+    timings = _static_qme_timings()
+
+    result = solve_quadratic_matrix_equation_schur(
+        jnp.zeros((0, 0), dtype=jnp.float64),
+        jnp.zeros((0, 0), dtype=jnp.float64),
+        jnp.zeros((0, 0), dtype=jnp.float64),
+        timings,
+    )
+
+    assert result.converged
+    assert result.solution.shape == (0, 0)
+    np.testing.assert_allclose(
+        np.asarray(result.relative_residual, dtype=np.float64),
+        np.asarray(0.0, dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
 
 
 def test_first_order_solution_matches_julia_fixture() -> None:

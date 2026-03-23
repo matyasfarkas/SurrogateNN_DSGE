@@ -617,6 +617,13 @@ def _analyze_quadratic_matrix_equation_schur_numpy(
             ]
         )
 
+        if d_pencil.shape != e_pencil.shape:
+            return np.array(a_arr, copy=True), empty_roots, empty_mask, False, False, False
+        if d_pencil.ndim != 2 or d_pencil.shape[0] != d_pencil.shape[1]:
+            return np.array(a_arr, copy=True), empty_roots, empty_mask, False, False, False
+        if d_pencil.shape[0] == 0:
+            return np.array(a_arr, copy=True), empty_roots, empty_mask, True, True, True
+
         try:
             s_matrix, t_matrix, alpha, beta, _, z_matrix = scipy_linalg.ordqz(
                 d_pencil,

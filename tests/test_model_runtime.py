@@ -100,13 +100,11 @@ OBC_MIN_COMPLEMENTARITY_SOURCE = """
 @model obc_min_complementarity begin
     0 = min(bnot[0] - b[0], lm[0])
     bnot[0] = b_bar
-    b[0] = b_ss + eps_b[x]
-    lm[0] = -eps_lm[x]
+    b[0] = b_bar + eps_b[x]
 end
 
 @parameters obc_min_complementarity begin
     b_bar = 1.0
-    b_ss = 0.8
 end
 """
 
@@ -738,12 +736,12 @@ def test_simulate_model_uses_horizon_obc_shock_optimization(monkeypatch) -> None
 
 def test_simulate_model_supports_min_complementarity_obc_with_first_order_path() -> None:
     model = parse_macro_model(OBC_MIN_COMPLEMENTARITY_SOURCE)
-    steady_state = np.asarray([0.8, 1.0, 0.0], dtype=np.float64)
+    steady_state = np.asarray([1.0, 1.0, 0.0], dtype=np.float64)
     fake_solution = np.asarray(
         [
-            [1.0, 0.0],
-            [0.0, 0.0],
-            [0.0, -1.0],
+            [1.0],
+            [0.0],
+            [0.0],
         ],
         dtype=np.float64,
     )
@@ -767,17 +765,19 @@ def test_simulate_model_supports_min_complementarity_obc_with_first_order_path()
             model,
             periods=1,
             variables=("bnot", "b", "lm"),
-            shocks={"eps_b": [0.5], "eps_lm": [0.2]},
+            shocks={"eps_b": [0.5]},
             levels=True,
             ignore_obc=True,
+            qme_algorithm="schur",
         )
         enforced = simulate_model(
             model,
             periods=1,
             variables=("bnot", "b", "lm"),
-            shocks={"eps_b": [0.5], "eps_lm": [0.2]},
+            shocks={"eps_b": [0.5]},
             levels=True,
             ignore_obc=False,
+            qme_algorithm="schur",
         )
     finally:
         setattr(
@@ -790,7 +790,7 @@ def test_simulate_model_supports_min_complementarity_obc_with_first_order_path()
     assert enforced.algorithm_used == "first_order"
     np.testing.assert_allclose(
         np.asarray(ignored.data, dtype=np.float64),
-        np.asarray([[1.0], [1.3], [-0.2]], dtype=np.float64),
+        np.asarray([[1.0], [1.5], [0.0]], dtype=np.float64),
         rtol=0.0,
         atol=1e-12,
     )
