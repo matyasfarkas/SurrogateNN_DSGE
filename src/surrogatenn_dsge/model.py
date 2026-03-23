@@ -5420,7 +5420,7 @@ def parse_macro_model(source: str) -> MacroModel:
             f"`max_obc_horizon` must be non-negative, got {max_obc_horizon}."
         )
 
-    return MacroModel(
+    model = MacroModel(
         name=model_block["name"],
         equations=equations,
         parameter_names=parameter_names,
@@ -5447,6 +5447,62 @@ def parse_macro_model(source: str) -> MacroModel:
         _dynamic_input_symbols=dynamic_input_symbols,
         _parameter_equations_depend_on_steady_state=parameter_equations_depend_on_steady_state,
     )
+    if _should_precompile_parsed_model(model_options, parameter_options):
+        _precompile_parsed_model(model)
+    return model
+
+
+def _should_precompile_parsed_model(
+    model_options: Mapping[str, object],
+    parameter_options: Mapping[str, object],
+) -> bool:
+    return bool(
+        _coerce_optional_python_bool(model_options.get("precompile"))
+        or _coerce_optional_python_bool(parameter_options.get("precompile"))
+    )
+
+
+def _precompile_parsed_model(model: MacroModel) -> None:
+    _ = model._steady_state_matrix
+    _ = model._steady_state_jacobian
+    _ = model._steady_state_parameter_jacobian
+    _ = model._steady_state_fn
+    _ = model._steady_state_jacobian_fn
+    _ = model._steady_state_parameter_jacobian_fn
+    _ = model._steady_state_residual_jax_fn
+    _ = model._parameter_matrix
+    _ = model._parameter_equation_jacobian
+    _ = model._parameter_equation_fn
+    _ = model._parameter_equation_jacobian_fn
+    _ = model._parameter_equation_residual_jax_fn
+    if model._parameter_equations_depend_on_steady_state:
+        _ = model._joint_unknown_symbols
+        _ = model._joint_steady_state_matrix
+        _ = model._joint_steady_state_jacobian
+        _ = model._joint_steady_state_fn
+        _ = model._joint_steady_state_jacobian_fn
+        _ = model._joint_steady_state_residual_jax_fn
+    _ = model._dynamic_matrix
+    _ = model._dynamic_jacobian
+    _ = model._dynamic_residual_fn
+    _ = model._dynamic_jacobian_fn
+    perturbation_order = int(model.parameter_options.get("perturbation_order", 1) or 1)
+    if perturbation_order >= 2:
+        _ = model._dynamic_hessian
+        _ = model._dynamic_hessian_fn
+    if perturbation_order >= 3:
+        _ = model._dynamic_third
+        _ = model._dynamic_third_order_fn
+    if bool(model.parameter_options.get("symbolic", False)):
+        _ = model._symbolic_steady_state_seed_entries
+        _ = model._symbolic_steady_state_seed_indices
+        _ = model._symbolic_steady_state_seed_matrix
+        _ = model._symbolic_steady_state_seed_fn
+        _ = model._symbolic_steady_state_seed_jax_fn
+    if model.has_obc:
+        _ = model._obc_violation_expressions
+        _ = model._obc_violation_matrix
+        _ = model._first_order_obc_projection_specs
 
 
 def solve_steady_state(

@@ -86,7 +86,7 @@ Not implemented yet:
 
 - perturbation orders above third
 - ambiguous multi-family calibration-equation broadcasting remains guarded rather than inferred
-- the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess`, bounds, `silent`, `symbolic`, `perturbation_order`, and the common upstream `simplify` / `verbose` options
+- the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess`, bounds, `silent`, `symbolic`, `perturbation_order`, `precompile`, and the common upstream `simplify` / `verbose` options
 - full Julia-style occasionally binding constraint enforcement around kinks, including the broader shock-sequence/runtime surface beyond the new dedicated first-order receding-horizon OBC shock optimization, full kink-aware runtime switching, and the remaining OBC enforcement modes outside the newly supported direct / monotone-transformed subset
 - the new first-order OBC runtime path now covers direct and simple monotone-transformed current-variable `max` / `min` equations, but more general parsed OBC models still fall back to deterministic SEP when `ignore_obc = false`
 - the broader Julia runtime selection surface is still narrower here than upstream, even though grouped nested name inputs and the main selector tokens like `:all_excluding_obc` and `:all_excluding_auxiliary_and_obc` are now supported

@@ -34,6 +34,19 @@ end
 end
 """
 
+_PRECOMPILE_OPTION_SOURCE = """
+@model precompile_option_model precompile = true begin
+    k[0] = beta
+    c[0] = alpha * k[0]
+    y[0] = c[0] + 1
+end
+
+@parameters precompile_option_model precompile = true symbolic = true perturbation_order = 2 begin
+    alpha = 0.25
+    beta = 2.0
+end
+"""
+
 
 def test_parser_records_model_and_parameter_options() -> None:
     model = parse_macro_model(_OPTION_SOURCE)
@@ -51,6 +64,24 @@ def test_parser_records_remaining_parameter_directives() -> None:
     assert model.parameter_options["silent"] is True
     assert model.parameter_options["symbolic"] is True
     assert model.parameter_options["perturbation_order"] == 1
+
+
+def test_parser_precompile_option_eagerly_builds_cached_symbolic_objects() -> None:
+    model = parse_macro_model(_PRECOMPILE_OPTION_SOURCE)
+
+    assert model.model_options["precompile"] is True
+    assert model.parameter_options["precompile"] is True
+    assert "_steady_state_fn" in model.__dict__
+    assert "_steady_state_jacobian_fn" in model.__dict__
+    assert "_steady_state_residual_jax_fn" in model.__dict__
+    assert "_parameter_equation_fn" in model.__dict__
+    assert "_parameter_equation_residual_jax_fn" in model.__dict__
+    assert "_dynamic_residual_fn" in model.__dict__
+    assert "_dynamic_jacobian_fn" in model.__dict__
+    assert "_dynamic_hessian_fn" in model.__dict__
+    assert "_dynamic_third_order_fn" not in model.__dict__
+    assert "_symbolic_steady_state_seed_fn" in model.__dict__
+    assert "_symbolic_steady_state_seed_jax_fn" in model.__dict__
 
 
 def test_symbolic_parameter_option_seeds_exact_numpy_steady_state() -> None:
