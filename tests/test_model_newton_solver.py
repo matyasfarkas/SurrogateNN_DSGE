@@ -82,6 +82,27 @@ end
     )
 
 
+def test_steady_state_solver_uses_unit_scale_restart_candidates_for_domain_failures() -> None:
+    source = """
+@model capital_unit_restart begin
+    sqrt(1.0 - capital[0])
+end
+
+@parameters capital_unit_restart begin
+end
+"""
+    model = parse_macro_model(source)
+    result = solve_steady_state(model)
+
+    assert result.converged
+    np.testing.assert_allclose(
+        np.asarray(result.steady_state, dtype=np.float64),
+        np.asarray([1.0], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-8,
+    )
+
+
 _CACHE_SOURCE = """
 @model cache_model begin
     x[0] = level

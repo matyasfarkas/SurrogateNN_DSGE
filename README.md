@@ -63,7 +63,7 @@ Implemented:
 - lazy symbolic matrix construction and cached `sympy.lambdify` compilation for parsed models, so large MacroModelling-style sources parse without eagerly compiling every derivative object
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
 - damped Newton non-stochastic steady-state solver
-- steady-state and calibrated-parameter Newton restart heuristics plus finite-difference Jacobian fallback on both the NumPy and JAX paths, so compiled first-order estimation no longer fails immediately on non-finite default guesses or singular autodiff Jacobians
+- steady-state and calibrated-parameter Newton restart heuristics plus finite-difference Jacobian fallback on both the NumPy and JAX paths, including generic sign-preserving unit-scale feasibility restarts when the model-specific default guess family stays outside the residual domain, so compiled first-order estimation no longer fails immediately on non-finite default guesses or singular autodiff Jacobians
 - conservative symbolic steady-state seeding from uniquely solvable steady-state equations when `@parameters ... symbolic = true`, on both the NumPy and JAX steady-state paths
 - a small nearest-parameter steady-state cache on both the NumPy and JAX paths, so repeated solves reuse nearby converged steady states as the default guess instead of restarting from the generic heuristic every time
 - calibrated-parameter resolution from either the joint steady-state solve or a supplied steady state

@@ -6711,6 +6711,9 @@ def _newton_restart_candidates(
     _add(default_arr)
 
     positive_seed = np.where(np.abs(default_arr) > 0.0, np.abs(default_arr), 1.0)
+    unit_seed = np.where(default_arr >= 0.0, 1.0, -1.0)
+    for scale in (1.0, 0.5, 0.1):
+        _add(unit_seed * scale)
     for scale in (0.5, 2.0, 4.0, 8.0):
         _add(default_arr * scale)
         _add(np.where(default_arr >= 0.0, positive_seed * scale, -positive_seed * scale))
@@ -6761,7 +6764,10 @@ def _newton_restart_candidates_jax(
     )
 
     positive_seed = jnp.where(jnp.abs(default_arr) > 0.0, jnp.abs(default_arr), 1.0)
+    unit_seed = jnp.where(default_arr >= 0.0, 1.0, -1.0)
     sign_preserving_candidates = []
+    for scale in (1.0, 0.5, 0.1):
+        sign_preserving_candidates.append(unit_seed * scale)
     for scale in (0.5, 2.0, 4.0, 8.0):
         sign_preserving_candidates.append(default_arr * scale)
         sign_preserving_candidates.append(

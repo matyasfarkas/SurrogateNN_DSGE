@@ -52,6 +52,16 @@ end
 """
 
 
+UNIT_RESTART_SOURCE = """
+@model capital_unit_restart begin
+    sqrt(1.0 - capital[0])
+end
+
+@parameters capital_unit_restart begin
+end
+"""
+
+
 def test_jax_steady_state_solver_matches_numpy_path() -> None:
     model = parse_macro_model(STEADY_STATE_SOURCE)
     parameter_vector = jnp.asarray(model.parameter_values, dtype=jnp.float64)
@@ -134,6 +144,27 @@ def test_jax_steady_state_solver_restarts_when_default_guess_is_nonfinite() -> N
     np.testing.assert_allclose(
         jax_result.steady_state,
         numpy_result.steady_state,
+        rtol=0,
+        atol=1e-8,
+    )
+
+
+def test_jax_steady_state_solver_uses_unit_scale_restart_candidates() -> None:
+    model = parse_macro_model(UNIT_RESTART_SOURCE)
+
+    jax_result = solve_steady_state_jax(model)
+    numpy_result = solve_steady_state(model)
+
+    assert bool(np.asarray(jax_result.converged))
+    np.testing.assert_allclose(
+        jax_result.steady_state,
+        numpy_result.steady_state,
+        rtol=0,
+        atol=1e-8,
+    )
+    np.testing.assert_allclose(
+        numpy_result.steady_state,
+        np.asarray([1.0], dtype=np.float64),
         rtol=0,
         atol=1e-8,
     )
