@@ -839,6 +839,33 @@ Python/JAX status:
 - the timing layer measures the actual high-level FOM and switching pipelines, not only the low-level likelihood mixer, which makes sparse-tree SEP comparisons easier to run consistently
 - focused tests verify the helper on a nonlinear sparse-tree SEP FOM path, including gate counts, decomposition consistency, SEP diagnostics, and runtime reporting
 
+### 55. Low-level SEP acceptance tolerances
+
+Julia reference:
+
+- `src/sep_simulation.jl`
+- the updated SEP runtime in `SurrogateNN_Estimation.jl`, where `sep_accept_tol` accepts usable nonlinear paths even if the strict SEP Newton tolerance is missed
+
+Python/JAX status:
+
+- `SEPConfig` now includes `accept_tol`, with the same intent as the updated Julia `sep_accept_tol` runtime keyword
+- `SEPSolution` now reports both strict `converged` and broader `accepted` status, so callers can distinguish a true Newton solve from a merely acceptable residual band instead of overloading one flag
+- the parsed-model SEP runtime path now uses `solution.accepted` rather than strict `solution.converged`, which aligns it with the updated Julia simulation behavior where a finite residual below the configured acceptance threshold is allowed to proceed
+- focused tests verify the low-level distinction directly on a constant-residual toy SEP problem and verify that the parsed-model SEP runtime no longer throws when the configured acceptance band is satisfied
+
+### 56. Homotopy SEP sigma continuation
+
+Julia reference:
+
+- `src/homotopy_sep.jl`
+
+Python/JAX status:
+
+- `solve_sep_at_noise_level(...)` is now implemented for parsed models, scaling deterministic shocks by `sigma` and forcing deterministic perfect-foresight SEP (`branching_order = 0`) at `sigma = 0`
+- `homotopy_sep(...)` is now implemented for parsed models, porting the updated Julia sigma-continuation idea: solve the deterministic problem first, then walk from `sigma = 0` to `sigma = 1` with optional adaptive bisection retries when a target noise level fails
+- the continuation loop uses accepted SEP solutions, not only strict Newton convergence, which matches the updated Julia use of `sep_accept_tol` in the homotopy path
+- focused tests verify exact shock-scaling parity, adaptive subdivision on a forced failure/retry path, and a real parsed-model nonlinear SEP smoke run that reaches `sigma = 1`
+
 ### 30. Steady-state restarts, common macro options, OBC runtime horizon plumbing, and Lyapunov variants
 
 Julia reference:
@@ -876,7 +903,7 @@ Python/JAX status:
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The switching layer now has compiled first-order likelihoods, supplied-shock gate statistics, first-order filter reconstruction, filter-derived gate construction, and automatic filter-gated NumPyro wrappers. The remaining gaps are the broader higher-order/nonlinear switching-estimation harness and the older concrete helper surface in `model.py`, not the core first-order switching-order path itself.
-- The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, branch-frozen subgradient Jacobians for parsed OBC models on the Gauss-Hermite path, Julia-style nonlinear-solver controls for `linear_solver`, `fallback_solver`, stall detection, and bounded backtracking line search, and one more sparse-tree runtime optimization: parent links, child-group structure, and per-group shock assignments are now precomputed once per solve instead of being rebuilt inside every Newton residual evaluation. The remaining SEP gap is now narrower: sparse-tree-specific Jacobian/runtime optimizations and broader OBC-specific subdifferential SEP machinery are still unported.
+- The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, branch-frozen subgradient Jacobians for parsed OBC models on the Gauss-Hermite path, Julia-style nonlinear-solver controls for `linear_solver`, `fallback_solver`, stall detection, bounded backtracking line search, the updated low-level `accept_tol` semantics, and parsed-model homotopy sigma continuation. The remaining SEP gap is now narrower: sparse-tree-specific Jacobian/runtime optimizations, the Julia `homotopy_chained_trajectory` helper, and broader OBC-specific subdifferential SEP machinery are still unported.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed SEP path with both full-tree and sparse fishbone branching.

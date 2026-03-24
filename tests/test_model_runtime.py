@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import surrogatenn_dsge.model as model_module
@@ -986,3 +987,41 @@ def test_upstream_gali_obc_uses_dedicated_first_order_runtime_path() -> None:
 
     assert result.algorithm_used == "first_order"
     assert np.all(np.isfinite(np.asarray(result.responses, dtype=np.float64)))
+
+
+def test_sep_runtime_path_accepts_solution_within_configured_accept_tol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = parse_macro_model(LINEAR_IRF_SOURCE)
+    expected_path = np.asarray([[0.1, 0.2, 0.3]], dtype=np.float64)
+
+    def fake_sep_solver(self, **kwargs):
+        return model_module.ParsedModelSEPResult(
+            steady_state=np.asarray([0.0], dtype=np.float64),
+            parameter_values=np.asarray([0.5], dtype=np.float64),
+            solution=model_module.SEPSolution(
+                stacked_states=jnp.zeros((3,), dtype=jnp.float64),
+                mean_path=jnp.asarray([[0.0, 0.1, 0.2, 0.3]], dtype=jnp.float64),
+                residual_norm=1e-4,
+                converged=False,
+                accepted=True,
+                iterations=2,
+                group_counts=(1, 1, 1, 1),
+                jacobian_method="autodiff",
+            ),
+        )
+
+    monkeypatch.setattr(
+        model_module.MacroModel,
+        "solve_stochastic_extended_path",
+        fake_sep_solver,
+    )
+
+    state_path = model._simulate_sep_path(
+        np.zeros((model.timings.nExo, 3), dtype=np.float64),
+        parameter_values=np.asarray([0.5], dtype=np.float64),
+        steady_state=np.asarray([0.0], dtype=np.float64),
+        config=SEPConfig(periods=3, branching_order=0, tol=1e-8, accept_tol=1e-3),
+    )
+
+    np.testing.assert_allclose(state_path, expected_path, rtol=0.0, atol=0.0)

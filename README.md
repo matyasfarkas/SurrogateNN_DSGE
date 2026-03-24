@@ -81,9 +81,11 @@ Implemented:
 - sparse fishbone stochastic extended path branching for callback-based and parsed-model SEP solves, including real `sep_sparse_tree` runtime support in the inversion bridge
 - sparse-tree SEP now precomputes parent/child/shock tree metadata once per solve instead of rebuilding the same fishbone combinatorics inside every Newton residual evaluation
 - adaptive Levenberg-Marquardt damping, Julia-style SEP config controls for `linear_solver`, `fallback_solver`, stall detection, and bounded backtracking line search, explicit config validation, and checked warm-start support for more robust nonlinear SEP solves
+- Julia-style SEP acceptance tolerances via `SEPConfig(accept_tol=...)`, so parsed-model SEP runtimes can now accept a finite residual band even when strict Newton convergence is missed, matching the updated upstream `sep_accept_tol` behavior instead of requiring the inversion wrapper to handle that case alone
 - automatic first-order linear-path warm starts for parsed-model SEP solves and deterministic SEP runtime fallbacks, with explicit `initial_guess` still taking precedence
 - the high-level switching bridge is now regression-tested on a nonlinear sparse-tree SEP FOM path as well, so ROM Kalman plus sparse-tree SEP inversion can be compared end to end against a manual likelihood mixture on the same model
 - HMC expectation backend for both SEP callback APIs, including parsed-model SEP solves and optional parallel tempering
+- parsed-model `solve_sep_at_noise_level(...)` and `homotopy_sep(...)` utilities, porting the updated Julia sigma-continuation SEP robustness workflow; `sigma = 0` now forces a deterministic perfect-foresight SEP step, intermediate noise levels scale deterministic shocks directly, and adaptive subdivision retries harder nonlinear paths before giving up
 - parsed-model stochastic extended path solve path with JAX dynamic residual evaluation and residual-expectation averaging over future branches
 - focused tests for residuals, symmetry, fallback behavior, JIT, autodiff, parser parity, inversion filtering, switching likelihoods, gate calibration, and multi-model JAX compile smoke across upstream model files
 
@@ -97,6 +99,7 @@ Not implemented yet:
 - the hard remaining raw-source bottleneck is now clearly the largest nonlinear steady states rather than OBC syntax support alone; on a manual upstream spot-check, the new hybrid rescue reduced the raw `Guerrieri_Iacoviello_2017.jl` steady-state residual from about `4.3e-1` to about `1.2e-2` at the default budget, but did not yet fully converge it automatically
 - the broader Julia runtime selection surface is still narrower here than upstream, even though grouped nested name inputs and the main selector tokens like `:all_excluding_obc` and `:all_excluding_auxiliary_and_obc` are now supported
 - the remaining sparse-tree-specific Jacobian/runtime optimizations and the broader OBC-specific SEP machinery beyond the new subgradient / finite-difference Jacobian safeguards
+- the updated Julia `homotopy_chained_trajectory` helper is not ported yet; only `solve_sep_at_noise_level(...)` and `homotopy_sep(...)` are implemented on the Python side so far
 - fully GPU-native generalized QZ / ordered-QZ primitives; the current JAX-facing `schur` QME path uses a SciPy host callback in the primal solve because JAX does not yet expose generalized `qz` / `ordqz`
 - the public first-order default now matches Julia and uses `schur`; request `qme_algorithm=\"doubling\"` explicitly if you want to stay on the fully JAX-native doubling path
 - the new determinacy diagnostics are currently tied to the Schur/QZ path; the doubling path still solves the QME but does not provide a comparable stable-root decomposition report

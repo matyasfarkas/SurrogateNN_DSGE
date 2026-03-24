@@ -89,6 +89,29 @@ def test_sep_handles_nonlinear_expectational_equation() -> None:
     assert np.all(np.isfinite(solution.mean_path))
 
 
+def test_sep_accept_tol_allows_usable_solution_without_strict_convergence() -> None:
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        return jnp.asarray([1e-4], dtype=jnp.float64)
+
+    solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=0,
+        config=SEPConfig(
+            periods=2,
+            branching_order=0,
+            tol=1e-8,
+            accept_tol=1e-3,
+            max_iter=2,
+        ),
+    )
+
+    assert not solution.converged
+    assert solution.accepted
+    np.testing.assert_allclose(solution.residual_norm, 1e-4, rtol=0.0, atol=1e-12)
+
+
 def test_sep_conditional_residual_mode_matches_expectation_api_when_equivalent() -> None:
     deterministic_shocks = jnp.array([[0.2], [0.0], [0.0]])
 

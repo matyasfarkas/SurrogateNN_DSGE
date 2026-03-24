@@ -27,6 +27,7 @@ class SEPSolution(NamedTuple):
     mean_path: jax.Array
     residual_norm: float
     converged: bool
+    accepted: bool
     iterations: int
     group_counts: tuple[int, ...]
     jacobian_method: str
@@ -58,6 +59,7 @@ class SEPConfig:
     hmc_seed: int = 0
     max_iter: int = 80
     tol: float = 1e-7
+    accept_tol: Optional[float] = None
     linear_solver: str = "qr"
     fallback_solver: Optional[str] = None
     stall_iters: int = 25
@@ -136,6 +138,11 @@ def _validate_sep_config(config: SEPConfig, *, shock_dim: int) -> None:
         raise ValueError(f"SEPConfig.max_iter must be >= 1, got {config.max_iter}.")
     if config.tol <= 0.0:
         raise ValueError(f"SEPConfig.tol must be > 0, got {config.tol}.")
+    if config.accept_tol is not None and config.accept_tol <= 0.0:
+        raise ValueError(
+            "SEPConfig.accept_tol must be > 0 when provided, "
+            f"got {config.accept_tol}."
+        )
     if config.linear_solver not in {"normal_equations", "qr"}:
         raise ValueError(
             "SEPConfig.linear_solver must be 'normal_equations' or 'qr', "
@@ -1026,6 +1033,9 @@ def _solve_stochastic_extended_path_impl(
         return jnp.concatenate(residuals, axis=0)
 
     residual_norm = float(np.asarray(jnp.linalg.norm(residual_vector(guess), ord=jnp.inf)))
+    accept_threshold = (
+        config.tol if config.accept_tol is None else float(config.accept_tol)
+    )
     converged = residual_norm < config.tol
     iterations = 0
     current = guess
@@ -1146,6 +1156,7 @@ def _solve_stochastic_extended_path_impl(
     final_residual = residual_vector(current)
     residual_norm = float(np.asarray(jnp.linalg.norm(final_residual, ord=jnp.inf)))
     converged = residual_norm < config.tol
+    accepted = bool(np.isfinite(residual_norm) and residual_norm <= accept_threshold)
 
     states_by_time = unflatten(current)
     mean_path = [initial_state_arr]
@@ -1158,6 +1169,7 @@ def _solve_stochastic_extended_path_impl(
         mean_path=jnp.stack(mean_path, axis=1),
         residual_norm=residual_norm,
         converged=converged,
+        accepted=accepted,
         iterations=iterations,
         group_counts=counts,
         jacobian_method=jacobian_method_used,

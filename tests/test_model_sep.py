@@ -7,7 +7,9 @@ import pytest
 from surrogatenn_dsge import (
     SEPConfig,
     evaluate_dynamic_residual,
+    homotopy_sep,
     parse_macro_model,
+    solve_sep_at_noise_level,
     solve_stochastic_extended_path_model,
     solve_stochastic_extended_path_residual_expectation,
 )
@@ -182,3 +184,123 @@ def test_explicit_sep_initial_guess_overrides_linear_warm_start(
         rtol=0.0,
         atol=0.0,
     )
+
+
+def test_solve_sep_at_noise_level_scales_shocks_and_forces_deterministic_sigma_zero() -> None:
+    model = parse_macro_model(NONLINEAR_SEP_SOURCE)
+    base_config = SEPConfig(periods=3, branching_order=2, nnodes=3, tol=1e-10)
+
+    sigma_zero = solve_sep_at_noise_level(
+        model,
+        sigma=0.0,
+        config=base_config,
+        deterministic_shocks={"u": [0.2, 0.0, 0.0]},
+    )
+    deterministic = solve_stochastic_extended_path_model(
+        model,
+        config=SEPConfig(periods=3, branching_order=0, nnodes=3, tol=1e-10),
+        deterministic_shocks={"u": [0.0, 0.0, 0.0]},
+    )
+    sigma_half = solve_sep_at_noise_level(
+        model,
+        sigma=0.5,
+        config=base_config,
+        deterministic_shocks={"u": [0.2, 0.0, 0.0]},
+    )
+    half_scaled = solve_stochastic_extended_path_model(
+        model,
+        config=base_config,
+        deterministic_shocks={"u": [0.1, 0.0, 0.0]},
+    )
+
+    assert sigma_zero.solution.accepted
+    assert sigma_half.solution.accepted
+    np.testing.assert_allclose(
+        sigma_zero.solution.mean_path,
+        deterministic.solution.mean_path,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        sigma_half.solution.mean_path,
+        half_scaled.solution.mean_path,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_homotopy_sep_adapts_by_subdividing_failed_sigma_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = parse_macro_model(NONLINEAR_SEP_SOURCE)
+    calls: list[float] = []
+
+    def fake_solve_sep_at_noise_level(
+        _model: object,
+        *,
+        sigma: float,
+        **kwargs: object,
+    ) -> model_module.ParsedModelSEPResult:
+        calls.append(float(sigma))
+        attempt_count = sum(abs(value - float(sigma)) < 1e-12 for value in calls)
+        accepted = not (abs(float(sigma) - 1.0) < 1e-12 and attempt_count == 1)
+        return model_module.ParsedModelSEPResult(
+            steady_state=np.asarray([0.0], dtype=np.float64),
+            parameter_values=np.asarray([0.25, 0.15], dtype=np.float64),
+            solution=model_module.SEPSolution(
+                stacked_states=jnp.asarray([float(sigma)], dtype=jnp.float64),
+                mean_path=jnp.asarray(
+                    [[0.0, float(sigma)]],
+                    dtype=jnp.float64,
+                ),
+                residual_norm=1e-6 if accepted else 1.0,
+                converged=accepted,
+                accepted=accepted,
+                iterations=1,
+                group_counts=(1, 1),
+                jacobian_method="autodiff",
+            ),
+        )
+
+    monkeypatch.setattr(
+        model_module,
+        "solve_sep_at_noise_level",
+        fake_solve_sep_at_noise_level,
+    )
+
+    result = homotopy_sep(
+        model,
+        n_steps=1,
+        adaptive=True,
+        max_retries=1,
+        config=SEPConfig(periods=1, branching_order=1, tol=1e-10),
+        deterministic_shocks={"u": [0.2]},
+    )
+
+    assert result.success
+    assert result.sigma_path == (0.0, 0.5, 1.0)
+    np.testing.assert_allclose(
+        np.asarray(calls, dtype=np.float64),
+        np.asarray([0.0, 1.0, 0.5, 1.0], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_homotopy_sep_runs_on_parsed_nonlinear_model() -> None:
+    model = parse_macro_model(NONLINEAR_SEP_SOURCE)
+
+    result = homotopy_sep(
+        model,
+        n_steps=3,
+        adaptive=True,
+        max_retries=2,
+        config=SEPConfig(periods=3, branching_order=1, nnodes=3, tol=1e-8),
+        deterministic_shocks={"u": [0.2, 0.0, 0.0]},
+    )
+
+    assert result.success
+    assert result.result.solution.accepted
+    assert result.sigma_path[0] == 0.0
+    assert abs(result.sigma_path[-1] - 1.0) < 1e-12
+    assert np.all(np.isfinite(np.asarray(result.result.solution.mean_path, dtype=np.float64)))

@@ -159,6 +159,12 @@ class ParsedModelSEPResult(NamedTuple):
     solution: SEPSolution
 
 
+class HomotopySEPResult(NamedTuple):
+    success: bool
+    result: ParsedModelSEPResult
+    sigma_path: tuple[float, ...]
+
+
 class OBCViolationPathResult(NamedTuple):
     state_path: jax.Array
     shocks: jax.Array
@@ -1761,8 +1767,10 @@ class MacroModel:
             deterministic_shocks=runtime_shocks,
             initial_guess=sep_initial_guess,
         )
-        if not sep_result.solution.converged:
-            raise ValueError("Stochastic extended path solve did not converge.")
+        if not sep_result.solution.accepted:
+            raise ValueError(
+                "Stochastic extended path solve did not meet the configured acceptance tolerance."
+            )
         state_path = np.asarray(
             sep_result.solution.mean_path[:, 1 : runtime_periods + 1],
             dtype=np.float64,
@@ -6812,6 +6820,156 @@ def solve_stochastic_extended_path_model(
         config=config,
         deterministic_shocks=deterministic_shocks,
         initial_guess=initial_guess,
+    )
+
+
+def solve_sep_at_noise_level(
+    model: MacroModel,
+    *,
+    sigma: float = 1.0,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+    config: SEPConfig = SEPConfig(),
+    deterministic_shocks: Optional[
+        Sequence[Sequence[float]] | Mapping[str, Sequence[float]]
+    ] = None,
+    initial_guess: Optional[Sequence[Sequence[float]]] = None,
+) -> ParsedModelSEPResult:
+    if not np.isfinite(float(sigma)) or sigma < 0.0:
+        raise ValueError(f"sigma must be a finite non-negative float, got {sigma!r}.")
+    effective_config = (
+        dataclass_replace(config, branching_order=0) if sigma < 1e-10 else config
+    )
+    scaled_deterministic_shocks = None
+    if deterministic_shocks is not None:
+        coerced_shocks = np.asarray(
+            model._coerce_sep_deterministic_shocks(
+                deterministic_shocks,
+                periods=effective_config.periods,
+            ),
+            dtype=np.float64,
+        )
+        scaled_deterministic_shocks = float(sigma) * coerced_shocks
+    return model.solve_stochastic_extended_path(
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        config=effective_config,
+        deterministic_shocks=scaled_deterministic_shocks,
+        initial_guess=initial_guess,
+    )
+
+
+def homotopy_sep(
+    model: MacroModel,
+    *,
+    n_steps: int = 10,
+    adaptive: bool = True,
+    max_retries: int = 3,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+    config: SEPConfig = SEPConfig(),
+    deterministic_shocks: Optional[
+        Sequence[Sequence[float]] | Mapping[str, Sequence[float]]
+    ] = None,
+    initial_guess: Optional[Sequence[Sequence[float]]] = None,
+) -> HomotopySEPResult:
+    if n_steps < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps}.")
+    if max_retries < 0:
+        raise ValueError(f"max_retries must be >= 0, got {max_retries}.")
+
+    sigma_targets = np.linspace(0.0, 1.0, n_steps + 1, dtype=np.float64)
+    sigma_actual = [0.0]
+
+    result_prev = solve_sep_at_noise_level(
+        model,
+        sigma=0.0,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        config=config,
+        deterministic_shocks=deterministic_shocks,
+        initial_guess=initial_guess,
+    )
+    if not result_prev.solution.accepted:
+        return HomotopySEPResult(
+            success=False,
+            result=result_prev,
+            sigma_path=tuple(sigma_actual),
+        )
+
+    for sigma_target in sigma_targets[1:]:
+        sigma_target_value = float(sigma_target)
+        sigma_prev = float(sigma_actual[-1])
+        sigma_current = sigma_target_value
+        retry_count = 0
+        while True:
+            warm_state = np.asarray(result_prev.solution.mean_path[:, 0], dtype=np.float64)
+            if result_prev.solution.mean_path.shape[1] >= 2:
+                warm_state = np.asarray(
+                    result_prev.solution.mean_path[:, 1],
+                    dtype=np.float64,
+                )
+
+            result_current = solve_sep_at_noise_level(
+                model,
+                sigma=sigma_current,
+                parameter_values=parameter_values,
+                steady_state=steady_state,
+                steady_state_initial_guess=steady_state_initial_guess,
+                steady_state_tol=steady_state_tol,
+                steady_state_max_iter=steady_state_max_iter,
+                initial_state=warm_state,
+                terminal_state=terminal_state,
+                config=config,
+                deterministic_shocks=deterministic_shocks,
+                initial_guess=initial_guess,
+            )
+
+            if result_current.solution.accepted:
+                result_prev = result_current
+                sigma_actual.append(sigma_current)
+                if adaptive and sigma_current + 1e-12 < sigma_target_value:
+                    sigma_prev = sigma_current
+                    sigma_current = sigma_target_value
+                    retry_count = 0
+                    continue
+                break
+
+            if adaptive and retry_count < max_retries:
+                sigma_current = 0.5 * (sigma_prev + sigma_current)
+                retry_count += 1
+                continue
+
+            return HomotopySEPResult(
+                success=False,
+                result=result_prev,
+                sigma_path=tuple(float(value) for value in sigma_actual),
+            )
+
+    return HomotopySEPResult(
+        success=True,
+        result=result_prev,
+        sigma_path=tuple(float(value) for value in sigma_actual),
     )
 
 
