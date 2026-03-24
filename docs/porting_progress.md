@@ -882,6 +882,19 @@ Python/JAX status:
 - `switching_pipeline_report(...)` now includes `decision_quality` and `probability_quality` blocks so a high-level ROM/FOM switching comparison automatically reports not only total likelihoods and runtimes, but also whether the gate is selecting the right nonlinear episodes
 - focused tests verify exact oracle/budget regret arithmetic on synthetic per-period loglikelihood inputs, probability-quality metrics on a perfectly ranked soft gate, and the presence plus internal consistency of the new diagnostics inside the high-level sparse-tree SEP switching report
 
+### 58. Switching budget-frontier diagnostics
+
+Julia reference:
+
+- the methodological requirement from the ROM1/FOM switching idea in `SurrogateNN_Estimation.jl`: a good gate should not only be good at one hard threshold, it should rank candidate nonlinear periods well across a range of nonlinear-compute budgets
+
+Python/JAX status:
+
+- `evaluate_gate_budget_frontier(...)` now evaluates a gate score against the same-budget oracle over a whole budget grid, rather than only at a single threshold or single realized hard mask
+- the frontier reports selected totals, same-budget oracle totals, regret relative to that oracle, captured nonlinear gain shares, and simple area summaries over the budget share axis
+- `switching_pipeline_report(...)` now includes a `budget_frontier` block driven by the current gate probabilities, with either user-supplied budgets or an automatically sampled grid from zero nonlinear periods to the full nonlinear schedule
+- focused tests verify exact zero-regret behavior when the supplied gate ranking matches the oracle ranking across budgets, and verify that the high-level sparse-tree SEP switching report now carries the new frontier block with the requested budget grid
+
 ### 30. Steady-state restarts, common macro options, OBC runtime horizon plumbing, and Lyapunov variants
 
 Julia reference:

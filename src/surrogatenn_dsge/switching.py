@@ -1047,6 +1047,92 @@ def evaluate_gate_probabilities(
     }
 
 
+def _topk_mask_from_scores(
+    scores: Sequence[float] | np.ndarray,
+    budget: int,
+) -> np.ndarray:
+    score_array = np.asarray(scores, dtype=np.float64).reshape(-1)
+    if score_array.ndim != 1:
+        raise ValueError("scores must be rank-1.")
+    if not np.all(np.isfinite(score_array)):
+        raise ValueError("scores must contain only finite values.")
+    if budget < 0 or budget > score_array.size:
+        raise ValueError(
+            f"budget must be between 0 and {score_array.size}, got {budget}."
+        )
+    mask = np.zeros(score_array.shape, dtype=bool)
+    if budget == 0 or score_array.size == 0:
+        return mask
+    order = np.argsort(-score_array, kind="mergesort")
+    mask[order[:budget]] = True
+    return mask
+
+
+def evaluate_gate_budget_frontier(
+    ll_rom: Sequence[float] | np.ndarray,
+    ll_fom: Sequence[float] | np.ndarray,
+    scores: Sequence[float] | np.ndarray,
+    *,
+    budgets: Optional[Sequence[int] | np.ndarray] = None,
+    gain_tol: float = 0.0,
+) -> dict[str, float | np.ndarray]:
+    rom = np.asarray(ll_rom, dtype=np.float64).reshape(-1)
+    fom = np.asarray(ll_fom, dtype=np.float64).reshape(-1)
+    score_array = np.asarray(scores, dtype=np.float64).reshape(-1)
+    if rom.shape != fom.shape or rom.shape != score_array.shape:
+        raise ValueError(
+            "ll_rom, ll_fom, and scores must have identical shapes, got "
+            f"{rom.shape}, {fom.shape}, and {score_array.shape}."
+        )
+    periods = int(rom.size)
+    if budgets is None:
+        budget_array = np.arange(periods + 1, dtype=np.int64)
+    else:
+        budget_array = np.asarray(budgets, dtype=np.int64).reshape(-1)
+        if budget_array.size == 0:
+            raise ValueError("budgets must contain at least one entry.")
+        if np.any(budget_array < 0) or np.any(budget_array > periods):
+            raise ValueError(
+                f"budgets must be between 0 and {periods}, got {budget_array!r}."
+            )
+        budget_array = np.unique(np.sort(budget_array))
+
+    selected_total = np.zeros(budget_array.shape, dtype=np.float64)
+    oracle_total = np.zeros(budget_array.shape, dtype=np.float64)
+    regret = np.zeros(budget_array.shape, dtype=np.float64)
+    captured_gain_share = np.zeros(budget_array.shape, dtype=np.float64)
+    selected_share = np.zeros(budget_array.shape, dtype=np.float64)
+
+    for idx, budget in enumerate(budget_array):
+        mask = _topk_mask_from_scores(score_array, int(budget))
+        metrics = evaluate_gate_decisions(rom, fom, mask, gain_tol=gain_tol)
+        selected_total[idx] = float(metrics["mixed_total"])
+        oracle_total[idx] = float(metrics["budget_oracle_total"])
+        regret[idx] = float(metrics["regret_vs_budget_oracle"])
+        captured_gain_share[idx] = float(metrics["captured_gain_share"])
+        selected_share[idx] = 0.0 if periods == 0 else float(budget) / float(periods)
+
+    if budget_array.size <= 1:
+        area_regret = float(regret[0]) if regret.size else 0.0
+        area_capture = float(captured_gain_share[0]) if captured_gain_share.size else 0.0
+    else:
+        area_regret = float(np.trapezoid(regret, x=selected_share))
+        area_capture = float(np.trapezoid(captured_gain_share, x=selected_share))
+
+    return {
+        "budgets": budget_array,
+        "selected_share": selected_share,
+        "selected_total": selected_total,
+        "budget_oracle_total": oracle_total,
+        "regret_vs_budget_oracle": regret,
+        "captured_gain_share": captured_gain_share,
+        "mean_regret_vs_budget_oracle": 0.0 if regret.size == 0 else float(np.mean(regret)),
+        "max_regret_vs_budget_oracle": 0.0 if regret.size == 0 else float(np.max(regret)),
+        "area_regret_vs_budget_oracle": area_regret,
+        "area_captured_gain_share": area_capture,
+    }
+
+
 def _gate_segments(mask: Sequence[bool] | np.ndarray) -> tuple[tuple[int, int], ...]:
     values = np.asarray(mask, dtype=bool).reshape(-1)
     segments: list[tuple[int, int]] = []

@@ -16,6 +16,7 @@ from surrogatenn_dsge import (
     compute_gate_stat_series,
     compute_gate_stat_series_jax,
     evaluate_gate_decisions,
+    evaluate_gate_budget_frontier,
     evaluate_gate_probabilities,
     gate_probabilities,
     gate_probabilities_jax,
@@ -419,6 +420,41 @@ def test_gate_probability_metrics_match_oracle_classification() -> None:
     assert metrics["hard_regret_vs_oracle"] == 0.0
 
 
+def test_gate_budget_frontier_quantifies_budget_ranking_quality() -> None:
+    ll_rom = np.asarray([-2.0, -1.5, -1.1, -0.8], dtype=np.float64)
+    ll_fom = np.asarray([-1.0, -1.6, -0.4, -0.7], dtype=np.float64)
+    gate_scores = np.asarray([0.9, 0.1, 0.8, 0.3], dtype=np.float64)
+
+    frontier = evaluate_gate_budget_frontier(
+        ll_rom,
+        ll_fom,
+        gate_scores,
+        budgets=[0, 1, 2, 4],
+    )
+
+    np.testing.assert_array_equal(frontier["budgets"], np.asarray([0, 1, 2, 4]))
+    np.testing.assert_allclose(
+        frontier["regret_vs_budget_oracle"],
+        np.zeros((4,), dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        frontier["captured_gain_share"],
+        np.asarray([0.0, 1.0 / 1.8, 1.7 / 1.8, 1.0], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        frontier["selected_share"],
+        np.asarray([0.0, 0.25, 0.5, 1.0], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert frontier["area_regret_vs_budget_oracle"] == 0.0
+    assert frontier["max_regret_vs_budget_oracle"] == 0.0
+
+
 def test_switching_pipeline_report_collects_sparse_tree_sep_comparison() -> None:
     model, config, levels = _nonlinear_switching_fixture()
     gate_probs = np.asarray([0.15, 0.35, 0.65, 0.85], dtype=np.float64)
@@ -435,6 +471,7 @@ def test_switching_pipeline_report_collects_sparse_tree_sep_comparison() -> None
         measurement_error_scale=0.0,
         on_failure_loglikelihood=-1e12,
         switching_config=SwitchingLikelihoodConfig(soft_mixture="logsumexp"),
+        budget_frontier_budgets=[0, 1, 2, 4],
         benchmark_reps=1,
     )
 
@@ -452,6 +489,11 @@ def test_switching_pipeline_report_collects_sparse_tree_sep_comparison() -> None
     assert report["gate_stats"]["periods_nonlinear"] == 2
     assert report["decision_quality"]["periods_total"] == levels.shape[1]
     assert report["probability_quality"]["hard_threshold"] == 0.5
+    np.testing.assert_array_equal(
+        report["budget_frontier"]["budgets"],
+        np.asarray([0, 1, 2, 4], dtype=np.int64),
+    )
+    assert report["budget_frontier"]["mean_regret_vs_budget_oracle"] >= 0.0
     np.testing.assert_allclose(
         report["decomposition"]["ll_mixed_total"],
         np.sum(np.where(report["hard_mask"], report["ll_fom"], report["ll_rom"])),

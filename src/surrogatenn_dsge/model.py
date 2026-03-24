@@ -71,6 +71,7 @@ from .switching import (
     compute_gate_stats,
     compute_gate_stat_series,
     compute_switching_loglikelihood,
+    evaluate_gate_budget_frontier,
     evaluate_gate_decisions,
     evaluate_gate_probabilities,
     evaluate_switching_vs_fom,
@@ -3454,6 +3455,8 @@ class MacroModel:
         switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
         gate_gain_tol: float = 0.0,
         gate_hard_threshold: float = 0.5,
+        budget_frontier_budgets: Optional[Sequence[int]] = None,
+        budget_frontier_points: int = 11,
         benchmark_reps: int = 0,
     ) -> dict[str, Any]:
         common_kwargs = dict(
@@ -3582,6 +3585,28 @@ class MacroModel:
             gain_tol=gate_gain_tol,
             hard_threshold=gate_hard_threshold,
         )
+        periods = int(rom.size)
+        if budget_frontier_points <= 0:
+            raise ValueError("budget_frontier_points must be >= 1.")
+        if budget_frontier_budgets is None:
+            if periods == 0:
+                frontier_budgets = np.asarray([0], dtype=np.int64)
+            else:
+                frontier_count = min(max(int(budget_frontier_points), 2), periods + 1)
+                frontier_budgets = np.unique(
+                    np.rint(
+                        np.linspace(0, periods, num=frontier_count, dtype=np.float64)
+                    ).astype(np.int64)
+                )
+        else:
+            frontier_budgets = np.asarray(budget_frontier_budgets, dtype=np.int64)
+        budget_frontier = evaluate_gate_budget_frontier(
+            rom,
+            fom,
+            np.asarray(switching.gate_probs, dtype=np.float64),
+            budgets=frontier_budgets,
+            gain_tol=gate_gain_tol,
+        )
         return {
             "ll_rom": rom,
             "ll_fom": fom,
@@ -3594,6 +3619,7 @@ class MacroModel:
             "gate_stats": compute_gate_stats(hard_mask_array),
             "decision_quality": decision_quality,
             "probability_quality": probability_quality,
+            "budget_frontier": budget_frontier,
             "runtime": summarize_runtime(
                 runtime_switching_s=runtime_switching_s,
                 runtime_fom_s=runtime_fom_s,
@@ -6429,6 +6455,8 @@ def switching_pipeline_report_from_model(
     switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
     gate_gain_tol: float = 0.0,
     gate_hard_threshold: float = 0.5,
+    budget_frontier_budgets: Optional[Sequence[int]] = None,
+    budget_frontier_points: int = 11,
     benchmark_reps: int = 0,
 ) -> dict[str, Any]:
     return model.switching_pipeline_report(
@@ -6468,6 +6496,8 @@ def switching_pipeline_report_from_model(
         switching_config=switching_config,
         gate_gain_tol=gate_gain_tol,
         gate_hard_threshold=gate_hard_threshold,
+        budget_frontier_budgets=budget_frontier_budgets,
+        budget_frontier_points=budget_frontier_points,
         benchmark_reps=benchmark_reps,
     )
 
