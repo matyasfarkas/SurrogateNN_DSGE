@@ -71,6 +71,8 @@ from .switching import (
     compute_gate_stats,
     compute_gate_stat_series,
     compute_switching_loglikelihood,
+    evaluate_gate_decisions,
+    evaluate_gate_probabilities,
     evaluate_switching_vs_fom,
     summarize_loglik_decomposition,
     summarize_runtime,
@@ -3450,6 +3452,8 @@ class MacroModel:
         sep_inv_resid_tol: float = 1e-6,
         sep_inv_lambda: float = 1e-4,
         switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+        gate_gain_tol: float = 0.0,
+        gate_hard_threshold: float = 0.5,
         benchmark_reps: int = 0,
     ) -> dict[str, Any]:
         common_kwargs = dict(
@@ -3565,6 +3569,19 @@ class MacroModel:
             runtime_switching=runtime_switching_s,
             runtime_fom=runtime_fom_s,
         )
+        decision_quality = evaluate_gate_decisions(
+            rom,
+            fom,
+            hard_mask_array,
+            gain_tol=gate_gain_tol,
+        )
+        probability_quality = evaluate_gate_probabilities(
+            rom,
+            fom,
+            np.asarray(switching.gate_probs, dtype=np.float64),
+            gain_tol=gate_gain_tol,
+            hard_threshold=gate_hard_threshold,
+        )
         return {
             "ll_rom": rom,
             "ll_fom": fom,
@@ -3575,6 +3592,8 @@ class MacroModel:
             "comparison": comparison,
             "decomposition": summarize_loglik_decomposition(rom, fom, hard_mask_array),
             "gate_stats": compute_gate_stats(hard_mask_array),
+            "decision_quality": decision_quality,
+            "probability_quality": probability_quality,
             "runtime": summarize_runtime(
                 runtime_switching_s=runtime_switching_s,
                 runtime_fom_s=runtime_fom_s,
@@ -6408,6 +6427,8 @@ def switching_pipeline_report_from_model(
     sep_inv_resid_tol: float = 1e-6,
     sep_inv_lambda: float = 1e-4,
     switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+    gate_gain_tol: float = 0.0,
+    gate_hard_threshold: float = 0.5,
     benchmark_reps: int = 0,
 ) -> dict[str, Any]:
     return model.switching_pipeline_report(
@@ -6445,6 +6466,8 @@ def switching_pipeline_report_from_model(
         sep_inv_resid_tol=sep_inv_resid_tol,
         sep_inv_lambda=sep_inv_lambda,
         switching_config=switching_config,
+        gate_gain_tol=gate_gain_tol,
+        gate_hard_threshold=gate_hard_threshold,
         benchmark_reps=benchmark_reps,
     )
 

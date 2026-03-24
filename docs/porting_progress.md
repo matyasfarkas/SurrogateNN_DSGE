@@ -867,6 +867,21 @@ Python/JAX status:
 - the continuation loop uses accepted SEP solutions, not only strict Newton convergence, which matches the updated Julia use of `sep_accept_tol` in the homotopy path
 - focused tests verify exact shock-scaling parity, adaptive subdivision on a forced failure/retry path, a real parsed-model nonlinear SEP smoke run that reaches `sigma = 1`, period-by-period chained-trajectory parity against a manual homotopy loop, and clean failure-period reporting when a later homotopy step fails
 
+### 57. Switching decision-quality diagnostics
+
+Julia reference:
+
+- the methodological gap exposed by the ROM1/FOM switching workflow in `SurrogateNN_Estimation.jl`: running a mixed likelihood is not enough, because the contribution depends on whether the gate identifies the periods where nonlinear FOM work actually matters
+
+Python/JAX status:
+
+- `oracle_nonlinear_mask(...)` now marks the per-period oracle regime choice directly from `ll_fom - ll_rom`
+- `optimal_nonlinear_mask_for_budget(...)` now computes the best possible hard nonlinear schedule under the same nonlinear-period budget as the current gate, which is a stricter and fairer benchmark than the unconstrained oracle
+- `evaluate_gate_decisions(...)` now reports confusion metrics against both the unconstrained oracle and the budget-matched oracle, together with captured positive gain, wasted nonlinear cost, oracle totals, budget-oracle totals, and regret measures
+- `evaluate_gate_probabilities(...)` now reports Brier score, log loss, AUC when defined, separation of mean probabilities on oracle-positive vs oracle-negative periods, and the hard-threshold regret induced by the supplied probabilities
+- `switching_pipeline_report(...)` now includes `decision_quality` and `probability_quality` blocks so a high-level ROM/FOM switching comparison automatically reports not only total likelihoods and runtimes, but also whether the gate is selecting the right nonlinear episodes
+- focused tests verify exact oracle/budget regret arithmetic on synthetic per-period loglikelihood inputs, probability-quality metrics on a perfectly ranked soft gate, and the presence plus internal consistency of the new diagnostics inside the high-level sparse-tree SEP switching report
+
 ### 30. Steady-state restarts, common macro options, OBC runtime horizon plumbing, and Lyapunov variants
 
 Julia reference:
@@ -904,6 +919,7 @@ Python/JAX status:
 - Parameter-derivative pullbacks and the Julia reverse-rule machinery around symbolic derivatives are not ported yet.
 - The parsed-model structural likelihood is still not pure-JAX end to end beyond the first-order path; compiled NumPyro kernels currently cover the first-order path with explicit steady states or automatic JAX steady-state/calibration solves only.
 - The switching layer now has compiled first-order likelihoods, supplied-shock gate statistics, first-order filter reconstruction, filter-derived gate construction, and automatic filter-gated NumPyro wrappers. The remaining gaps are the broader higher-order/nonlinear switching-estimation harness and the older concrete helper surface in `model.py`, not the core first-order switching-order path itself.
+- The switching layer is now much easier to evaluate honestly because the high-level report exposes oracle regret, budget-matched oracle regret, captured nonlinear gain share, wasted nonlinear cost, and probability-quality diagnostics. The remaining methodological gap is not observability anymore; it is demonstrating on harder models that the gate keeps those regret measures small while still delivering useful runtime savings.
 - The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, branch-frozen subgradient Jacobians for parsed OBC models on the Gauss-Hermite path, Julia-style nonlinear-solver controls for `linear_solver`, `fallback_solver`, stall detection, bounded backtracking line search, the updated low-level `accept_tol` semantics, parsed-model homotopy sigma continuation, and the Julia-style chained homotopy trajectory helper. The remaining SEP gap is now narrower: sparse-tree-specific Jacobian/runtime optimizations and broader OBC-specific subdifferential SEP machinery are still unported.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.

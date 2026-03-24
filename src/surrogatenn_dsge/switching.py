@@ -835,6 +835,218 @@ def evaluate_switching_vs_fom(
     }
 
 
+def oracle_nonlinear_mask(
+    ll_rom: Sequence[float] | np.ndarray,
+    ll_fom: Sequence[float] | np.ndarray,
+    *,
+    gain_tol: float = 0.0,
+) -> np.ndarray:
+    rom = np.asarray(ll_rom, dtype=np.float64).reshape(-1)
+    fom = np.asarray(ll_fom, dtype=np.float64).reshape(-1)
+    if rom.shape != fom.shape:
+        raise ValueError(
+            "ll_rom and ll_fom must have identical shapes, got "
+            f"{rom.shape} and {fom.shape}."
+        )
+    return np.asarray((fom - rom) > float(gain_tol), dtype=bool)
+
+
+def optimal_nonlinear_mask_for_budget(
+    ll_rom: Sequence[float] | np.ndarray,
+    ll_fom: Sequence[float] | np.ndarray,
+    nonlinear_periods: int,
+) -> np.ndarray:
+    rom = np.asarray(ll_rom, dtype=np.float64).reshape(-1)
+    fom = np.asarray(ll_fom, dtype=np.float64).reshape(-1)
+    if rom.shape != fom.shape:
+        raise ValueError(
+            "ll_rom and ll_fom must have identical shapes, got "
+            f"{rom.shape} and {fom.shape}."
+        )
+    if nonlinear_periods < 0:
+        raise ValueError(
+            f"nonlinear_periods must be >= 0, got {nonlinear_periods}."
+        )
+    budget = min(int(nonlinear_periods), int(rom.size))
+    mask = np.zeros((rom.size,), dtype=bool)
+    if budget == 0 or rom.size == 0:
+        return mask
+    deltas = fom - rom
+    ranked = np.argsort(-deltas, kind="mergesort")
+    mask[ranked[:budget]] = True
+    return mask
+
+
+def _binary_classification_metrics(
+    predicted: np.ndarray,
+    target: np.ndarray,
+) -> dict[str, float | int]:
+    predicted_bool = np.asarray(predicted, dtype=bool).reshape(-1)
+    target_bool = np.asarray(target, dtype=bool).reshape(-1)
+    if predicted_bool.shape != target_bool.shape:
+        raise ValueError(
+            "predicted and target must have identical shapes, got "
+            f"{predicted_bool.shape} and {target_bool.shape}."
+        )
+    tp = int(np.sum(predicted_bool & target_bool))
+    tn = int(np.sum((~predicted_bool) & (~target_bool)))
+    fp = int(np.sum(predicted_bool & (~target_bool)))
+    fn = int(np.sum((~predicted_bool) & target_bool))
+    positive = tp + fn
+    negative = tn + fp
+    precision = 0.0 if (tp + fp) == 0 else float(tp / (tp + fp))
+    recall = 0.0 if positive == 0 else float(tp / positive)
+    specificity = 0.0 if negative == 0 else float(tn / negative)
+    accuracy = 0.0 if predicted_bool.size == 0 else float((tp + tn) / predicted_bool.size)
+    f1 = 0.0 if (precision + recall) == 0.0 else float(
+        2.0 * precision * recall / (precision + recall)
+    )
+    jaccard = 0.0 if (tp + fp + fn) == 0 else float(tp / (tp + fp + fn))
+    balanced_accuracy = float(0.5 * (recall + specificity))
+    return {
+        "tp": tp,
+        "tn": tn,
+        "fp": fp,
+        "fn": fn,
+        "precision": precision,
+        "recall": recall,
+        "specificity": specificity,
+        "accuracy": accuracy,
+        "balanced_accuracy": balanced_accuracy,
+        "f1": f1,
+        "jaccard": jaccard,
+        "target_positives": positive,
+        "predicted_positives": int(tp + fp),
+    }
+
+
+def _binary_auc(
+    scores: np.ndarray,
+    target: np.ndarray,
+) -> Optional[float]:
+    score_array = np.asarray(scores, dtype=np.float64).reshape(-1)
+    target_bool = np.asarray(target, dtype=bool).reshape(-1)
+    if score_array.shape != target_bool.shape:
+        raise ValueError(
+            "scores and target must have identical shapes, got "
+            f"{score_array.shape} and {target_bool.shape}."
+        )
+    positive = int(np.sum(target_bool))
+    negative = int(np.sum(~target_bool))
+    if positive == 0 or negative == 0:
+        return None
+    order = np.argsort(score_array, kind="mergesort")
+    ranks = np.empty_like(order, dtype=np.float64)
+    ranks[order] = np.arange(1, score_array.size + 1, dtype=np.float64)
+    sorted_scores = score_array[order]
+    start = 0
+    while start < score_array.size:
+        stop = start + 1
+        while stop < score_array.size and sorted_scores[stop] == sorted_scores[start]:
+            stop += 1
+        if stop - start > 1:
+            avg_rank = 0.5 * (start + 1 + stop)
+            ranks[order[start:stop]] = avg_rank
+        start = stop
+    rank_sum_positive = float(np.sum(ranks[target_bool]))
+    auc = (rank_sum_positive - positive * (positive + 1) / 2.0) / (positive * negative)
+    return float(auc)
+
+
+def evaluate_gate_decisions(
+    ll_rom: Sequence[float] | np.ndarray,
+    ll_fom: Sequence[float] | np.ndarray,
+    mask: Sequence[bool] | np.ndarray,
+    *,
+    gain_tol: float = 0.0,
+) -> dict[str, float | int]:
+    rom = np.asarray(ll_rom, dtype=np.float64).reshape(-1)
+    fom = np.asarray(ll_fom, dtype=np.float64).reshape(-1)
+    hard = np.asarray(mask, dtype=bool).reshape(-1)
+    if rom.shape != fom.shape or rom.shape != hard.shape:
+        raise ValueError(
+            "ll_rom, ll_fom, and mask must have identical shapes, got "
+            f"{rom.shape}, {fom.shape}, and {hard.shape}."
+        )
+    deltas = fom - rom
+    oracle = oracle_nonlinear_mask(rom, fom, gain_tol=gain_tol)
+    budget_oracle = optimal_nonlinear_mask_for_budget(rom, fom, int(np.sum(hard)))
+    mixed = np.where(hard, fom, rom)
+    oracle_mixed = np.where(oracle, fom, rom)
+    budget_mixed = np.where(budget_oracle, fom, rom)
+    positive_gain = np.maximum(deltas, 0.0)
+    negative_cost = np.maximum(-deltas, 0.0)
+    captured_gain = float(np.sum(positive_gain[hard]))
+    total_positive_gain = float(np.sum(positive_gain))
+    wasted_cost = float(np.sum(negative_cost[hard]))
+    budget_metrics = _binary_classification_metrics(hard, budget_oracle)
+    oracle_metrics = _binary_classification_metrics(hard, oracle)
+    return {
+        **{f"oracle_{key}": value for key, value in oracle_metrics.items()},
+        **{f"budget_{key}": value for key, value in budget_metrics.items()},
+        "periods_total": int(rom.size),
+        "periods_nonlinear_selected": int(np.sum(hard)),
+        "mixed_total": float(np.sum(mixed)),
+        "oracle_total": float(np.sum(oracle_mixed)),
+        "budget_oracle_total": float(np.sum(budget_mixed)),
+        "regret_vs_oracle": float(np.sum(oracle_mixed) - np.sum(mixed)),
+        "regret_vs_budget_oracle": float(np.sum(budget_mixed) - np.sum(mixed)),
+        "total_positive_gain": total_positive_gain,
+        "captured_positive_gain": captured_gain,
+        "captured_gain_share": 0.0
+        if total_positive_gain <= 0.0
+        else float(captured_gain / total_positive_gain),
+        "wasted_nonlinear_cost": wasted_cost,
+    }
+
+
+def evaluate_gate_probabilities(
+    ll_rom: Sequence[float] | np.ndarray,
+    ll_fom: Sequence[float] | np.ndarray,
+    gate_probs: Sequence[float] | np.ndarray,
+    *,
+    gain_tol: float = 0.0,
+    hard_threshold: float = 0.5,
+) -> dict[str, float | int | None]:
+    rom = np.asarray(ll_rom, dtype=np.float64).reshape(-1)
+    fom = np.asarray(ll_fom, dtype=np.float64).reshape(-1)
+    probs = np.asarray(gate_probs, dtype=np.float64).reshape(-1)
+    if rom.shape != fom.shape or rom.shape != probs.shape:
+        raise ValueError(
+            "ll_rom, ll_fom, and gate_probs must have identical shapes, got "
+            f"{rom.shape}, {fom.shape}, and {probs.shape}."
+        )
+    if not np.all(np.isfinite(probs)):
+        raise ValueError("gate_probs must contain only finite values.")
+    oracle = oracle_nonlinear_mask(rom, fom, gain_tol=gain_tol)
+    clipped = np.clip(probs, 1e-12, 1.0 - 1e-12)
+    oracle_float = oracle.astype(np.float64)
+    brier = float(np.mean((probs - oracle_float) ** 2)) if probs.size else 0.0
+    log_loss = float(
+        -np.mean(
+            oracle_float * np.log(clipped) + (1.0 - oracle_float) * np.log(1.0 - clipped)
+        )
+    ) if probs.size else 0.0
+    auc = _binary_auc(probs, oracle)
+    implied_mask = probs >= float(hard_threshold)
+    decision = evaluate_gate_decisions(rom, fom, implied_mask, gain_tol=gain_tol)
+    positive_probs = probs[oracle]
+    negative_probs = probs[~oracle]
+    return {
+        "brier_score": brier,
+        "log_loss": log_loss,
+        "auc": auc,
+        "mean_prob_oracle_positive": 0.0
+        if positive_probs.size == 0
+        else float(np.mean(positive_probs)),
+        "mean_prob_oracle_negative": 0.0
+        if negative_probs.size == 0
+        else float(np.mean(negative_probs)),
+        "hard_threshold": float(hard_threshold),
+        **{f"hard_{key}": value for key, value in decision.items()},
+    }
+
+
 def _gate_segments(mask: Sequence[bool] | np.ndarray) -> tuple[tuple[int, int], ...]:
     values = np.asarray(mask, dtype=bool).reshape(-1)
     segments: list[tuple[int, int]] = []
