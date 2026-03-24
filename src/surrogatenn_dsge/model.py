@@ -165,6 +165,16 @@ class HomotopySEPResult(NamedTuple):
     sigma_path: tuple[float, ...]
 
 
+class HomotopyChainedTrajectoryResult(NamedTuple):
+    trajectory: jax.Array
+    shocks: jax.Array
+    success: bool
+    periods_completed: int
+    sigma_paths: tuple[tuple[float, ...], ...]
+    steady_state: jax.Array
+    parameter_values: jax.Array
+
+
 class OBCViolationPathResult(NamedTuple):
     state_path: jax.Array
     shocks: jax.Array
@@ -6970,6 +6980,110 @@ def homotopy_sep(
         success=True,
         result=result_prev,
         sigma_path=tuple(float(value) for value in sigma_actual),
+    )
+
+
+def homotopy_chained_trajectory(
+    model: MacroModel,
+    *,
+    periods: int,
+    n_steps: int = 10,
+    adaptive: bool = True,
+    max_retries: int = 3,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+    shocks: Optional[str | Sequence[Sequence[float]] | Mapping[str, Sequence[float]]] = None,
+    shock_size: float = 1.0,
+    random_seed: Optional[int] = None,
+    config: SEPConfig = SEPConfig(),
+) -> HomotopyChainedTrajectoryResult:
+    if periods < 1:
+        raise ValueError(f"periods must be positive, got {periods}.")
+
+    full_steady_state, resolved_parameters = (
+        model._prepare_steady_state_and_parameters_for_runtime(
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+        )
+    )
+    if full_steady_state is None or resolved_parameters is None:
+        raise ValueError(
+            "Could not prepare a converged steady state for homotopy trajectory simulation."
+        )
+
+    shock_matrix = model._coerce_simulation_shocks(
+        shocks,
+        periods=periods,
+        shock_size=shock_size,
+        random_seed=random_seed,
+    )
+    initial_state_values = (
+        np.asarray(full_steady_state, dtype=np.float64)
+        if initial_state is None
+        else np.asarray(
+            model._coerce_dynamic_state_vector(initial_state, label="initial_state"),
+            dtype=np.float64,
+        )
+    )
+
+    trajectory = np.zeros((model.timings.nVars, periods + 1), dtype=np.float64)
+    trajectory[:, 0] = initial_state_values
+    sigma_paths: list[tuple[float, ...]] = []
+    periods_completed = 0
+
+    for period_idx in range(periods):
+        period_shocks = np.zeros((model.timings.nExo, config.periods), dtype=np.float64)
+        if model.timings.nExo > 0:
+            period_shocks[:, 0] = shock_matrix[:, period_idx]
+
+        result = homotopy_sep(
+            model,
+            n_steps=n_steps,
+            adaptive=adaptive,
+            max_retries=max_retries,
+            parameter_values=np.asarray(resolved_parameters, dtype=np.float64),
+            steady_state=np.asarray(full_steady_state, dtype=np.float64),
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            initial_state=trajectory[:, period_idx],
+            terminal_state=terminal_state,
+            config=config,
+            deterministic_shocks=period_shocks,
+        )
+        sigma_paths.append(result.sigma_path)
+        if not result.success:
+            return HomotopyChainedTrajectoryResult(
+                trajectory=jnp.asarray(trajectory, dtype=jnp.float64),
+                shocks=jnp.asarray(shock_matrix, dtype=jnp.float64),
+                success=False,
+                periods_completed=period_idx,
+                sigma_paths=tuple(sigma_paths),
+                steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+                parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
+            )
+
+        trajectory[:, period_idx + 1] = np.asarray(
+            result.result.solution.mean_path[:, 1],
+            dtype=np.float64,
+        )
+        periods_completed = period_idx + 1
+
+    return HomotopyChainedTrajectoryResult(
+        trajectory=jnp.asarray(trajectory, dtype=jnp.float64),
+        shocks=jnp.asarray(shock_matrix, dtype=jnp.float64),
+        success=True,
+        periods_completed=periods_completed,
+        sigma_paths=tuple(sigma_paths),
+        steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+        parameter_values=jnp.asarray(resolved_parameters, dtype=jnp.float64),
     )
 
 

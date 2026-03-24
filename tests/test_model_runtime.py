@@ -11,6 +11,7 @@ import surrogatenn_dsge.model as model_module
 from surrogatenn_dsge import (
     SEPConfig,
     get_irf,
+    homotopy_chained_trajectory,
     parse_macro_model,
     simulate_model,
 )
@@ -987,6 +988,96 @@ def test_upstream_gali_obc_uses_dedicated_first_order_runtime_path() -> None:
 
     assert result.algorithm_used == "first_order"
     assert np.all(np.isfinite(np.asarray(result.responses, dtype=np.float64)))
+
+
+def test_homotopy_chained_trajectory_matches_manual_period_by_period_homotopy() -> None:
+    model = parse_macro_model(LINEAR_IRF_SOURCE)
+    shocks = np.asarray([[0.2, -0.1, 0.05]], dtype=np.float64)
+    config = SEPConfig(periods=3, branching_order=0, tol=1e-10)
+
+    chained = homotopy_chained_trajectory(
+        model,
+        periods=3,
+        shocks=shocks,
+        config=config,
+    )
+    manual = np.zeros((1, 4), dtype=np.float64)
+    for period_idx in range(3):
+        period_shocks = np.zeros((1, config.periods), dtype=np.float64)
+        period_shocks[:, 0] = shocks[:, period_idx]
+        step = model_module.homotopy_sep(
+            model,
+            n_steps=10,
+            adaptive=True,
+            max_retries=3,
+            initial_state=manual[:, period_idx],
+            config=config,
+            deterministic_shocks=period_shocks,
+        )
+        assert step.success
+        manual[:, period_idx + 1] = np.asarray(
+            step.result.solution.mean_path[:, 1],
+            dtype=np.float64,
+        )
+
+    assert chained.success
+    assert chained.periods_completed == 3
+    np.testing.assert_allclose(
+        np.asarray(chained.trajectory, dtype=np.float64),
+        manual,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_homotopy_chained_trajectory_reports_failure_period(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = parse_macro_model(LINEAR_IRF_SOURCE)
+    calls: list[int] = []
+
+    def fake_homotopy_sep(*args: object, **kwargs: object) -> model_module.HomotopySEPResult:
+        period_index = len(calls)
+        calls.append(period_index)
+        success = period_index == 0
+        mean_path = jnp.asarray([[0.0, 0.1 + period_index]], dtype=jnp.float64)
+        return model_module.HomotopySEPResult(
+            success=success,
+            result=model_module.ParsedModelSEPResult(
+                steady_state=jnp.asarray([0.0], dtype=jnp.float64),
+                parameter_values=jnp.asarray([0.5], dtype=jnp.float64),
+                solution=model_module.SEPSolution(
+                    stacked_states=jnp.zeros((1,), dtype=jnp.float64),
+                    mean_path=mean_path,
+                    residual_norm=1e-6 if success else 1.0,
+                    converged=success,
+                    accepted=success,
+                    iterations=1,
+                    group_counts=(1, 1),
+                    jacobian_method="autodiff",
+                ),
+            ),
+            sigma_path=(0.0, 1.0 if success else 0.5),
+        )
+
+    monkeypatch.setattr(model_module, "homotopy_sep", fake_homotopy_sep)
+
+    result = homotopy_chained_trajectory(
+        model,
+        periods=3,
+        shocks=np.zeros((1, 3), dtype=np.float64),
+        config=SEPConfig(periods=2, branching_order=0, tol=1e-10),
+    )
+
+    assert not result.success
+    assert result.periods_completed == 1
+    np.testing.assert_allclose(
+        np.asarray(result.trajectory[:, :2], dtype=np.float64),
+        np.asarray([[0.0, 0.1]], dtype=np.float64),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert result.sigma_paths == ((0.0, 1.0), (0.0, 0.5))
 
 
 def test_sep_runtime_path_accepts_solution_within_configured_accept_tol(

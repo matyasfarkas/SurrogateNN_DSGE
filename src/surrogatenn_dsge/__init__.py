@@ -106,6 +106,7 @@ from .inversion import (
 )
 from .model import (
     analyze_first_order_model_determinacy,
+    HomotopyChainedTrajectoryResult,
     HomotopySEPResult,
     MacroModel,
     ModelIRFResult,
@@ -125,6 +126,7 @@ from .model import (
     estimate_observed_shocks_matrix,
     estimate_observed_variables_matrix,
     get_irf,
+    homotopy_chained_trajectory,
     homotopy_sep,
     kalman_loglikelihood_from_model,
     kalman_loglikelihood_per_period_from_model,
@@ -218,6 +220,7 @@ __all__ = [
     "LinearGaussianStateSpace",
     "LinearGateStatsResult",
     "HomotopySEPResult",
+    "HomotopyChainedTrajectoryResult",
     "LyapunovOutcome",
     "LyapunovResult",
     "MacroModel",
@@ -299,6 +302,7 @@ __all__ = [
     "extract_named_parameters",
     "gauss_hermite_rule",
     "get_irf",
+    "homotopy_chained_trajectory",
     "homotopy_sep",
     "gate_probabilities",
     "gate_probabilities_jax",
