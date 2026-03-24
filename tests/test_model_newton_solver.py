@@ -129,6 +129,68 @@ end
     )
 
 
+def test_homotopy_solver_converges_on_cubic_root_from_flat_anchor() -> None:
+    def residual_fn(x: np.ndarray) -> np.ndarray:
+        return np.asarray([x[0] ** 3 - 1.0], dtype=np.float64)
+
+    def jacobian_fn(x: np.ndarray) -> np.ndarray:
+        return np.asarray([[3.0 * x[0] ** 2]], dtype=np.float64)
+
+    result = model_module._solve_homotopy_system(
+        np.asarray([0.0], dtype=np.float64),
+        residual_fn=residual_fn,
+        jacobian_fn=jacobian_fn,
+        tol=1e-10,
+        max_iter=50,
+        line_search_min_step=2.0**-16,
+        nonfinite_message="unexpected non-finite residual",
+    )
+
+    assert result is not None
+    solution, converged, _, residual_norm = result
+    assert converged
+    np.testing.assert_allclose(solution, np.asarray([1.0], dtype=np.float64), rtol=0.0, atol=1e-8)
+    assert residual_norm <= 1e-8
+
+
+def test_newton_restart_solver_falls_through_to_homotopy_when_needed(
+    monkeypatch,
+) -> None:
+    def residual_fn(x: np.ndarray) -> np.ndarray:
+        return np.asarray([x[0] ** 3 - 1.0], dtype=np.float64)
+
+    def jacobian_fn(x: np.ndarray) -> np.ndarray:
+        return np.asarray([[3.0 * x[0] ** 2]], dtype=np.float64)
+
+    monkeypatch.setattr(
+        model_module,
+        "_newton_restart_candidates",
+        lambda *args, **kwargs: (np.asarray([0.0], dtype=np.float64),),
+    )
+    monkeypatch.setattr(
+        model_module,
+        "_solve_least_squares_system",
+        lambda *args, **kwargs: (np.asarray([0.0], dtype=np.float64), False, 0, 1.0),
+    )
+
+    solution, converged, _, residual_norm = model_module._solve_newton_system_with_restarts(
+        np.asarray([0.0], dtype=np.float64),
+        residual_fn=residual_fn,
+        jacobian_fn=jacobian_fn,
+        default_guess=np.asarray([0.0], dtype=np.float64),
+        lower_bounds=None,
+        upper_bounds=None,
+        tol=1e-10,
+        max_iter=50,
+        line_search_min_step=2.0**-16,
+        nonfinite_message="unexpected non-finite residual",
+    )
+
+    assert converged
+    np.testing.assert_allclose(solution, np.asarray([1.0], dtype=np.float64), rtol=0.0, atol=1e-8)
+    assert residual_norm <= 1e-8
+
+
 _CACHE_SOURCE = """
 @model cache_model begin
     x[0] = level

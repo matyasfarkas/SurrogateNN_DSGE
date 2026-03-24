@@ -69,6 +69,7 @@ Implemented:
 - damped Newton non-stochastic steady-state solver
 - steady-state and calibrated-parameter Newton restart heuristics plus finite-difference Jacobian fallback on both the NumPy and JAX paths, including generic sign-preserving unit-scale feasibility restarts when the model-specific default guess family stays outside the residual domain, so compiled first-order estimation no longer fails immediately on non-finite default guesses or singular autodiff Jacobians
 - the NumPy steady-state path now also has a bounded nonlinear least-squares rescue stage followed by a cleanup Newton pass when multi-restart Newton stalls at a finite moderate-residual point
+- the steady-state Newton stack now also has a last-resort square-system residual homotopy continuation fallback on both the NumPy and JAX paths, which only activates after the restart and least-squares layers fail and only replaces the incumbent result when it reaches the true target system at the final homotopy level
 - conservative symbolic steady-state seeding from uniquely solvable steady-state equations when `@parameters ... symbolic = true`, on both the NumPy and JAX steady-state paths
 - a small nearest-parameter steady-state cache on both the NumPy and JAX paths, so repeated solves reuse nearby converged steady states as the default guess instead of restarting from the generic heuristic every time
 - calibrated-parameter resolution from either the joint steady-state solve or a supplied steady state

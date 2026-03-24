@@ -85,6 +85,7 @@ _TRANSFORMATIONS = standard_transformations + (
     implicit_multiplication_application,
 )
 _NEWTON_GEOMETRIC_RESTART_SCALES = (0.5, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0)
+_STEADY_STATE_HOMOTOPY_LEVELS = (0.0, 0.05, 0.125, 0.25, 0.5, 0.75, 1.0)
 
 _STEADY_STATE_ALIASES = {"ss", "stst", "steady", "steadystate", "steady_state"}
 _EXOGENOUS_ALIASES = {"x", "ex", "exo", "exogenous"}
@@ -7611,6 +7612,152 @@ def _newton_restart_candidates_jax(
     return jnp.clip(candidates, lower, upper)
 
 
+def _solve_homotopy_system(
+    anchor: Sequence[float],
+    *,
+    residual_fn: object,
+    jacobian_fn: object,
+    lower_bounds: Optional[Sequence[float]] = None,
+    upper_bounds: Optional[Sequence[float]] = None,
+    tol: float,
+    max_iter: int,
+    line_search_min_step: float,
+    nonfinite_message: str,
+    levels: Sequence[float] = _STEADY_STATE_HOMOTOPY_LEVELS,
+) -> Optional[tuple[np.ndarray, bool, int, float]]:
+    anchor_arr = np.asarray(anchor, dtype=np.float64)
+    residual_shape = np.asarray(residual_fn(anchor_arr), dtype=np.float64).reshape(-1).shape[0]
+    if residual_shape != anchor_arr.shape[0]:
+        return None
+    lower = (
+        np.asarray(lower_bounds, dtype=np.float64)
+        if lower_bounds is not None
+        else np.full_like(anchor_arr, -np.inf)
+    )
+    upper = (
+        np.asarray(upper_bounds, dtype=np.float64)
+        if upper_bounds is not None
+        else np.full_like(anchor_arr, np.inf)
+    )
+    current = np.clip(anchor_arr, lower, upper)
+    total_iterations = 0
+    final_result: Optional[tuple[np.ndarray, bool, int, float]] = None
+
+    for lam in tuple(levels)[1:]:
+        lam_float = float(lam)
+
+        def homotopy_residual_fn(x: np.ndarray) -> np.ndarray:
+            point = np.asarray(x, dtype=np.float64)
+            residual = np.asarray(residual_fn(point), dtype=np.float64).reshape(-1)
+            return lam_float * residual + (1.0 - lam_float) * (point - current)
+
+        def homotopy_jacobian_fn(x: np.ndarray) -> np.ndarray:
+            point = np.asarray(x, dtype=np.float64)
+            jacobian = np.asarray(jacobian_fn(point), dtype=np.float64)
+            identity = np.eye(point.shape[0], dtype=np.float64)
+            return lam_float * jacobian + (1.0 - lam_float) * identity
+
+        try:
+            stage_result = _solve_newton_system(
+                current,
+                residual_fn=homotopy_residual_fn,
+                jacobian_fn=homotopy_jacobian_fn,
+                lower_bounds=lower_bounds,
+                upper_bounds=upper_bounds,
+                tol=tol,
+                max_iter=max_iter,
+                line_search_min_step=line_search_min_step,
+                nonfinite_message=nonfinite_message,
+            )
+        except ValueError:
+            return None
+        total_iterations += int(stage_result[2])
+        if not bool(stage_result[1]):
+            return None
+        current = np.asarray(stage_result[0], dtype=np.float64)
+        final_result = (
+            current,
+            bool(stage_result[1]),
+            total_iterations,
+            float(stage_result[3]),
+        )
+
+    return final_result
+
+
+def _solve_homotopy_system_jax(
+    anchor: Sequence[float],
+    *,
+    residual_fn: object,
+    jacobian_fn: object,
+    lower_bounds: Optional[Sequence[float]] = None,
+    upper_bounds: Optional[Sequence[float]] = None,
+    tol: float,
+    max_iter: int,
+    line_search_min_step: float,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    levels = jnp.asarray(_STEADY_STATE_HOMOTOPY_LEVELS[1:], dtype=jnp.float64)
+    anchor_arr = jnp.asarray(anchor, dtype=jnp.float64)
+    residual_shape = jnp.asarray(residual_fn(anchor_arr), dtype=jnp.float64).reshape(-1).shape[0]
+    if residual_shape != anchor_arr.shape[0]:
+        return (
+            anchor_arr,
+            jnp.asarray(False),
+            jnp.asarray(0),
+            jnp.asarray(jnp.inf, dtype=jnp.float64),
+        )
+
+    def _stage_step(
+        carry: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
+        lam: jax.Array,
+    ) -> tuple[tuple[jax.Array, jax.Array, jax.Array, jax.Array], None]:
+        current_x, path_ok, total_iterations, last_residual_norm = carry
+
+        def _advance(_: None) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+            def homotopy_residual_fn(x: jax.Array) -> jax.Array:
+                residual = jnp.asarray(residual_fn(x), dtype=jnp.float64).reshape(-1)
+                return lam * residual + (1.0 - lam) * (x - current_x)
+
+            def homotopy_jacobian_fn(x: jax.Array) -> jax.Array:
+                jacobian = jnp.asarray(jacobian_fn(x), dtype=jnp.float64)
+                identity = jnp.eye(x.shape[0], dtype=jnp.float64)
+                return lam * jacobian + (1.0 - lam) * identity
+
+            stage_x, stage_converged, stage_iterations, stage_residual_norm = _solve_newton_system_jax(
+                current_x,
+                residual_fn=homotopy_residual_fn,
+                jacobian_fn=homotopy_jacobian_fn,
+                lower_bounds=lower_bounds,
+                upper_bounds=upper_bounds,
+                tol=tol,
+                max_iter=max_iter,
+                line_search_min_step=line_search_min_step,
+            )
+            return (
+                stage_x,
+                stage_converged,
+                total_iterations + stage_iterations,
+                stage_residual_norm,
+            )
+
+        updated = lax.cond(
+            path_ok,
+            _advance,
+            lambda _: (current_x, path_ok, total_iterations, last_residual_norm),
+            operand=None,
+        )
+        return updated, None
+
+    init = (
+        anchor_arr,
+        jnp.asarray(True),
+        jnp.asarray(0),
+        jnp.asarray(0.0, dtype=jnp.float64),
+    )
+    final_state, _ = lax.scan(_stage_step, init, levels)
+    return final_state
+
+
 def _solve_newton_system_with_restarts(
     initial: Sequence[float],
     *,
@@ -7694,6 +7841,25 @@ def _solve_newton_system_with_restarts(
                     best_result = refined_result
             if best_result[1]:
                 return best_result
+    if best_result is not None and not best_result[1] and np.isfinite(best_result[3]):
+        homotopy_result = _solve_homotopy_system(
+            best_result[0],
+            residual_fn=residual_fn,
+            jacobian_fn=jacobian_fn,
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            tol=tol,
+            max_iter=max_iter,
+            line_search_min_step=line_search_min_step,
+            nonfinite_message=nonfinite_message,
+        )
+        if homotopy_result is not None and _solver_result_is_better(
+            homotopy_result,
+            best_result,
+        ):
+            best_result = homotopy_result
+        if best_result[1]:
+            return best_result
     if best_result is not None:
         return best_result
     if last_error is not None:
@@ -7786,7 +7952,24 @@ def _solve_newton_system_jax_with_restarts(
         return updated, None
 
     final_result, _ = lax.scan(_scan_body, first_result, candidates[1:])
-    return final_result
+    residual_is_finite = jnp.isfinite(final_result[3])
+    homotopy_result = _solve_homotopy_system_jax(
+        final_result[0],
+        residual_fn=residual_fn,
+        jacobian_fn=jacobian_fn,
+        lower_bounds=lower_bounds,
+        upper_bounds=upper_bounds,
+        tol=tol,
+        max_iter=max_iter,
+        line_search_min_step=line_search_min_step,
+    )
+    use_homotopy = (~final_result[1]) & residual_is_finite & homotopy_result[1]
+    return (
+        jnp.where(use_homotopy, homotopy_result[0], final_result[0]),
+        jnp.where(use_homotopy, homotopy_result[1], final_result[1]),
+        jnp.where(use_homotopy, homotopy_result[2], final_result[2]),
+        jnp.where(use_homotopy, homotopy_result[3], final_result[3]),
+    )
 
 
 def _solve_newton_system_jax(

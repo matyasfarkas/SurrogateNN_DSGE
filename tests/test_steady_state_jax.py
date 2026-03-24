@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import warnings
 
+import surrogatenn_dsge.model as model_module
 from surrogatenn_dsge import (
     parse_macro_model,
     solve_steady_state,
@@ -202,3 +203,29 @@ def test_jax_steady_state_solver_uses_large_geometric_restart_candidates() -> No
         rtol=0,
         atol=1e-8,
     )
+
+
+def test_jax_homotopy_solver_converges_on_cubic_root_from_flat_anchor() -> None:
+    def residual_fn(x: jax.Array) -> jax.Array:
+        return jnp.asarray([x[0] ** 3 - 1.0], dtype=jnp.float64)
+
+    def jacobian_fn(x: jax.Array) -> jax.Array:
+        return jnp.asarray([[3.0 * x[0] ** 2]], dtype=jnp.float64)
+
+    solution, converged, _, residual_norm = model_module._solve_homotopy_system_jax(
+        jnp.asarray([0.0], dtype=jnp.float64),
+        residual_fn=residual_fn,
+        jacobian_fn=jacobian_fn,
+        tol=1e-10,
+        max_iter=50,
+        line_search_min_step=2.0**-16,
+    )
+
+    assert bool(np.asarray(converged))
+    np.testing.assert_allclose(
+        solution,
+        jnp.asarray([1.0], dtype=jnp.float64),
+        rtol=0.0,
+        atol=1e-8,
+    )
+    assert float(np.asarray(residual_norm)) <= 1e-8
