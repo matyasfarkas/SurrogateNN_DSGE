@@ -32,6 +32,13 @@ class SEPSolution(NamedTuple):
     jacobian_method: str
 
 
+class _SEPTreeMetadata(NamedTuple):
+    parent_indices: tuple[Optional[np.ndarray], ...]
+    current_shocks: tuple[jax.Array, ...]
+    child_groups: tuple[Optional[tuple[tuple[int, ...], ...]], ...]
+    child_shocks: tuple[Optional[tuple[jax.Array, ...]], ...]
+
+
 @dataclass(frozen=True)
 class SEPConfig:
     periods: int = 20
@@ -406,6 +413,108 @@ def _child_groups(
     return (group,)
 
 
+def _precompute_sep_tree_metadata(
+    *,
+    rule: GaussHermiteRule,
+    deterministic: jax.Array,
+    counts: tuple[int, ...],
+    periods: int,
+    branching_order: int,
+    num_nodes: int,
+    shock_dim: int,
+    sparse_tree: bool,
+    use_hmc: bool,
+) -> _SEPTreeMetadata:
+    zero_shock = jnp.zeros((shock_dim,), dtype=jnp.float64)
+    stochastic_time_limit = branching_order + 1 if sparse_tree else branching_order
+    if use_hmc:
+        stochastic_time_limit = branching_order
+
+    parent_indices: list[Optional[np.ndarray]] = []
+    current_shocks: list[jax.Array] = []
+    child_groups_by_time: list[Optional[tuple[tuple[int, ...], ...]]] = []
+    child_shocks_by_time: list[Optional[tuple[jax.Array, ...]]] = []
+
+    for t in range(1, periods + 1):
+        if t == 1:
+            parent_indices.append(None)
+        else:
+            parent_indices.append(
+                np.asarray(
+                    [
+                        _parent_group(
+                            g,
+                            t,
+                            branching_order,
+                            num_nodes,
+                            sparse_tree=sparse_tree,
+                        )
+                        for g in range(counts[t])
+                    ],
+                    dtype=np.int64,
+                )
+            )
+
+        period_current_shocks = []
+        for g in range(counts[t]):
+            stochastic_shock = (
+                _group_shock_at_time(
+                    rule,
+                    g,
+                    t,
+                    branching_order,
+                    num_nodes,
+                    sparse_tree=sparse_tree,
+                )
+                if (not use_hmc) and t <= stochastic_time_limit and shock_dim > 0
+                else zero_shock
+            )
+            period_current_shocks.append(deterministic[t - 1] + stochastic_shock)
+        current_shocks.append(jnp.stack(period_current_shocks, axis=0))
+
+        if t == periods:
+            child_groups_by_time.append(None)
+            child_shocks_by_time.append(None)
+            continue
+
+        period_child_groups: list[tuple[int, ...]] = []
+        period_child_shocks: list[jax.Array] = []
+        for g in range(counts[t]):
+            groups = _child_groups(
+                g,
+                t,
+                branching_order,
+                num_nodes,
+                sparse_tree=sparse_tree,
+            )
+            period_child_groups.append(groups)
+            next_shocks = []
+            for child in groups:
+                stochastic_shock = (
+                    _group_shock_at_time(
+                        rule,
+                        child,
+                        t + 1,
+                        branching_order,
+                        num_nodes,
+                        sparse_tree=sparse_tree,
+                    )
+                    if (not use_hmc) and t + 1 <= stochastic_time_limit and shock_dim > 0
+                    else zero_shock
+                )
+                next_shocks.append(deterministic[t] + stochastic_shock)
+            period_child_shocks.append(jnp.stack(next_shocks, axis=0))
+        child_groups_by_time.append(tuple(period_child_groups))
+        child_shocks_by_time.append(tuple(period_child_shocks))
+
+    return _SEPTreeMetadata(
+        parent_indices=tuple(parent_indices),
+        current_shocks=tuple(current_shocks),
+        child_groups=tuple(child_groups_by_time),
+        child_shocks=tuple(child_shocks_by_time),
+    )
+
+
 def _hmc_step(
     epsilon: jax.Array,
     *,
@@ -701,6 +810,18 @@ def _solve_stochastic_extended_path_impl(
         0 if use_hmc else config.branching_order,
         sparse_tree=(config.sparse_tree and not use_hmc),
     )
+    runtime_sparse_tree = config.sparse_tree and not use_hmc
+    tree_metadata = _precompute_sep_tree_metadata(
+        rule=rule,
+        deterministic=deterministic,
+        counts=counts,
+        periods=config.periods,
+        branching_order=config.branching_order,
+        num_nodes=num_nodes,
+        shock_dim=shock_dim,
+        sparse_tree=runtime_sparse_tree,
+        use_hmc=use_hmc,
+    )
 
     if expectation_fn is None and conditional_residual_fn is None:
         def expectation_fn(next_state: jax.Array, next_shock: jax.Array, _params: object) -> jax.Array:
@@ -751,40 +872,20 @@ def _solve_stochastic_extended_path_impl(
                 else states_by_time[t - 2]
             )
             next_states = None if t == config.periods else states_by_time[t]
+            period_current_shocks = tree_metadata.current_shocks[t - 1]
+            period_parent_indices = tree_metadata.parent_indices[t - 1]
+            period_child_groups = tree_metadata.child_groups[t - 1]
+            period_child_shocks = tree_metadata.child_shocks[t - 1]
             for g in range(counts[t]):
                 if t == 1:
                     prev_state = prev_states[0]
                 else:
-                    parent = _parent_group(
-                        g,
-                        t,
-                        config.branching_order,
-                        num_nodes,
-                        sparse_tree=config.sparse_tree,
-                    )
+                    assert period_parent_indices is not None
+                    parent = int(period_parent_indices[g])
                     prev_state = prev_states[parent]
 
                 deterministic_shock = deterministic[t - 1]
-                stochastic_time_limit = (
-                    config.branching_order + 1
-                    if config.sparse_tree
-                    else config.branching_order
-                )
-                if use_hmc:
-                    stochastic_time_limit = config.branching_order
-                stochastic_shock = (
-                    _group_shock_at_time(
-                        rule,
-                        g,
-                        t,
-                        config.branching_order,
-                        num_nodes,
-                        sparse_tree=(config.sparse_tree and not use_hmc),
-                    )
-                    if (not use_hmc) and t <= stochastic_time_limit and shock_dim > 0
-                    else zero_shock
-                )
-                current_shock = deterministic_shock + stochastic_shock
+                current_shock = period_current_shocks[g]
 
                 if conditional_residual_fn is None:
                     if use_hmc and t < config.periods and t <= config.branching_order and shock_dim > 0:
@@ -821,48 +922,26 @@ def _solve_stochastic_extended_path_impl(
                     if t == config.periods:
                         expected_term = terminal_expectation
                     else:
-                        child_groups = _child_groups(
-                            g,
-                            t,
-                            config.branching_order,
-                            num_nodes,
-                            sparse_tree=(config.sparse_tree and not use_hmc),
-                        )
+                        assert period_child_groups is not None
+                        assert period_child_shocks is not None
+                        child_groups = period_child_groups[g]
+                        child_shocks = period_child_shocks[g]
                         if len(child_groups) == 1:
-                            child_shock = (
-                                deterministic[t]
-                                + (
-                                    _group_shock_at_time(
-                                        rule,
-                                        child_groups[0],
-                                        t + 1,
-                                        config.branching_order,
-                                        num_nodes,
-                                        sparse_tree=(config.sparse_tree and not use_hmc),
-                                    )
-                                    if t + 1 <= stochastic_time_limit
-                                    else zero_shock
-                                )
-                            )
                             expected_term = expectation_fn(
                                 next_states[child_groups[0]],
-                                child_shock,
+                                child_shocks[0],
                                 params,
                             )
                         else:
                             child_terms = []
                             for local_idx, child in enumerate(child_groups):
-                                child_shock = deterministic[t] + _group_shock_at_time(
-                                    rule,
-                                    child,
-                                    t + 1,
-                                    config.branching_order,
-                                    num_nodes,
-                                    sparse_tree=(config.sparse_tree and not use_hmc),
-                                )
                                 child_terms.append(
                                     rule.weights[local_idx]
-                                    * expectation_fn(next_states[child], child_shock, params)
+                                    * expectation_fn(
+                                        next_states[child],
+                                        child_shocks[local_idx],
+                                        params,
+                                    )
                                 )
                             expected_term = jnp.sum(
                                 jnp.stack(child_terms, axis=0),
@@ -917,13 +996,8 @@ def _solve_stochastic_extended_path_impl(
                     )
                     continue
 
-                child_groups = _child_groups(
-                    g,
-                    t,
-                    config.branching_order,
-                    num_nodes,
-                    sparse_tree=(config.sparse_tree and not use_hmc),
-                )
+                assert period_child_groups is not None
+                child_groups = period_child_groups[g]
                 if len(child_groups) == 1:
                     residuals.append(
                         conditional_residual_fn(

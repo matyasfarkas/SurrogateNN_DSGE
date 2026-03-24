@@ -79,6 +79,7 @@ Implemented:
 - parsed-model third-order solve path from MacroModelling-style source through symbolic third derivatives to the perturbation solution
 - generic callback-based stochastic extended path solver with Gauss-Hermite branching
 - sparse fishbone stochastic extended path branching for callback-based and parsed-model SEP solves, including real `sep_sparse_tree` runtime support in the inversion bridge
+- sparse-tree SEP now precomputes parent/child/shock tree metadata once per solve instead of rebuilding the same fishbone combinatorics inside every Newton residual evaluation
 - adaptive Levenberg-Marquardt damping, Julia-style SEP config controls for `linear_solver`, `fallback_solver`, stall detection, and bounded backtracking line search, explicit config validation, and checked warm-start support for more robust nonlinear SEP solves
 - automatic first-order linear-path warm starts for parsed-model SEP solves and deterministic SEP runtime fallbacks, with explicit `initial_guess` still taking precedence
 - the high-level switching bridge is now regression-tested on a nonlinear sparse-tree SEP FOM path as well, so ROM Kalman plus sparse-tree SEP inversion can be compared end to end against a manual likelihood mixture on the same model

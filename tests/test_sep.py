@@ -157,6 +157,72 @@ def test_sep_sparse_tree_uses_fishbone_group_counts() -> None:
     assert solution.group_counts == (1, 1, 6, 11, 11)
 
 
+def test_sep_sparse_tree_precomputes_tree_metadata_consistently() -> None:
+    periods = 4
+    branching_order = 2
+    shock_dim = 1
+    rule = sep_module._gauss_hermite_sparse_rule(3, shock_dim, 1.0)
+    counts = sep_module._group_counts(
+        periods,
+        branching_order,
+        int(rule.weights.shape[0]),
+        sparse_tree=True,
+    )
+    deterministic = jnp.asarray([[0.1], [0.2], [0.3], [0.4]], dtype=jnp.float64)
+    metadata = sep_module._precompute_sep_tree_metadata(
+        rule=rule,
+        deterministic=deterministic,
+        counts=counts,
+        periods=periods,
+        branching_order=branching_order,
+        num_nodes=int(rule.weights.shape[0]),
+        shock_dim=shock_dim,
+        sparse_tree=True,
+        use_hmc=False,
+    )
+
+    assert metadata.parent_indices[0] is None
+    np.testing.assert_array_equal(
+        metadata.parent_indices[1],
+        np.asarray([0, 0, 0], dtype=np.int64),
+    )
+    for t in range(1, periods + 1):
+        period_shocks = np.asarray(metadata.current_shocks[t - 1], dtype=np.float64)
+        assert period_shocks.shape == (counts[t], shock_dim)
+        for g in range(counts[t]):
+            expected_current = np.asarray(
+                deterministic[t - 1]
+                + sep_module._group_shock_at_time(
+                    rule,
+                    g,
+                    t,
+                    branching_order,
+                    int(rule.weights.shape[0]),
+                    sparse_tree=True,
+                ),
+                dtype=np.float64,
+            )
+            np.testing.assert_allclose(
+                period_shocks[g],
+                expected_current,
+                rtol=0.0,
+                atol=1e-12,
+            )
+        if t == periods:
+            assert metadata.child_groups[t - 1] is None
+            assert metadata.child_shocks[t - 1] is None
+            continue
+        for g in range(counts[t]):
+            expected_groups = sep_module._child_groups(
+                g,
+                t,
+                branching_order,
+                int(rule.weights.shape[0]),
+                sparse_tree=True,
+            )
+            assert metadata.child_groups[t - 1][g] == expected_groups
+
+
 def test_sep_sparse_tree_matches_full_tree_mean_path_for_linear_zero_mean_shocks() -> None:
     deterministic_shocks = jnp.asarray(
         [[0.4, -0.2], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
