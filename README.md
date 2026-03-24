@@ -66,6 +66,7 @@ Implemented:
 - symbolic Jacobian, Hessian, and third-order derivative evaluation with Julia-compatible compressed ordering
 - damped Newton non-stochastic steady-state solver
 - steady-state and calibrated-parameter Newton restart heuristics plus finite-difference Jacobian fallback on both the NumPy and JAX paths, including generic sign-preserving unit-scale feasibility restarts when the model-specific default guess family stays outside the residual domain, so compiled first-order estimation no longer fails immediately on non-finite default guesses or singular autodiff Jacobians
+- the NumPy steady-state path now also has a bounded nonlinear least-squares rescue stage followed by a cleanup Newton pass when multi-restart Newton stalls at a finite moderate-residual point
 - conservative symbolic steady-state seeding from uniquely solvable steady-state equations when `@parameters ... symbolic = true`, on both the NumPy and JAX steady-state paths
 - a small nearest-parameter steady-state cache on both the NumPy and JAX paths, so repeated solves reuse nearby converged steady states as the default guess instead of restarting from the generic heuristic every time
 - calibrated-parameter resolution from either the joint steady-state solve or a supplied steady state
@@ -92,6 +93,7 @@ Not implemented yet:
 - the remaining non-equation `@parameters` directives from the Julia macro layer beyond `guess`, bounds, `silent`, `symbolic`, `perturbation_order`, `precompile`, and the common upstream `simplify` / `verbose` options
 - full Julia-style occasionally binding constraint enforcement around kinks, including the broader shock-sequence/runtime surface beyond the new dedicated first-order receding-horizon OBC shock optimization, full kink-aware runtime switching, and the remaining OBC enforcement modes outside the newly supported direct / monotone-transformed / simple complementarity subset
 - the new first-order OBC runtime path now covers direct and simple monotone-transformed current-variable `max` / `min` equations, but more general parsed OBC models still fall back to deterministic SEP when `ignore_obc = false`
+- the hard remaining raw-source bottleneck is now clearly the largest nonlinear steady states rather than OBC syntax support alone; on a manual upstream spot-check, the new hybrid rescue reduced the raw `Guerrieri_Iacoviello_2017.jl` steady-state residual from about `4.3e-1` to about `1.2e-2` at the default budget, but did not yet fully converge it automatically
 - the broader Julia runtime selection surface is still narrower here than upstream, even though grouped nested name inputs and the main selector tokens like `:all_excluding_obc` and `:all_excluding_auxiliary_and_obc` are now supported
 - the remaining sparse-tree-specific Jacobian/runtime optimizations and the broader OBC-specific SEP machinery beyond the new subgradient / finite-difference Jacobian safeguards
 - fully GPU-native generalized QZ / ordered-QZ primitives; the current JAX-facing `schur` QME path uses a SciPy host callback in the primal solve because JAX does not yet expose generalized `qz` / `ordqz`

@@ -6966,6 +6966,79 @@ def _solve_newton_system(
     return x, residual_norm < tol, max_iter, residual_norm
 
 
+def _solver_result_is_better(
+    candidate: tuple[np.ndarray, bool, int, float],
+    current: tuple[np.ndarray, bool, int, float],
+) -> bool:
+    _, current_converged, _, current_residual = current
+    _, candidate_converged, _, candidate_residual = candidate
+    if candidate_converged and not current_converged:
+        return True
+    if candidate_converged == current_converged:
+        if np.isfinite(candidate_residual) and not np.isfinite(current_residual):
+            return True
+        if (
+            np.isfinite(candidate_residual)
+            and np.isfinite(current_residual)
+            and candidate_residual < current_residual
+        ):
+            return True
+    return False
+
+
+def _solve_least_squares_system(
+    initial: Sequence[float],
+    *,
+    residual_fn: object,
+    jacobian_fn: object,
+    lower_bounds: Optional[Sequence[float]] = None,
+    upper_bounds: Optional[Sequence[float]] = None,
+    tol: float,
+    max_iter: int,
+) -> Optional[tuple[np.ndarray, bool, int, float]]:
+    x0 = np.asarray(initial, dtype=np.float64)
+    lower = (
+        np.asarray(lower_bounds, dtype=np.float64)
+        if lower_bounds is not None
+        else np.full_like(x0, -np.inf)
+    )
+    upper = (
+        np.asarray(upper_bounds, dtype=np.float64)
+        if upper_bounds is not None
+        else np.full_like(x0, np.inf)
+    )
+    x0 = np.clip(x0, lower, upper)
+    residual0 = np.asarray(residual_fn(x0), dtype=np.float64).reshape(-1)
+    if not np.isfinite(residual0).all():
+        return None
+
+    try:
+        result = scipy_optimize.least_squares(
+            residual_fn,
+            x0,
+            jac=jacobian_fn,
+            bounds=(lower, upper),
+            method="trf",
+            ftol=tol,
+            xtol=tol,
+            gtol=tol,
+            x_scale="jac",
+            max_nfev=max(100, min(400, max_iter * 2)),
+        )
+    except Exception:
+        return None
+
+    solution = np.asarray(result.x, dtype=np.float64)
+    residual = np.asarray(residual_fn(solution), dtype=np.float64).reshape(-1)
+    residual_norm = float(np.linalg.norm(residual, ord=np.inf))
+    return (
+        solution,
+        residual_norm < tol,
+        int(getattr(result, "nfev", 0)),
+        residual_norm,
+    )
+
+
 def _finite_difference_jacobian(
     residual_fn: object,
     x: Sequence[float],
@@ -7252,14 +7325,50 @@ def _solve_newton_system_with_restarts(
         if best_result is None:
             best_result = result
         else:
-            _, best_converged, _, best_residual = best_result
-            _, converged, _, residual_norm = result
-            if (converged and not best_converged) or (
-                converged == best_converged and residual_norm < best_residual
-            ):
+            if _solver_result_is_better(result, best_result):
                 best_result = result
         if result[1]:
             return result
+    if (
+        best_result is not None
+        and not best_result[1]
+        and np.isfinite(best_result[3])
+        and best_result[3] <= 1.0
+    ):
+        least_squares_result = _solve_least_squares_system(
+            best_result[0],
+            residual_fn=residual_fn,
+            jacobian_fn=jacobian_fn,
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+            tol=tol,
+            max_iter=max_iter,
+        )
+        if least_squares_result is not None:
+            if _solver_result_is_better(least_squares_result, best_result):
+                best_result = least_squares_result
+            if not best_result[1]:
+                try:
+                    refined_result = _solve_newton_system(
+                        best_result[0],
+                        residual_fn=residual_fn,
+                        jacobian_fn=jacobian_fn,
+                        lower_bounds=lower_bounds,
+                        upper_bounds=upper_bounds,
+                        tol=tol,
+                        max_iter=max(max_iter * 2, max_iter + 25),
+                        line_search_min_step=line_search_min_step,
+                        nonfinite_message=nonfinite_message,
+                    )
+                except ValueError:
+                    refined_result = None
+                if refined_result is not None and _solver_result_is_better(
+                    refined_result,
+                    best_result,
+                ):
+                    best_result = refined_result
+            if best_result[1]:
+                return best_result
     if best_result is not None:
         return best_result
     if last_error is not None:

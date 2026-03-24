@@ -855,9 +855,11 @@ Python/JAX status:
 - the steady-state and calibrated-parameter Newton path now also widens its geometric restart family up to large positive/negative feasibility probes on both the NumPy and JAX implementations, so steady states outside the old `8x` restart envelope can still be recovered without manual seeds
 - when `@parameters ... symbolic = true`, the steady-state solver now also applies a conservative symbolic seeding pass that recursively substitutes uniquely solvable steady-state equations before Newton starts, on both the NumPy and JAX paths
 - the steady-state solver now also keeps a small nearest-parameter cache of converged solutions and reuses the closest cached steady state as the default guess on subsequent nearby solves, on both the NumPy and JAX paths
+- on the NumPy path, multi-restart Newton now also has a bounded nonlinear least-squares rescue stage followed by a cleanup Newton pass when the best Newton iterate is finite and already in a moderate-residual regime, which materially reduces residuals on harder upstream OBC models without turning every solve into a long trust-region run
 - the Lyapunov layer now accepts the Julia-compatible algorithm names `bartels_stewart`, `bicgstab`, `gmres`, and `dqgmres`, with iterative fallback back to the existing dense direct solve when needed; `dqgmres` is currently a compatibility alias onto the SciPy GMRES backend
 - the discrete Sylvester layer now accepts the Julia-compatible iterative algorithm names `bicgstab`, `gmres`, and `dqgmres`, with parity against the dense direct solve and iterative fallback back to that direct solve when the Krylov path is cut short; `dqgmres` is currently a compatibility alias onto the SciPy GMRES backend
 - tests cover parsed option capture, OBC runtime horizon routing, steady-state recovery from a non-finite default guess, nearest-solution steady-state cache reuse on both NumPy and JAX paths, Bartels-Stewart parity, iterative Lyapunov/Sylvester convergence, and iterative-to-direct fallback
+- a manual upstream spot-check on `Guerrieri_Iacoviello_2017.jl` now lands at residual norm about `1.19e-2` after the hybrid rescue, down from about `4.32e-1` before it, but still not at full automatic convergence under the default budget
 
 ## Explicit gaps
 

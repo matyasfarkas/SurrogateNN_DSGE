@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from types import SimpleNamespace
 
 import jax.numpy as jnp
 import numpy as np
@@ -239,3 +240,87 @@ def test_jax_steady_state_solver_uses_cached_guess_for_nearby_parameters(
         rtol=0.0,
         atol=1e-12,
     )
+
+
+def test_newton_restart_solver_falls_back_to_least_squares(
+    monkeypatch,
+) -> None:
+    calls = {"newton": 0, "least_squares": 0}
+
+    def residual_fn(x: np.ndarray) -> np.ndarray:
+        return np.asarray([x[0] - 1.0], dtype=np.float64)
+
+    def jacobian_fn(_: np.ndarray) -> np.ndarray:
+        return np.asarray([[1.0]], dtype=np.float64)
+
+    def fake_newton(
+        x0: np.ndarray,
+        *,
+        residual_fn,
+        jacobian_fn,
+        lower_bounds,
+        upper_bounds,
+        tol,
+        max_iter,
+        line_search_min_step,
+        nonfinite_message,
+    ):
+        del (
+            x0,
+            residual_fn,
+            jacobian_fn,
+            lower_bounds,
+            upper_bounds,
+            tol,
+            max_iter,
+            line_search_min_step,
+            nonfinite_message,
+        )
+        calls["newton"] += 1
+        return np.asarray([0.2], dtype=np.float64), False, 4, 0.8
+
+    def fake_least_squares(
+        fun,
+        x0,
+        *,
+        jac,
+        bounds,
+        method,
+        ftol,
+        xtol,
+        gtol,
+        x_scale,
+        max_nfev,
+    ):
+        del jac, ftol, xtol, gtol, x_scale, max_nfev
+        calls["least_squares"] += 1
+        assert method == "trf"
+        np.testing.assert_allclose(np.asarray(x0, dtype=np.float64), [0.2], rtol=0.0, atol=0.0)
+        lower, upper = bounds
+        np.testing.assert_allclose(lower, np.asarray([-np.inf], dtype=np.float64))
+        np.testing.assert_allclose(upper, np.asarray([np.inf], dtype=np.float64))
+        np.testing.assert_allclose(fun(np.asarray([1.0], dtype=np.float64)), [0.0], rtol=0.0, atol=0.0)
+        return SimpleNamespace(x=np.asarray([1.0], dtype=np.float64), nfev=7)
+
+    monkeypatch.setattr(model_module, "_solve_newton_system", fake_newton)
+    monkeypatch.setattr(model_module.scipy_optimize, "least_squares", fake_least_squares)
+
+    solution, converged, iterations, residual_norm = model_module._solve_newton_system_with_restarts(
+        np.asarray([0.0], dtype=np.float64),
+        residual_fn=residual_fn,
+        jacobian_fn=jacobian_fn,
+        default_guess=np.asarray([0.0], dtype=np.float64),
+        lower_bounds=None,
+        upper_bounds=None,
+        tol=1e-12,
+        max_iter=10,
+        line_search_min_step=2.0**-16,
+        nonfinite_message="unexpected non-finite residual",
+    )
+
+    np.testing.assert_allclose(solution, np.asarray([1.0], dtype=np.float64), rtol=0.0, atol=1e-12)
+    assert converged
+    assert iterations == 7
+    assert residual_norm <= 1e-12
+    assert calls["newton"] >= 1
+    assert calls["least_squares"] == 1
