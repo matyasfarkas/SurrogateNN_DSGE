@@ -895,6 +895,19 @@ Python/JAX status:
 - `switching_pipeline_report(...)` now includes a `budget_frontier` block driven by the current gate probabilities, with either user-supplied budgets or an automatically sampled grid from zero nonlinear periods to the full nonlinear schedule
 - focused tests verify exact zero-regret behavior when the supplied gate ranking matches the oracle ranking across budgets, and verify that the high-level sparse-tree SEP switching report now carries the new frontier block with the requested budget grid
 
+### 59. Likelihood-surface alignment diagnostics
+
+Julia reference:
+
+- the methodological gap identified in the ROM1/FOM switching idea: matching one likelihood evaluation is not enough, because estimation quality depends on how well the approximation preserves the likelihood surface across parameter variation
+
+Python/JAX status:
+
+- `evaluate_likelihood_surface_alignment(...)` now measures candidate-vs-reference likelihood surfaces using mean/max error, RMSE, Pearson correlation, Spearman correlation, best-draw agreement, and top-draw overlap
+- `evaluate_switching_surface_alignment(...)` now packages that comparison for both ROM-vs-FOM and switching-vs-FOM surfaces and reports relative improvement metrics such as switching-over-ROM MAE/RMSE ratios plus correlation and top-overlap gains
+- parsed models now expose `likelihood_surface_report(...)` and `likelihood_surface_report_from_model(...)`, which evaluate ROM, FOM, and optional switching likelihood totals over a parameter-draw matrix or named parameter-draw mapping and summarize how well the cheaper surfaces preserve the FOM ranking
+- focused tests verify exact synthetic ranking/overlap arithmetic, improvement of switching over ROM on a controlled synthetic surface, and a parsed nonlinear sparse-tree SEP sweep where hard-masked switching reproduces the FOM surface exactly across multiple parameter draws
+
 ### 30. Steady-state restarts, common macro options, OBC runtime horizon plumbing, and Lyapunov variants
 
 Julia reference:

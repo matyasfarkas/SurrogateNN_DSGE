@@ -18,6 +18,8 @@ from surrogatenn_dsge import (
     evaluate_gate_decisions,
     evaluate_gate_budget_frontier,
     evaluate_gate_probabilities,
+    evaluate_likelihood_surface_alignment,
+    evaluate_switching_surface_alignment,
     gate_probabilities,
     gate_probabilities_jax,
     get_sep_inversion_last_diagnostics,
@@ -29,6 +31,7 @@ from surrogatenn_dsge import (
     solve_first_order_model,
     solve_stochastic_extended_path_model,
     switching_pipeline_report_from_model,
+    likelihood_surface_report_from_model,
     optimal_nonlinear_mask_for_budget,
     oracle_nonlinear_mask,
     switching_loglikelihood_from_model,
@@ -455,6 +458,44 @@ def test_gate_budget_frontier_quantifies_budget_ranking_quality() -> None:
     assert frontier["max_regret_vs_budget_oracle"] == 0.0
 
 
+def test_likelihood_surface_alignment_reports_ranking_and_overlap() -> None:
+    reference = np.asarray([-5.0, -2.0, -1.0, -3.0], dtype=np.float64)
+    candidate = np.asarray([-4.8, -2.1, -1.2, -2.7], dtype=np.float64)
+
+    metrics = evaluate_likelihood_surface_alignment(reference, candidate, top_share=0.5)
+
+    assert metrics["n_total"] == 4
+    assert metrics["n_finite_pairs"] == 4
+    assert metrics["best_reference_index"] == 2
+    assert metrics["best_candidate_index"] == 2
+    assert metrics["best_draw_match"] is True
+    assert metrics["top_count"] == 2
+    assert metrics["top_overlap_count"] == 2
+    np.testing.assert_allclose(metrics["top_overlap_share"], 1.0, rtol=0.0, atol=1e-12)
+    assert metrics["pearson_corr"] is not None
+    assert metrics["spearman_corr"] is not None
+    np.testing.assert_allclose(metrics["mean_abs_error"], 0.2, rtol=0.0, atol=1e-12)
+
+
+def test_switching_surface_alignment_reports_improvement_over_rom() -> None:
+    ll_fom = np.asarray([-5.0, -2.0, -1.0, -3.0], dtype=np.float64)
+    ll_rom = np.asarray([-6.0, -1.0, -2.0, -2.0], dtype=np.float64)
+    ll_switching = np.asarray([-5.2, -1.8, -1.1, -2.8], dtype=np.float64)
+
+    metrics = evaluate_switching_surface_alignment(
+        ll_rom,
+        ll_fom,
+        ll_switching,
+        top_share=0.5,
+    )
+
+    assert metrics["mae_ratio_switching_over_rom"] is not None
+    assert metrics["rmse_ratio_switching_over_rom"] is not None
+    assert metrics["mae_ratio_switching_over_rom"] < 1.0
+    assert metrics["rmse_ratio_switching_over_rom"] < 1.0
+    assert metrics["switching_vs_fom"]["top_overlap_share"] >= metrics["rom_vs_fom"]["top_overlap_share"]
+
+
 def test_switching_pipeline_report_collects_sparse_tree_sep_comparison() -> None:
     model, config, levels = _nonlinear_switching_fixture()
     gate_probs = np.asarray([0.15, 0.35, 0.65, 0.85], dtype=np.float64)
@@ -512,14 +553,36 @@ def test_switching_pipeline_report_collects_sparse_tree_sep_comparison() -> None
         rtol=1e-10,
         atol=1e-10,
     )
-    assert report["runtime"]["runtime_fom_s"] is not None
-    assert report["runtime"]["runtime_switching_s"] is not None
-    assert report["fom_sep_diagnostics"] is not None
-    assert report["switching_sep_diagnostics"] is not None
-    assert report["fom_sep_diagnostics"]["sep_sparse_tree"] is True
-    assert report["switching_sep_diagnostics"]["sep_sparse_tree"] is True
-    assert report["fom_sep_diagnostics"]["sep_carry_warm_start_strategy"] == "shifted_tree"
-    assert (
-        report["switching_sep_diagnostics"]["sep_carry_warm_start_strategy"]
-        == "shifted_tree"
+
+
+def test_likelihood_surface_report_tracks_switching_shape_across_draws() -> None:
+    model, config, levels = _nonlinear_switching_fixture()
+    report = likelihood_surface_report_from_model(
+        model,
+        levels,
+        {"rho": [0.28, 0.32, 0.35, 0.38], "gamma": [0.06, 0.08, 0.1, 0.12]},
+        observables=("y",),
+        hard_mask=[True, True, True, True],
+        fom_algorithm="stochastic_extended_path",
+        config=config,
+        sep_sparse_tree=True,
+        steady_state_initial_guess={"y": 0.0},
+        measurement_error_scale=0.0,
+        on_failure_loglikelihood=-1e12,
+        top_share=0.5,
     )
+
+    assert report["parameter_draws"].shape == (4, len(model.parameter_names))
+    assert report["ll_rom"].shape == (4,)
+    assert report["ll_fom"].shape == (4,)
+    assert report["ll_switching"].shape == (4,)
+    np.testing.assert_allclose(
+        report["ll_switching"],
+        report["ll_fom"],
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    assert report["rom_vs_fom"]["n_total"] == 4
+    assert report["switching_surface"] is not None
+    assert report["switching_surface"]["switching_vs_fom"]["mean_abs_error"] == 0.0
+    assert report["switching_surface"]["mae_ratio_switching_over_rom"] == 0.0

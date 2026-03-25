@@ -74,6 +74,8 @@ from .switching import (
     evaluate_gate_budget_frontier,
     evaluate_gate_decisions,
     evaluate_gate_probabilities,
+    evaluate_likelihood_surface_alignment,
+    evaluate_switching_surface_alignment,
     evaluate_switching_vs_fom,
     summarize_loglik_decomposition,
     summarize_runtime,
@@ -755,6 +757,73 @@ class MacroModel:
                 f"({len(self.parameter_names)},), got {values.shape}."
             )
         return values
+
+    def _coerce_base_parameter_values(
+        self,
+        base_parameter_values: Optional[Sequence[float] | Mapping[str, float]],
+    ) -> np.ndarray:
+        if base_parameter_values is None:
+            return np.asarray(self.parameter_values, dtype=np.float64)
+        if isinstance(base_parameter_values, Mapping):
+            unknown = tuple(
+                sorted(set(base_parameter_values).difference(self.parameter_names))
+            )
+            if unknown:
+                raise ValueError(
+                    "Unknown parameter names in `base_parameter_values`: "
+                    + ", ".join(unknown)
+                    + "."
+                )
+            base = np.asarray(self.parameter_values, dtype=np.float64).copy()
+            index_lookup = {name: idx for idx, name in enumerate(self.parameter_names)}
+            for name, value in base_parameter_values.items():
+                base[index_lookup[name]] = float(value)
+            return base
+        return self._coerce_parameter_values(base_parameter_values)
+
+    def _coerce_parameter_draw_matrix(
+        self,
+        parameter_draws: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
+    ) -> np.ndarray:
+        if isinstance(parameter_draws, Mapping):
+            unknown = tuple(sorted(set(parameter_draws).difference(self.parameter_names)))
+            if unknown:
+                raise ValueError(
+                    "Unknown parameter names in `parameter_draws`: "
+                    + ", ".join(unknown)
+                    + "."
+                )
+            if not parameter_draws:
+                raise ValueError("parameter_draws mapping must not be empty.")
+            lengths = {
+                np.asarray(values, dtype=np.float64).reshape(-1).shape[0]
+                for values in parameter_draws.values()
+            }
+            if len(lengths) != 1:
+                raise ValueError("All parameter draw series must share the same length.")
+            n_draws = int(next(iter(lengths)))
+            base = self._coerce_base_parameter_values(base_parameter_values)
+            draw_matrix = np.repeat(base[None, :], n_draws, axis=0)
+            index_lookup = {name: idx for idx, name in enumerate(self.parameter_names)}
+            for name, values in parameter_draws.items():
+                draw_matrix[:, index_lookup[name]] = np.asarray(
+                    values,
+                    dtype=np.float64,
+                ).reshape(-1)
+            return draw_matrix
+
+        draw_matrix = np.asarray(parameter_draws, dtype=np.float64)
+        if draw_matrix.ndim == 1:
+            draw_matrix = draw_matrix[None, :]
+        expected_shape = (len(self.parameter_names),)
+        if draw_matrix.ndim != 2 or draw_matrix.shape[1] != expected_shape[0]:
+            raise ValueError(
+                "parameter_draws must have shape (n_draws, "
+                f"{expected_shape[0]}), got {draw_matrix.shape}."
+            )
+        return draw_matrix
 
     def _coerce_parameter_values_jax(
         self,
@@ -3629,6 +3698,154 @@ class MacroModel:
             "switching_sep_diagnostics": switching_sep_diagnostics,
         }
 
+    def likelihood_surface_report(
+        self,
+        observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        parameter_draws: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+        *,
+        base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
+        observables: Optional[Sequence[str] | str] = None,
+        gate_probs: Optional[Sequence[float]] = None,
+        hard_mask: Optional[Sequence[bool]] = None,
+        fom_algorithm: str = "stochastic_extended_path",
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        qme_algorithm: str = "schur",
+        initial_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+        initial_covariance_strategy: str = "theoretical",
+        measurement_error_scale: float = 1e-9,
+        measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+        presample_periods: int = 0,
+        jitter: float = 1e-9,
+        on_failure_loglikelihood: float = -np.inf,
+        config: SEPConfig = SEPConfig(),
+        sep_periods: Optional[int] = None,
+        sep_order: Optional[int] = None,
+        sep_nnodes: Optional[int] = None,
+        sep_sparse_tree: Optional[bool] = None,
+        sep_maxit: Optional[int] = None,
+        sep_tol: Optional[float] = None,
+        sep_accept_tol: float = 1e-3,
+        sep_shock_scale: Optional[float] = None,
+        sep_inv_maxit: int = 8,
+        sep_inv_step_tol: float = 1e-6,
+        sep_inv_resid_tol: float = 1e-6,
+        sep_inv_lambda: float = 1e-4,
+        switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+        top_share: float = 0.1,
+    ) -> dict[str, Any]:
+        draw_matrix = self._coerce_parameter_draw_matrix(
+            parameter_draws,
+            base_parameter_values=base_parameter_values,
+        )
+        common_kwargs = dict(
+            observables=observables,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            qme_algorithm=qme_algorithm,
+            initial_state=initial_state,
+            terminal_state=terminal_state,
+            presample_periods=presample_periods,
+            on_failure_loglikelihood=on_failure_loglikelihood,
+            config=config,
+            sep_periods=sep_periods,
+            sep_order=sep_order,
+            sep_nnodes=sep_nnodes,
+            sep_sparse_tree=sep_sparse_tree,
+            sep_maxit=sep_maxit,
+            sep_tol=sep_tol,
+            sep_accept_tol=sep_accept_tol,
+            sep_shock_scale=sep_shock_scale,
+            sep_inv_maxit=sep_inv_maxit,
+            sep_inv_step_tol=sep_inv_step_tol,
+            sep_inv_resid_tol=sep_inv_resid_tol,
+            sep_inv_lambda=sep_inv_lambda,
+        )
+        kalman_kwargs = dict(
+            observables=observables,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            qme_algorithm=qme_algorithm,
+            initial_covariance_strategy=initial_covariance_strategy,
+            measurement_error_scale=measurement_error_scale,
+            measurement_error_covariance=measurement_error_covariance,
+            presample_periods=presample_periods,
+            jitter=jitter,
+            on_failure_loglikelihood=on_failure_loglikelihood,
+        )
+
+        ll_rom = np.zeros((draw_matrix.shape[0],), dtype=np.float64)
+        ll_fom = np.zeros((draw_matrix.shape[0],), dtype=np.float64)
+        ll_switching = None if gate_probs is None and hard_mask is None else np.zeros(
+            (draw_matrix.shape[0],),
+            dtype=np.float64,
+        )
+
+        for draw_idx, parameters in enumerate(draw_matrix):
+            ll_rom[draw_idx] = float(
+                self.kalman_loglikelihood(
+                    observations,
+                    parameter_values=parameters,
+                    **kalman_kwargs,
+                )
+            )
+            ll_fom[draw_idx] = float(
+                self.inversion_loglikelihood(
+                    observations,
+                    algorithm=fom_algorithm,
+                    parameter_values=parameters,
+                    **common_kwargs,
+                )
+            )
+            if ll_switching is not None:
+                ll_switching[draw_idx] = float(
+                    np.asarray(
+                        self.switching_loglikelihood(
+                            observations,
+                            gate_probs=gate_probs,
+                            hard_mask=hard_mask,
+                            fom_algorithm=fom_algorithm,
+                            parameter_values=parameters,
+                            initial_covariance_strategy=initial_covariance_strategy,
+                            measurement_error_scale=measurement_error_scale,
+                            measurement_error_covariance=measurement_error_covariance,
+                            jitter=jitter,
+                            switching_config=switching_config,
+                            **common_kwargs,
+                        ).total,
+                        dtype=np.float64,
+                    )
+                )
+
+        rom_vs_fom = evaluate_likelihood_surface_alignment(
+            ll_fom,
+            ll_rom,
+            top_share=top_share,
+        )
+        switching_surface = (
+            None
+            if ll_switching is None
+            else evaluate_switching_surface_alignment(
+                ll_rom,
+                ll_fom,
+                ll_switching,
+                top_share=top_share,
+            )
+        )
+
+        return {
+            "parameter_draws": draw_matrix,
+            "ll_rom": ll_rom,
+            "ll_fom": ll_fom,
+            "ll_switching": ll_switching,
+            "rom_vs_fom": rom_vs_fom,
+            "switching_surface": switching_surface,
+        }
+
     def _normalize_linear_filter_options(
         self,
         *,
@@ -6500,6 +6717,82 @@ def switching_pipeline_report_from_model(
         budget_frontier_budgets=budget_frontier_budgets,
         budget_frontier_points=budget_frontier_points,
         benchmark_reps=benchmark_reps,
+    )
+
+
+def likelihood_surface_report_from_model(
+    model: MacroModel,
+    observations: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    parameter_draws: Sequence[Sequence[float]] | Mapping[str, Sequence[float]],
+    *,
+    base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
+    observables: Optional[Sequence[str] | str] = None,
+    gate_probs: Optional[Sequence[float]] = None,
+    hard_mask: Optional[Sequence[bool]] = None,
+    fom_algorithm: str = "stochastic_extended_path",
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    qme_algorithm: str = "schur",
+    initial_state: Optional[Sequence[float]] = None,
+    terminal_state: Optional[Sequence[float]] = None,
+    initial_covariance_strategy: str = "theoretical",
+    measurement_error_scale: float = 1e-9,
+    measurement_error_covariance: Optional[Sequence[Sequence[float]]] = None,
+    presample_periods: int = 0,
+    jitter: float = 1e-9,
+    on_failure_loglikelihood: float = -np.inf,
+    config: SEPConfig = SEPConfig(),
+    sep_periods: Optional[int] = None,
+    sep_order: Optional[int] = None,
+    sep_nnodes: Optional[int] = None,
+    sep_sparse_tree: Optional[bool] = None,
+    sep_maxit: Optional[int] = None,
+    sep_tol: Optional[float] = None,
+    sep_accept_tol: float = 1e-3,
+    sep_shock_scale: Optional[float] = None,
+    sep_inv_maxit: int = 8,
+    sep_inv_step_tol: float = 1e-6,
+    sep_inv_resid_tol: float = 1e-6,
+    sep_inv_lambda: float = 1e-4,
+    switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+    top_share: float = 0.1,
+) -> dict[str, Any]:
+    return model.likelihood_surface_report(
+        observations,
+        parameter_draws,
+        base_parameter_values=base_parameter_values,
+        observables=observables,
+        gate_probs=gate_probs,
+        hard_mask=hard_mask,
+        fom_algorithm=fom_algorithm,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        qme_algorithm=qme_algorithm,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        initial_covariance_strategy=initial_covariance_strategy,
+        measurement_error_scale=measurement_error_scale,
+        measurement_error_covariance=measurement_error_covariance,
+        presample_periods=presample_periods,
+        jitter=jitter,
+        on_failure_loglikelihood=on_failure_loglikelihood,
+        config=config,
+        sep_periods=sep_periods,
+        sep_order=sep_order,
+        sep_nnodes=sep_nnodes,
+        sep_sparse_tree=sep_sparse_tree,
+        sep_maxit=sep_maxit,
+        sep_tol=sep_tol,
+        sep_accept_tol=sep_accept_tol,
+        sep_shock_scale=sep_shock_scale,
+        sep_inv_maxit=sep_inv_maxit,
+        sep_inv_step_tol=sep_inv_step_tol,
+        sep_inv_resid_tol=sep_inv_resid_tol,
+        sep_inv_lambda=sep_inv_lambda,
+        switching_config=switching_config,
+        top_share=top_share,
     )
 
 

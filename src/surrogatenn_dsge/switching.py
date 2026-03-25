@@ -953,6 +953,185 @@ def _binary_auc(
     return float(auc)
 
 
+def _average_ranks(values: Sequence[float] | np.ndarray) -> np.ndarray:
+    value_array = np.asarray(values, dtype=np.float64).reshape(-1)
+    order = np.argsort(value_array, kind="mergesort")
+    ranks = np.empty_like(order, dtype=np.float64)
+    ranks[order] = np.arange(1, value_array.size + 1, dtype=np.float64)
+    sorted_values = value_array[order]
+    start = 0
+    while start < value_array.size:
+        stop = start + 1
+        while stop < value_array.size and sorted_values[stop] == sorted_values[start]:
+            stop += 1
+        if stop - start > 1:
+            avg_rank = 0.5 * (start + 1 + stop)
+            ranks[order[start:stop]] = avg_rank
+        start = stop
+    return ranks
+
+
+def _pearson_correlation(
+    x: Sequence[float] | np.ndarray,
+    y: Sequence[float] | np.ndarray,
+) -> Optional[float]:
+    x_array = np.asarray(x, dtype=np.float64).reshape(-1)
+    y_array = np.asarray(y, dtype=np.float64).reshape(-1)
+    if x_array.shape != y_array.shape:
+        raise ValueError(
+            f"x and y must have identical shapes, got {x_array.shape} and {y_array.shape}."
+        )
+    if x_array.size <= 1:
+        return None
+    centered_x = x_array - np.mean(x_array)
+    centered_y = y_array - np.mean(y_array)
+    denom = float(np.linalg.norm(centered_x) * np.linalg.norm(centered_y))
+    if denom <= float(np.finfo(np.float64).eps):
+        return None
+    return float(np.dot(centered_x, centered_y) / denom)
+
+
+def evaluate_likelihood_surface_alignment(
+    reference: Sequence[float] | np.ndarray,
+    candidate: Sequence[float] | np.ndarray,
+    *,
+    top_share: float = 0.1,
+) -> dict[str, float | int | bool | None]:
+    reference_array = np.asarray(reference, dtype=np.float64).reshape(-1)
+    candidate_array = np.asarray(candidate, dtype=np.float64).reshape(-1)
+    if reference_array.shape != candidate_array.shape:
+        raise ValueError(
+            "reference and candidate must have identical shapes, got "
+            f"{reference_array.shape} and {candidate_array.shape}."
+        )
+    if not (0.0 < float(top_share) <= 1.0):
+        raise ValueError("top_share must lie in (0, 1].")
+
+    finite_mask = np.isfinite(reference_array) & np.isfinite(candidate_array)
+    n_total = int(reference_array.size)
+    n_finite = int(np.sum(finite_mask))
+    if n_finite == 0:
+        return {
+            "n_total": n_total,
+            "n_finite_pairs": 0,
+            "top_share": float(top_share),
+            "top_count": 0,
+            "mean_error": None,
+            "mean_abs_error": None,
+            "rmse": None,
+            "max_abs_error": None,
+            "pearson_corr": None,
+            "spearman_corr": None,
+            "reference_std": None,
+            "candidate_std": None,
+            "std_ratio": None,
+            "best_reference_index": None,
+            "best_candidate_index": None,
+            "best_draw_match": None,
+            "top_overlap_count": None,
+            "top_overlap_share": None,
+        }
+
+    reference_finite = reference_array[finite_mask]
+    candidate_finite = candidate_array[finite_mask]
+    finite_indices = np.flatnonzero(finite_mask)
+    diffs = candidate_finite - reference_finite
+    abs_diffs = np.abs(diffs)
+    pearson_corr = _pearson_correlation(reference_finite, candidate_finite)
+    spearman_corr = _pearson_correlation(
+        _average_ranks(reference_finite),
+        _average_ranks(candidate_finite),
+    )
+    reference_std = float(np.std(reference_finite))
+    candidate_std = float(np.std(candidate_finite))
+    std_ratio = (
+        None
+        if reference_std <= float(np.finfo(np.float64).eps)
+        else float(candidate_std / reference_std)
+    )
+    best_reference_local = int(np.argmax(reference_finite))
+    best_candidate_local = int(np.argmax(candidate_finite))
+    best_reference_index = int(finite_indices[best_reference_local])
+    best_candidate_index = int(finite_indices[best_candidate_local])
+    top_count = max(1, int(np.ceil(float(top_share) * n_finite)))
+    reference_order = np.argsort(-reference_finite, kind="mergesort")
+    candidate_order = np.argsort(-candidate_finite, kind="mergesort")
+    top_reference = set(finite_indices[reference_order[:top_count]].tolist())
+    top_candidate = set(finite_indices[candidate_order[:top_count]].tolist())
+    top_overlap_count = len(top_reference & top_candidate)
+
+    return {
+        "n_total": n_total,
+        "n_finite_pairs": n_finite,
+        "top_share": float(top_share),
+        "top_count": int(top_count),
+        "mean_error": float(np.mean(diffs)),
+        "mean_abs_error": float(np.mean(abs_diffs)),
+        "rmse": float(np.sqrt(np.mean(diffs**2))),
+        "max_abs_error": float(np.max(abs_diffs)),
+        "pearson_corr": pearson_corr,
+        "spearman_corr": spearman_corr,
+        "reference_std": reference_std,
+        "candidate_std": candidate_std,
+        "std_ratio": std_ratio,
+        "best_reference_index": best_reference_index,
+        "best_candidate_index": best_candidate_index,
+        "best_draw_match": bool(best_reference_index == best_candidate_index),
+        "top_overlap_count": int(top_overlap_count),
+        "top_overlap_share": float(top_overlap_count / top_count),
+    }
+
+
+def evaluate_switching_surface_alignment(
+    ll_rom: Sequence[float] | np.ndarray,
+    ll_fom: Sequence[float] | np.ndarray,
+    ll_switching: Sequence[float] | np.ndarray,
+    *,
+    top_share: float = 0.1,
+) -> dict[str, dict[str, float | int | bool | None] | float | None]:
+    rom_vs_fom = evaluate_likelihood_surface_alignment(
+        ll_fom,
+        ll_rom,
+        top_share=top_share,
+    )
+    switching_vs_fom = evaluate_likelihood_surface_alignment(
+        ll_fom,
+        ll_switching,
+        top_share=top_share,
+    )
+
+    rom_mae = rom_vs_fom["mean_abs_error"]
+    switching_mae = switching_vs_fom["mean_abs_error"]
+    rom_rmse = rom_vs_fom["rmse"]
+    switching_rmse = switching_vs_fom["rmse"]
+    rom_corr = rom_vs_fom["pearson_corr"]
+    switching_corr = switching_vs_fom["pearson_corr"]
+    rom_rank = rom_vs_fom["spearman_corr"]
+    switching_rank = switching_vs_fom["spearman_corr"]
+    rom_top_overlap = rom_vs_fom["top_overlap_share"]
+    switching_top_overlap = switching_vs_fom["top_overlap_share"]
+
+    return {
+        "rom_vs_fom": rom_vs_fom,
+        "switching_vs_fom": switching_vs_fom,
+        "mae_ratio_switching_over_rom": None
+        if rom_mae in (None, 0.0) or switching_mae is None
+        else float(switching_mae / rom_mae),
+        "rmse_ratio_switching_over_rom": None
+        if rom_rmse in (None, 0.0) or switching_rmse is None
+        else float(switching_rmse / rom_rmse),
+        "pearson_corr_gain": None
+        if rom_corr is None or switching_corr is None
+        else float(switching_corr - rom_corr),
+        "spearman_corr_gain": None
+        if rom_rank is None or switching_rank is None
+        else float(switching_rank - rom_rank),
+        "top_overlap_gain": None
+        if rom_top_overlap is None or switching_top_overlap is None
+        else float(switching_top_overlap - rom_top_overlap),
+    }
+
+
 def evaluate_gate_decisions(
     ll_rom: Sequence[float] | np.ndarray,
     ll_fom: Sequence[float] | np.ndarray,
