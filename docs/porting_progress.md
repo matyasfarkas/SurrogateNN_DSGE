@@ -908,6 +908,21 @@ Python/JAX status:
 - parsed models now expose `likelihood_surface_report(...)` and `likelihood_surface_report_from_model(...)`, which evaluate ROM, FOM, and optional switching likelihood totals over a parameter-draw matrix or named parameter-draw mapping and summarize how well the cheaper surfaces preserve the FOM ranking
 - focused tests verify exact synthetic ranking/overlap arithmetic, improvement of switching over ROM on a controlled synthetic surface, and a parsed nonlinear sparse-tree SEP sweep where hard-masked switching reproduces the FOM surface exactly across multiple parameter draws
 
+### 60. Parsed-model SEP OBC shock reinjection
+
+Julia reference:
+
+- `src/sep_simulation.jl`
+- `src/subdifferential_newton.jl`
+
+Python/JAX status:
+
+- parsed-model SEP now has an explicit OBC enforcement loop around the nonlinear solve whenever the parsed model both has transformed `max` / `min` OBC structure and exposes explicit OBC-tagged shock channels
+- the SEP path is first solved once with the existing parsed residual/subgradient machinery; if the path is rejected or still violates the transformed OBC diagnostics, the code now computes an anticipated OBC shock sequence on the dedicated first-order OBC path, injects those shocks back into the deterministic SEP horizon, and re-runs SEP iteratively
+- the new control flow is intentionally narrow and conservative: it reuses the existing first-order OBC shock recovery machinery instead of claiming a full nonlinear subdifferential shock optimizer, and it only activates on parsed models whose OBC equations are already supported by the dedicated first-order enforcement path
+- `_simulate_sep_path_with_shocks(...)` now returns the adjusted deterministic shock path as well as the state path, so `simulate_model(...)` and `get_irf(...)` on the SEP branch expose the implied OBC shocks instead of silently discarding them
+- focused tests verify the new rerun control flow directly by forcing an initially violating SEP path and checking that the translated runtime injects OBC shocks before the rerun, that SEP-backed simulation now reports those reinjected OBC shocks, and that the broader SEP/OBC/model/runtime slices continue to pass
+
 ### 30. Steady-state restarts, common macro options, OBC runtime horizon plumbing, and Lyapunov variants
 
 Julia reference:

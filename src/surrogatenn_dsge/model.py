@@ -165,6 +165,12 @@ class ParsedModelSEPResult(NamedTuple):
     solution: SEPSolution
 
 
+class _SEPPathSimulationResult(NamedTuple):
+    state_path: np.ndarray
+    shocks: np.ndarray
+    sep_result: ParsedModelSEPResult
+
+
 class HomotopySEPResult(NamedTuple):
     success: bool
     result: ParsedModelSEPResult
@@ -1799,7 +1805,235 @@ class MacroModel:
         ]
         return np.vstack(guess_blocks)
 
-    def _simulate_sep_path(
+    def _sep_obc_maxiter(self) -> int:
+        for key in ("zlb_obc_maxiter", "sep_obc_maxiter"):
+            raw_value = self.model_options.get(key)
+            if raw_value is None:
+                continue
+            try:
+                parsed_value = int(raw_value)
+            except Exception:
+                continue
+            if parsed_value >= 0:
+                return parsed_value
+        return 3
+
+    def _evaluate_sep_obc_max_violation(
+        self,
+        *,
+        sep_result: ParsedModelSEPResult,
+        deterministic_shocks: np.ndarray,
+        parameter_values: np.ndarray,
+        steady_state: np.ndarray,
+        terminal_state: np.ndarray,
+    ) -> float:
+        if not self.has_obc:
+            return 0.0
+        try:
+            violations = np.asarray(
+                self.evaluate_obc_violations_along_path(
+                    np.asarray(sep_result.solution.mean_path, dtype=np.float64).T,
+                    shocks=deterministic_shocks,
+                    parameter_values=parameter_values,
+                    steady_state=steady_state,
+                    terminal_state=terminal_state,
+                ),
+                dtype=np.float64,
+            )
+        except Exception:
+            return float("inf")
+        if violations.size == 0:
+            return 0.0
+        if not np.all(np.isfinite(violations)):
+            return float("inf")
+        return max(float(np.max(violations)), 0.0)
+
+    def _solve_stochastic_extended_path_core(
+        self,
+        *,
+        full_steady_state: np.ndarray,
+        parameter_values: np.ndarray,
+        initial_state: jax.Array,
+        terminal_state: jax.Array,
+        config: SEPConfig,
+        deterministic_shocks: Optional[jax.Array],
+        initial_guess: Optional[Sequence[Sequence[float]]] = None,
+    ) -> ParsedModelSEPResult:
+        parameter_array = jnp.asarray(parameter_values, dtype=jnp.float64)
+        steady_reference_values = jnp.asarray(
+            self._steady_reference_values(full_steady_state),
+            dtype=jnp.float64,
+        )
+        effective_config = config
+        sep_jacobian_fn = None
+        if self.has_obc:
+            if config.expectation_method == "gauss_hermite":
+                if config.jacobian_method == "auto":
+                    effective_config = dataclass_replace(
+                        config,
+                        jacobian_method="subgradient",
+                    )
+                if effective_config.jacobian_method == "subgradient":
+                    sep_jacobian_fn = self._build_sep_subgradient_jacobian(
+                        initial_state=initial_state,
+                        terminal_state=terminal_state,
+                        parameter_values=parameter_array,
+                        steady_reference_values=steady_reference_values,
+                        config=effective_config,
+                        deterministic_shocks=deterministic_shocks,
+                    )
+            elif config.jacobian_method == "auto":
+                effective_config = dataclass_replace(
+                    config,
+                    jacobian_method="finite_difference",
+                )
+
+        def conditional_residual(
+            lag_state: jax.Array,
+            current_state: jax.Array,
+            lead_state: jax.Array,
+            current_shock: jax.Array,
+            _params: object,
+        ) -> jax.Array:
+            return self._evaluate_dynamic_residual_with_context(
+                lag_state,
+                current_state,
+                lead_state,
+                current_shock,
+                parameter_values=parameter_array,
+                steady_reference_values=steady_reference_values,
+            )
+
+        deterministic_array = (
+            np.zeros((config.periods, self.timings.nExo), dtype=np.float64)
+            if deterministic_shocks is None
+            else np.asarray(deterministic_shocks, dtype=np.float64)
+        )
+        sep_initial_guess = initial_guess
+        if sep_initial_guess is None:
+            sep_initial_guess = self._build_sep_linear_initial_guess(
+                parameter_values=np.asarray(parameter_values, dtype=np.float64),
+                steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                initial_state=np.asarray(initial_state, dtype=np.float64),
+                deterministic_shocks=deterministic_array,
+                config=effective_config,
+            )
+
+        solution = solve_stochastic_extended_path_residual_expectation(
+            conditional_residual,
+            initial_state=initial_state,
+            terminal_state=terminal_state,
+            shock_dim=self.timings.nExo,
+            config=effective_config,
+            deterministic_shocks=deterministic_shocks,
+            initial_guess=sep_initial_guess,
+            jacobian_fn=sep_jacobian_fn,
+        )
+
+        return ParsedModelSEPResult(
+            steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+            parameter_values=parameter_array,
+            solution=solution,
+        )
+
+    def _solve_stochastic_extended_path_with_obc_enforcement(
+        self,
+        *,
+        full_steady_state: np.ndarray,
+        parameter_values: np.ndarray,
+        initial_state: jax.Array,
+        terminal_state: jax.Array,
+        config: SEPConfig,
+        deterministic_shocks: Optional[jax.Array],
+        initial_guess: Optional[Sequence[Sequence[float]]] = None,
+    ) -> tuple[ParsedModelSEPResult, np.ndarray]:
+        current_shocks = (
+            np.zeros((config.periods, self.timings.nExo), dtype=np.float64)
+            if deterministic_shocks is None
+            else np.asarray(deterministic_shocks, dtype=np.float64)
+        )
+        sep_result = self._solve_stochastic_extended_path_core(
+            full_steady_state=np.asarray(full_steady_state, dtype=np.float64),
+            parameter_values=np.asarray(parameter_values, dtype=np.float64),
+            initial_state=initial_state,
+            terminal_state=terminal_state,
+            config=config,
+            deterministic_shocks=jnp.asarray(current_shocks, dtype=jnp.float64),
+            initial_guess=initial_guess,
+        )
+        if (
+            not self.has_obc
+            or self._obc_shock_indices.size == 0
+            or self._first_order_obc_projection_specs is None
+        ):
+            return sep_result, current_shocks
+
+        violation_tol = max(float(config.tol), 1e-10)
+        max_violation = self._evaluate_sep_obc_max_violation(
+            sep_result=sep_result,
+            deterministic_shocks=current_shocks,
+            parameter_values=np.asarray(parameter_values, dtype=np.float64),
+            steady_state=np.asarray(full_steady_state, dtype=np.float64),
+            terminal_state=np.asarray(terminal_state, dtype=np.float64),
+        )
+        if sep_result.solution.accepted and max_violation <= violation_tol:
+            return sep_result, current_shocks
+
+        try:
+            first_order_result = self.solve_first_order(
+                parameter_values=np.asarray(parameter_values, dtype=np.float64),
+                steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                qme_algorithm="schur",
+            )
+        except Exception:
+            return sep_result, current_shocks
+        if not bool(np.asarray(first_order_result.solution.converged)):
+            return sep_result, current_shocks
+
+        current_guess = np.asarray(
+            sep_result.solution.stacked_states,
+            dtype=np.float64,
+        )
+        for _ in range(max(1, self._sep_obc_maxiter())):
+            linear_obc_result = self._simulate_first_order_obc_path(
+                current_shocks.T,
+                first_order_result=first_order_result,
+                steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                initial_state=np.asarray(initial_state, dtype=np.float64),
+            )
+            updated_shocks = np.asarray(linear_obc_result.shocks.T, dtype=np.float64)
+            if (
+                np.allclose(updated_shocks, current_shocks, rtol=0.0, atol=1e-12)
+                and sep_result.solution.accepted
+                and max_violation <= violation_tol
+            ):
+                break
+            current_shocks = updated_shocks
+            sep_result = self._solve_stochastic_extended_path_core(
+                full_steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                parameter_values=np.asarray(parameter_values, dtype=np.float64),
+                initial_state=initial_state,
+                terminal_state=terminal_state,
+                config=config,
+                deterministic_shocks=jnp.asarray(current_shocks, dtype=jnp.float64),
+                initial_guess=current_guess,
+            )
+            current_guess = np.asarray(
+                sep_result.solution.stacked_states,
+                dtype=np.float64,
+            )
+            max_violation = self._evaluate_sep_obc_max_violation(
+                sep_result=sep_result,
+                deterministic_shocks=current_shocks,
+                parameter_values=np.asarray(parameter_values, dtype=np.float64),
+                steady_state=np.asarray(full_steady_state, dtype=np.float64),
+                terminal_state=np.asarray(terminal_state, dtype=np.float64),
+            )
+            if sep_result.solution.accepted and max_violation <= violation_tol:
+                break
+        return sep_result, current_shocks
+
+    def _simulate_sep_path_with_shocks(
         self,
         shocks: np.ndarray,
         *,
@@ -1808,7 +2042,7 @@ class MacroModel:
         initial_state: Optional[Sequence[float]] = None,
         terminal_state: Optional[Sequence[float]] = None,
         config: SEPConfig,
-    ) -> np.ndarray:
+    ) -> _SEPPathSimulationResult:
         periods = shocks.shape[1]
         runtime_periods = max(int(config.periods), periods)
         runtime_shocks = shocks
@@ -1841,13 +2075,13 @@ class MacroModel:
             deterministic_shocks=np.asarray(runtime_shocks, dtype=np.float64),
             config=runtime_config,
         )
-        sep_result = self.solve_stochastic_extended_path(
-            parameter_values=parameter_values,
-            steady_state=steady_state,
-            initial_state=initial_state_values,
-            terminal_state=terminal_state_values,
+        sep_result, used_shocks = self._solve_stochastic_extended_path_with_obc_enforcement(
+            full_steady_state=np.asarray(steady_state, dtype=np.float64),
+            parameter_values=np.asarray(parameter_values, dtype=np.float64),
+            initial_state=jnp.asarray(initial_state_values, dtype=jnp.float64),
+            terminal_state=jnp.asarray(terminal_state_values, dtype=jnp.float64),
             config=runtime_config,
-            deterministic_shocks=runtime_shocks,
+            deterministic_shocks=jnp.asarray(runtime_shocks.T, dtype=jnp.float64),
             initial_guess=sep_initial_guess,
         )
         if not sep_result.solution.accepted:
@@ -1863,7 +2097,31 @@ class MacroModel:
                 "SEP path returned an unexpected shape "
                 f"{state_path.shape}, expected ({self.timings.nVars}, {runtime_periods})."
             )
-        return state_path[:, :periods]
+        return _SEPPathSimulationResult(
+            state_path=state_path[:, :periods],
+            shocks=np.asarray(used_shocks[:periods].T, dtype=np.float64),
+            sep_result=sep_result,
+        )
+
+    def _simulate_sep_path(
+        self,
+        shocks: np.ndarray,
+        *,
+        parameter_values: np.ndarray,
+        steady_state: np.ndarray,
+        initial_state: Optional[Sequence[float]] = None,
+        terminal_state: Optional[Sequence[float]] = None,
+        config: SEPConfig,
+    ) -> np.ndarray:
+        return self._simulate_sep_path_with_shocks(
+            shocks,
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+            initial_state=initial_state,
+            terminal_state=terminal_state,
+            config=config,
+        ).state_path
+
 
     def _evaluate_dynamic_residual_with_context(
         self,
@@ -4685,7 +4943,7 @@ class MacroModel:
                     periods=max(runtime_config.periods, periods, self.max_obc_horizon),
                     branching_order=0,
                 )
-            state_path = self._simulate_sep_path(
+            sep_runtime = self._simulate_sep_path_with_shocks(
                 shock_matrix,
                 parameter_values=resolved_parameters,
                 steady_state=np.asarray(full_steady_state, dtype=np.float64),
@@ -4693,10 +4951,11 @@ class MacroModel:
                 terminal_state=terminal_state,
                 config=runtime_config,
             )
+            state_path = sep_runtime.state_path
             algorithm_used = "stochastic_extended_path"
             parameter_output = np.asarray(resolved_parameters, dtype=np.float64)
             steady_output = np.asarray(full_steady_state, dtype=np.float64)
-            shock_output = np.asarray(shock_matrix, dtype=np.float64)
+            shock_output = np.asarray(sep_runtime.shocks, dtype=np.float64)
         else:
             parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
                 first_order_result=first_order_result,
@@ -4828,8 +5087,9 @@ class MacroModel:
                     periods=max(runtime_config.periods, periods, self.max_obc_horizon),
                     branching_order=0,
                 )
+            shock_output = np.asarray(shock_scenarios, dtype=np.float64).copy()
             for scenario_idx in range(shock_scenarios.shape[2]):
-                state_paths[:, :, scenario_idx] = self._simulate_sep_path(
+                sep_runtime = self._simulate_sep_path_with_shocks(
                     shock_scenarios[:, :, scenario_idx],
                     parameter_values=np.asarray(resolved_parameters, dtype=np.float64),
                     steady_state=np.asarray(full_steady_state, dtype=np.float64),
@@ -4837,9 +5097,10 @@ class MacroModel:
                     terminal_state=terminal_state,
                     config=runtime_config,
                 )
+                state_paths[:, :, scenario_idx] = sep_runtime.state_path
+                shock_output[:, :, scenario_idx] = sep_runtime.shocks
             parameter_output = np.asarray(resolved_parameters, dtype=np.float64)
             steady_output = np.asarray(full_steady_state, dtype=np.float64)
-            shock_output = np.asarray(shock_scenarios, dtype=np.float64)
         else:
             parsed_result, full_steady_state = self._prepare_first_order_solution_for_likelihood(
                 first_order_result=first_order_result,
@@ -5426,78 +5687,16 @@ class MacroModel:
             deterministic_shocks,
             periods=config.periods,
         )
-
-        parameter_array = jnp.asarray(resolved_parameters, dtype=jnp.float64)
-        steady_reference_values = jnp.asarray(
-            self._steady_reference_values(full_steady_state),
-            dtype=jnp.float64,
-        )
-        effective_config = config
-        sep_jacobian_fn = None
-        if self.has_obc:
-            if config.expectation_method == "gauss_hermite":
-                if config.jacobian_method == "auto":
-                    effective_config = dataclass_replace(
-                        config,
-                        jacobian_method="subgradient",
-                    )
-                if effective_config.jacobian_method == "subgradient":
-                    sep_jacobian_fn = self._build_sep_subgradient_jacobian(
-                        initial_state=initial_state_values,
-                        terminal_state=terminal_state_values,
-                        parameter_values=parameter_array,
-                        steady_reference_values=steady_reference_values,
-                        config=effective_config,
-                        deterministic_shocks=deterministic_shock_values,
-                    )
-            elif config.jacobian_method == "auto":
-                effective_config = dataclass_replace(
-                    config,
-                    jacobian_method="finite_difference",
-                )
-
-        def conditional_residual(
-            lag_state: jax.Array,
-            current_state: jax.Array,
-            lead_state: jax.Array,
-            current_shock: jax.Array,
-            _params: object,
-        ) -> jax.Array:
-            return self._evaluate_dynamic_residual_with_context(
-                lag_state,
-                current_state,
-                lead_state,
-                current_shock,
-                parameter_values=parameter_array,
-                steady_reference_values=steady_reference_values,
-            )
-
-        sep_initial_guess = initial_guess
-        if sep_initial_guess is None:
-            sep_initial_guess = self._build_sep_linear_initial_guess(
-                parameter_values=np.asarray(resolved_parameters, dtype=np.float64),
-                steady_state=np.asarray(full_steady_state, dtype=np.float64),
-                initial_state=np.asarray(initial_state_values, dtype=np.float64),
-                deterministic_shocks=np.asarray(deterministic_shock_values, dtype=np.float64),
-                config=effective_config,
-            )
-
-        solution = solve_stochastic_extended_path_residual_expectation(
-            conditional_residual,
+        sep_result, _ = self._solve_stochastic_extended_path_with_obc_enforcement(
+            full_steady_state=np.asarray(full_steady_state, dtype=np.float64),
+            parameter_values=np.asarray(resolved_parameters, dtype=np.float64),
             initial_state=initial_state_values,
             terminal_state=terminal_state_values,
-            shock_dim=self.timings.nExo,
-            config=effective_config,
+            config=config,
             deterministic_shocks=deterministic_shock_values,
-            initial_guess=sep_initial_guess,
-            jacobian_fn=sep_jacobian_fn,
+            initial_guess=initial_guess,
         )
-
-        return ParsedModelSEPResult(
-            steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
-            parameter_values=parameter_array,
-            solution=solution,
-        )
+        return sep_result
 
     def solve_first_order(
         self,

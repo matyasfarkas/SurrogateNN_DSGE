@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import jax.numpy as jnp
 import numpy as np
+import pytest
+import surrogatenn_dsge.model as model_module
 
 from surrogatenn_dsge import (
     compute_first_order_obc_violation_path,
@@ -67,6 +70,20 @@ end
     rho = 0.7
     mu = 1.0
     q_cap = 1.0
+end
+"""
+
+
+OBC_SEP_AUX_SHOCK_SOURCE = """
+@model obc_sep_aux begin
+    r[0] = max(r_star[0] + eps_zlbᵒᵇᶜ[x], zlb)
+    r_star[0] = rho * r_star[-1] + (1-rho) * mu + eps_r[x]
+end
+
+@parameters obc_sep_aux begin
+    rho = 0.8
+    mu = 1.2
+    zlb = 1.0
 end
 """
 
@@ -270,3 +287,87 @@ def test_first_order_obc_violation_path_detects_linear_constraint_breach() -> No
     assert violation_path.state_path.shape == (2, 4)
     assert violation_path.violations.shape[1] == 3
     assert np.max(np.asarray(violation_path.violations, dtype=np.float64)) > 1e-3
+
+
+def test_sep_obc_reinjection_uses_linear_obc_shocks_before_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = parse_macro_model(OBC_SEP_AUX_SHOCK_SOURCE)
+    calls: list[np.ndarray] = []
+    obc_index = model.timings.exo.index("eps_zlbᵒᵇᶜ")
+
+    def fake_sep_core(
+        self,
+        *,
+        full_steady_state: np.ndarray,
+        parameter_values: np.ndarray,
+        initial_state: np.ndarray,
+        terminal_state: np.ndarray,
+        config: SEPConfig,
+        deterministic_shocks: np.ndarray | None,
+        initial_guess: object = None,
+    ) -> model_module.ParsedModelSEPResult:
+        shock_matrix = (
+            np.zeros((config.periods, self.timings.nExo), dtype=np.float64)
+            if deterministic_shocks is None
+            else np.asarray(deterministic_shocks, dtype=np.float64)
+        )
+        calls.append(shock_matrix.copy())
+        if len(calls) == 1:
+            mean_path = np.asarray(
+                [
+                    [1.2, 0.4, 0.72, 0.976],
+                    [1.2, 0.4, 0.72, 0.976],
+                ],
+                dtype=np.float64,
+            )
+        else:
+            assert float(np.max(calls[-1][:, obc_index])) > 0.0
+            implied_r = np.asarray(
+                [
+                    0.4 + shock_matrix[0, obc_index],
+                    0.72 + shock_matrix[1, obc_index],
+                    0.976 + shock_matrix[2, obc_index],
+                ],
+                dtype=np.float64,
+            )
+            mean_path = np.asarray(
+                [
+                    [1.2, *implied_r],
+                    [1.2, 0.4, 0.72, 0.976],
+                ],
+                dtype=np.float64,
+            )
+        return model_module.ParsedModelSEPResult(
+            steady_state=np.asarray(full_steady_state, dtype=np.float64),
+            parameter_values=np.asarray(parameter_values, dtype=np.float64),
+            solution=model_module.SEPSolution(
+                stacked_states=jnp.asarray(mean_path[:, 1:].T.reshape(-1), dtype=jnp.float64),
+                mean_path=jnp.asarray(mean_path, dtype=jnp.float64),
+                residual_norm=1e-8,
+                converged=True,
+                accepted=True,
+                iterations=2,
+                group_counts=(1, 1, 1, 1),
+                jacobian_method="subgradient",
+            ),
+        )
+
+    monkeypatch.setattr(
+        model_module.MacroModel,
+        "_solve_stochastic_extended_path_core",
+        fake_sep_core,
+    )
+
+    result = solve_stochastic_extended_path_model(
+        model,
+        steady_state=[1.2, 1.2],
+        initial_state=[1.2, 1.2],
+        terminal_state=[1.2, 1.2],
+        config=SEPConfig(periods=3, branching_order=0, tol=1e-8),
+        deterministic_shocks={"eps_r": [-2.0, 0.0, 0.0]},
+    )
+
+    assert len(calls) >= 2
+    assert result.solution.accepted
+    assert np.all(np.asarray(result.solution.mean_path[0, 1:], dtype=np.float64) >= 1.0)

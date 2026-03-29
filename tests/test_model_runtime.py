@@ -906,6 +906,92 @@ def test_simulate_model_supported_obc_path_recovers_implied_obc_shocks() -> None
     )
 
 
+def test_sep_runtime_reports_reinjected_obc_shocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = parse_macro_model(OBC_AUX_SHOCK_SOURCE)
+    obc_index = model.timings.exo.index("eps_zlbᵒᵇᶜ")
+    calls: list[np.ndarray] = []
+
+    def fake_sep_core(
+        self,
+        *,
+        full_steady_state: np.ndarray,
+        parameter_values: np.ndarray,
+        initial_state: np.ndarray,
+        terminal_state: np.ndarray,
+        config: SEPConfig,
+        deterministic_shocks: np.ndarray | None,
+        initial_guess: object = None,
+    ) -> model_module.ParsedModelSEPResult:
+        shock_matrix = (
+            np.zeros((config.periods, self.timings.nExo), dtype=np.float64)
+            if deterministic_shocks is None
+            else np.asarray(deterministic_shocks, dtype=np.float64)
+        )
+        calls.append(shock_matrix.copy())
+        if len(calls) == 1:
+            mean_path = np.asarray(
+                [
+                    [1.2, 0.4, 0.72, 0.976],
+                    [1.2, 0.4, 0.72, 0.976],
+                ],
+                dtype=np.float64,
+            )
+        else:
+            assert float(np.max(calls[-1][:, obc_index])) > 0.0
+            implied_r = np.asarray(
+                [
+                    0.4 + shock_matrix[0, obc_index],
+                    0.72 + shock_matrix[1, obc_index],
+                    0.976 + shock_matrix[2, obc_index],
+                ],
+                dtype=np.float64,
+            )
+            mean_path = np.asarray(
+                [
+                    [1.2, *implied_r],
+                    [1.2, 0.4, 0.72, 0.976],
+                ],
+                dtype=np.float64,
+            )
+        return model_module.ParsedModelSEPResult(
+            steady_state=np.asarray(full_steady_state, dtype=np.float64),
+            parameter_values=np.asarray(parameter_values, dtype=np.float64),
+            solution=model_module.SEPSolution(
+                stacked_states=jnp.asarray(mean_path[:, 1:].T.reshape(-1), dtype=jnp.float64),
+                mean_path=jnp.asarray(mean_path, dtype=jnp.float64),
+                residual_norm=1e-8,
+                converged=True,
+                accepted=True,
+                iterations=2,
+                group_counts=(1, 1, 1, 1),
+                jacobian_method="subgradient",
+            ),
+        )
+
+    monkeypatch.setattr(
+        model_module.MacroModel,
+        "_solve_stochastic_extended_path_core",
+        fake_sep_core,
+    )
+
+    result = simulate_model(
+        model,
+        periods=3,
+        variables=("r",),
+        shocks={"eps_r": [-2.0, 0.0, 0.0]},
+        algorithm="sep",
+        levels=True,
+        config=SEPConfig(periods=3, branching_order=0, tol=1e-8),
+    )
+
+    assert len(calls) >= 2
+    assert result.algorithm_used == "stochastic_extended_path"
+    assert np.max(np.asarray(result.shocks, dtype=np.float64)[obc_index]) > 0.0
+    assert np.all(np.asarray(result.data, dtype=np.float64).reshape(-1) >= 1.0)
+
+
 def test_upstream_models_support_random_simulation_token() -> None:
     model_path = _ROOT / "SurrogateNN_Estimation.jl" / "test" / "models" / "RBC_CME.jl"
     model = parse_macro_model(model_path.read_text())
@@ -1087,24 +1173,27 @@ def test_sep_runtime_path_accepts_solution_within_configured_accept_tol(
     expected_path = np.asarray([[0.1, 0.2, 0.3]], dtype=np.float64)
 
     def fake_sep_solver(self, **kwargs):
-        return model_module.ParsedModelSEPResult(
-            steady_state=np.asarray([0.0], dtype=np.float64),
-            parameter_values=np.asarray([0.5], dtype=np.float64),
-            solution=model_module.SEPSolution(
-                stacked_states=jnp.zeros((3,), dtype=jnp.float64),
-                mean_path=jnp.asarray([[0.0, 0.1, 0.2, 0.3]], dtype=jnp.float64),
-                residual_norm=1e-4,
-                converged=False,
-                accepted=True,
-                iterations=2,
-                group_counts=(1, 1, 1, 1),
-                jacobian_method="autodiff",
+        return (
+            model_module.ParsedModelSEPResult(
+                steady_state=np.asarray([0.0], dtype=np.float64),
+                parameter_values=np.asarray([0.5], dtype=np.float64),
+                solution=model_module.SEPSolution(
+                    stacked_states=jnp.zeros((3,), dtype=jnp.float64),
+                    mean_path=jnp.asarray([[0.0, 0.1, 0.2, 0.3]], dtype=jnp.float64),
+                    residual_norm=1e-4,
+                    converged=False,
+                    accepted=True,
+                    iterations=2,
+                    group_counts=(1, 1, 1, 1),
+                    jacobian_method="autodiff",
+                ),
             ),
+            np.zeros((3, model.timings.nExo), dtype=np.float64),
         )
 
     monkeypatch.setattr(
         model_module.MacroModel,
-        "solve_stochastic_extended_path",
+        "_solve_stochastic_extended_path_with_obc_enforcement",
         fake_sep_solver,
     )
 

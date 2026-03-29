@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import jax.numpy as jnp
 import numpy as np
+import surrogatenn_dsge.model as model_module
 
 from surrogatenn_dsge import (
     SEPConfig,
@@ -133,12 +135,40 @@ def test_first_order_obc_sep_fallback_uses_model_max_obc_horizon(monkeypatch) ->
         initial_state,
         terminal_state,
         config,
-    ) -> np.ndarray:
+    ) -> model_module._SEPPathSimulationResult:
         del parameter_values, initial_state, terminal_state
         captured.append((shocks.shape[1], int(config.periods), int(config.branching_order)))
-        return np.repeat(np.asarray(steady_state, dtype=np.float64)[:, None], shocks.shape[1], axis=1)
+        state_path = np.repeat(
+            np.asarray(steady_state, dtype=np.float64)[:, None],
+            shocks.shape[1],
+            axis=1,
+        )
+        return model_module._SEPPathSimulationResult(
+            state_path=state_path,
+            shocks=np.asarray(shocks, dtype=np.float64),
+            sep_result=model_module.ParsedModelSEPResult(
+                steady_state=np.asarray(steady_state, dtype=np.float64),
+                parameter_values=np.asarray([0.5], dtype=np.float64),
+                solution=model_module.SEPSolution(
+                    stacked_states=jnp.asarray(state_path.T.reshape(-1), dtype=jnp.float64),
+                    mean_path=jnp.asarray(
+                        np.concatenate(
+                            [np.asarray(steady_state, dtype=np.float64)[:, None], state_path],
+                            axis=1,
+                        ),
+                        dtype=jnp.float64,
+                    ),
+                    residual_norm=0.0,
+                    converged=True,
+                    accepted=True,
+                    iterations=1,
+                    group_counts=(1,) * (shocks.shape[1] + 1),
+                    jacobian_method="autodiff",
+                ),
+            ),
+        )
 
-    monkeypatch.setattr(type(model), "_simulate_sep_path", fake_simulate_sep_path)
+    monkeypatch.setattr(type(model), "_simulate_sep_path_with_shocks", fake_simulate_sep_path)
     result = model.simulate(
         periods=2,
         shocks={"eps": [0.1, 0.0]},
