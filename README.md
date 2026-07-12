@@ -17,6 +17,10 @@ short parity/runtime smoke. A larger opt-in SW07/HLT stress profile lives in
 [docs/sw07_long_profile.md](docs/sw07_long_profile.md) for the run command,
 runtime target, and current NUTS caveat.
 
+For Colab, use `notebooks/colab_jax_numpyro_gemini_profile.ipynb` for the
+small GPU/NumPyro smoke run and `notebooks/colab_sw07_long_profile.ipynb` for
+the dedicated larger SW07/HLT benchmark.
+
 ## Current status
 
 Implemented:
