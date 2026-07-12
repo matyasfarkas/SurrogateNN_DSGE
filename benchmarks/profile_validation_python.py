@@ -10,12 +10,17 @@ from typing import Any, Callable
 import jax
 import jax.numpy as jnp
 import numpy as np
+import numpyro.distributions as dist
+from numpyro.infer import MCMC, NUTS
 
 from surrogatenn_dsge import (
     RegimeSwitchConfig,
     SEPConfig,
     SwitchingLikelihoodConfig,
+    build_numpyro_kalman_model_jax,
     compute_linear_gate_stats_from_filter,
+    evaluate_numpyro_kalman_log_density_jax,
+    evaluate_numpyro_switching_log_density_jax,
     estimate_observed_shocks_matrix,
     estimate_observed_variables_matrix,
     kalman_loglikelihood_from_model_jax,
@@ -146,6 +151,36 @@ def _gate_stats_result(value: Any) -> dict[str, Any]:
     }
 
 
+def _samples_result(value: Any) -> dict[str, Any]:
+    samples = {
+        name: np.asarray(array, dtype=np.float64)
+        for name, array in value.items()
+    }
+    return {
+        "sample_count": int(next(iter(samples.values())).shape[0]) if samples else 0,
+        "parameter_names": sorted(samples),
+        "means": {
+            name: float(np.mean(array))
+            for name, array in samples.items()
+        },
+        "stds": {
+            name: float(np.std(array))
+            for name, array in samples.items()
+        },
+        "shapes": {
+            name: list(array.shape)
+            for name, array in samples.items()
+        },
+    }
+
+
+def _skipped_stage(reason: str) -> dict[str, Any]:
+    return {
+        "status": "skipped",
+        "reason": reason,
+    }
+
+
 def _subset_indices(all_names: tuple[str, ...], subset_names: list[str]) -> np.ndarray:
     return np.asarray([all_names.index(name) for name in subset_names], dtype=np.int64)
 
@@ -156,6 +191,40 @@ def _inject_subset(base_theta: np.ndarray, subset_idx: np.ndarray, x: Any) -> np
         jnp.asarray(x, dtype=jnp.float64)
     )
     return theta
+
+
+def _numpyro_priors_and_samples(
+    model_parameter_names: tuple[str, ...],
+    parameter_values: np.ndarray,
+    parameter_names: list[str],
+    *,
+    width_scale: float,
+    width_floor: float,
+) -> tuple[dict[str, Any], dict[str, jax.Array]]:
+    if width_scale <= 0:
+        raise ValueError(f"numpyro_prior_width_scale must be positive, got {width_scale}.")
+    if width_floor <= 0:
+        raise ValueError(f"numpyro_prior_width_floor must be positive, got {width_floor}.")
+    priors: dict[str, Any] = {}
+    samples: dict[str, jax.Array] = {}
+    for name in parameter_names:
+        if name not in model_parameter_names:
+            raise ValueError(f"Unknown NumPyro benchmark parameter {name!r}.")
+        idx = model_parameter_names.index(name)
+        center = float(parameter_values[idx])
+        width = max(abs(center) * width_scale, width_floor)
+        lower = center - width
+        upper = center + width
+        if center > 0.0 and lower <= 0.0:
+            lower = max(center * 0.5, np.finfo(float).tiny)
+        if not lower < center < upper:
+            raise ValueError(
+                f"Invalid NumPyro benchmark prior interval for {name}: "
+                f"lower={lower}, center={center}, upper={upper}."
+            )
+        priors[name] = dist.Uniform(lower, upper)
+        samples[name] = jnp.asarray(center, dtype=jnp.float64)
+    return priors, samples
 
 
 def _case_result(case: dict[str, Any]) -> dict[str, Any]:
@@ -182,6 +251,16 @@ def _case_result(case: dict[str, Any]) -> dict[str, Any]:
     x0 = parameter_values[subset_idx]
     measurement_error_scale = float(case["measurement_error_scale"])
     jitter = float(case["jitter"])
+    numpyro_parameter_names = list(
+        case.get("numpyro_parameter_subset", case["parameter_subset"])
+    )
+    numpyro_priors, numpyro_samples = _numpyro_priors_and_samples(
+        model.parameter_names,
+        parameter_values,
+        numpyro_parameter_names,
+        width_scale=float(case.get("numpyro_prior_width_scale", 0.01)),
+        width_floor=float(case.get("numpyro_prior_width_floor", 1e-4)),
+    )
 
     solve_fn = lambda: solve_first_order_model(
         model,
@@ -341,6 +420,64 @@ def _case_result(case: dict[str, Any]) -> dict[str, Any]:
             on_failure_loglikelihood=-1.0e12,
         )
     )
+    numpyro_kalman_log_density_fn = jax.jit(
+        lambda: evaluate_numpyro_kalman_log_density_jax(
+            model,
+            observations,
+            numpyro_priors,
+            numpyro_samples,
+            observables=observation_names,
+            steady_state=steady_state,
+            measurement_error_scale=measurement_error_scale,
+            jitter=jitter,
+            on_failure_loglikelihood=-1.0e12,
+            qme_algorithm="schur",
+        )
+    )
+    numpyro_switching_log_density_fn = jax.jit(
+        lambda: evaluate_numpyro_switching_log_density_jax(
+            model,
+            observations,
+            numpyro_priors,
+            numpyro_samples,
+            gate_probs=shared_gate_probs,
+            observables=observation_names,
+            base_parameter_values=parameter_values,
+            steady_state=steady_state,
+            measurement_error_scale=measurement_error_scale,
+            jitter=jitter,
+            qme_algorithm="schur",
+            on_failure_loglikelihood=-1.0e12,
+        )
+    )
+
+    def numpyro_nuts_fn() -> dict[str, jax.Array]:
+        numpyro_model = build_numpyro_kalman_model_jax(
+            model,
+            observations,
+            numpyro_priors,
+            observables=observation_names,
+            base_parameter_values=parameter_values,
+            steady_state=steady_state,
+            measurement_error_scale=measurement_error_scale,
+            jitter=jitter,
+            on_failure_loglikelihood=-1.0e12,
+            qme_algorithm="schur",
+        )
+        kernel = NUTS(
+            numpyro_model,
+            dense_mass=False,
+            target_accept_prob=float(case.get("numpyro_target_accept_prob", 0.8)),
+        )
+        mcmc = MCMC(
+            kernel,
+            num_warmup=int(case.get("numpyro_nuts_warmup", 2)),
+            num_samples=int(case.get("numpyro_nuts_samples", 2)),
+            num_chains=int(case.get("numpyro_nuts_chains", 1)),
+            progress_bar=False,
+        )
+        mcmc.run(jax.random.PRNGKey(int(case.get("numpyro_seed", 0))))
+        return mcmc.get_samples()
 
     sep_config = SEPConfig(
         periods=int(case["sep_periods"]),
@@ -418,6 +555,25 @@ def _case_result(case: dict[str, Any]) -> dict[str, Any]:
                 lambda: switching_value_fn(parameter_values),
                 steady_reps=int(case["switching_reps"]),
                 serializer=_scalar_result,
+            ),
+            "numpyro_kalman_log_density": _measure_stage(
+                numpyro_kalman_log_density_fn,
+                steady_reps=int(case.get("numpyro_log_density_reps", 0)),
+                serializer=_scalar_result,
+            ),
+            "numpyro_switching_log_density": _measure_stage(
+                numpyro_switching_log_density_fn,
+                steady_reps=int(case.get("numpyro_switching_log_density_reps", 0)),
+                serializer=_scalar_result,
+            ),
+            "numpyro_nuts_smoke": (
+                _measure_stage(
+                    numpyro_nuts_fn,
+                    steady_reps=0,
+                    serializer=_samples_result,
+                )
+                if int(case.get("numpyro_nuts_samples", 0)) > 0
+                else _skipped_stage("numpyro_nuts_samples=0")
             ),
             "sep_inversion": _measure_stage(
                 sep_fn,

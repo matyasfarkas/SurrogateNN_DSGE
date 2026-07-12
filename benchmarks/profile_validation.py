@@ -199,6 +199,26 @@ def _build_payloads(
                 "obs_sigma": obs_sigma,
                 "shock_sigmas": shock_sigmas,
                 "parameter_subset": list(case["parameter_subset"]),
+                "numpyro_parameter_subset": list(
+                    case.get("numpyro_parameter_subset", case["parameter_subset"])
+                ),
+                "numpyro_prior_width_scale": float(
+                    case.get("numpyro_prior_width_scale", 0.01)
+                ),
+                "numpyro_prior_width_floor": float(
+                    case.get("numpyro_prior_width_floor", 1e-4)
+                ),
+                "numpyro_log_density_reps": int(case.get("numpyro_log_density_reps", 0)),
+                "numpyro_switching_log_density_reps": int(
+                    case.get("numpyro_switching_log_density_reps", 0)
+                ),
+                "numpyro_nuts_warmup": int(case.get("numpyro_nuts_warmup", 0)),
+                "numpyro_nuts_samples": int(case.get("numpyro_nuts_samples", 0)),
+                "numpyro_nuts_chains": int(case.get("numpyro_nuts_chains", 1)),
+                "numpyro_target_accept_prob": float(
+                    case.get("numpyro_target_accept_prob", 0.8)
+                ),
+                "numpyro_seed": int(case.get("numpyro_seed", 0)),
                 "measurement_error_scale": float(case["measurement_error_scale"]),
                 "jitter": float(case["jitter"]),
                 "solve_reps": int(case["solve_reps"]),
@@ -291,6 +311,9 @@ def _stage_table(
         "gate_stats",
         "switching_fixed",
         "switching_value",
+        "numpyro_kalman_log_density",
+        "numpyro_switching_log_density",
+        "numpyro_nuts_smoke",
         "sep_inversion",
     ]
     for stage in stages:
@@ -548,6 +571,12 @@ def _report_text(
         medium_python,
         "kalman_grad",
     )
+    nuts_error = _stage_error(small_python, "numpyro_nuts_smoke") or _stage_error(
+        medium_python,
+        "numpyro_nuts_smoke",
+    )
+    small_numpyro_kalman = _stage_value(small_python, "numpyro_kalman_log_density")
+    small_numpyro_switching = _stage_value(small_python, "numpyro_switching_log_density")
 
     report_lines = [
         "# Python/JAX vs Julia Profile",
@@ -564,6 +593,7 @@ def _report_text(
         f"- JAX devices: {', '.join(python_results['cases'][payload['cases'][0]['name']]['model_info']['jax_devices'])}",
         f"- Julia version: {julia_results['julia_version']}",
         f"- Threads requested: {config['global']['thread_count']}",
+        f"- JAX platform setting: {config['global'].get('jax_platform_name', 'auto')}",
         "",
         "## Scope",
         "",
@@ -624,6 +654,14 @@ def _report_text(
         report_lines.append(
             f"- Python/JAX reverse-mode likelihood differentiation still failed during the benchmark with `{grad_error}`."
         )
+    if small_numpyro_kalman is not None and small_numpyro_switching is not None:
+        report_lines.append(
+            f"- Small-model NumPyro/JAX log densities evaluated successfully: Kalman {small_numpyro_kalman:.6f}, switching {small_numpyro_switching:.6f}."
+        )
+    if nuts_error is not None:
+        report_lines.append(
+            f"- NumPyro NUTS smoke did not complete on the benchmark DSGE model: `{nuts_error}`."
+        )
     report_lines.extend(
         [
             "- JAX only exposed `TFRT_CPU_0` in this environment, so this remains a CPU benchmark rather than a live GPU benchmark.",
@@ -672,6 +710,7 @@ def _report_text(
             "- `steady median` is the more relevant figure for repeated estimation inner loops.",
             "- `kalman_grad` still uses the doubling QME path in both environments because the current JAX Schur path is not reverse-mode differentiable.",
             "- Fixed-gate switching isolates the likelihood mixer on shared gates; automatic switching also exercises gate reconstruction and filtering in each environment.",
+            "- NumPyro stages use the Python/JAX likelihood wrappers with calibrated-parameter-centered benchmark priors; Julia has no matching NumPyro stage, so those rows validate JAX+NumPyro runtime coverage rather than cross-language sampler parity.",
             "- The parity tables should be read before the timing tables. Any stage with weak parity should not be used to make strong runtime claims.",
         ]
     )
@@ -710,10 +749,12 @@ def main() -> None:
             "OMP_NUM_THREADS": thread_count,
             "OPENBLAS_NUM_THREADS": thread_count,
             "VECLIB_MAXIMUM_THREADS": thread_count,
-            "JAX_PLATFORM_NAME": "cpu",
             "XLA_FLAGS": f"--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads={thread_count}",
         }
     )
+    jax_platform_name = str(config["global"].get("jax_platform_name", "auto"))
+    if jax_platform_name and jax_platform_name != "auto":
+        python_env["JAX_PLATFORM_NAME"] = jax_platform_name
     python_cmd = [
         str(config["global"]["python_executable"]),
         str(BENCH_DIR / "profile_validation_python.py"),

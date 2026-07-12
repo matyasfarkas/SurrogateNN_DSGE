@@ -18,6 +18,7 @@ from surrogatenn_dsge import (
     parameters_with_theta_mode,
     parse_macro_model,
     predict_additive_residual,
+    predict_additive_residual_ood,
     predict_from_full,
     rollout_observations,
     run_chunked_sampling,
@@ -90,6 +91,18 @@ def test_named_parameter_helpers_match_julia_behavior() -> None:
             theta_names,
             theta_vals,
             theta_mode="synthetic",
+        ),
+        np.asarray([1.5, 20.0, 3.5], dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+    np.testing.assert_allclose(
+        parameters_with_theta_mode(
+            base_params,
+            model_params,
+            theta_names,
+            theta_vals,
+            theta_mode="current",
         ),
         np.asarray([1.5, 20.0, 3.5], dtype=np.float64),
         rtol=0.0,
@@ -249,6 +262,40 @@ def test_callback_based_loglik_helpers_match_julia_toy_cases() -> None:
             allow_full_residual=True,
         )
 
+    norm_stats_id = {
+        "μX": np.zeros((3,), dtype=np.float64),
+        "σX": np.full((3,), 10.0, dtype=np.float64),
+    }
+    obs_id, state_id = predict_additive_residual_ood(
+        _predict_full,
+        lambda state, shock_t, theta_local: jnp.asarray([100.0], dtype=jnp.float64),
+        [0.0],
+        [1.0],
+        [0.0],
+        1,
+        norm_stats_id,
+        z_threshold=4.0,
+    )
+    np.testing.assert_allclose(obs_id, np.asarray([101.0], dtype=np.float64))
+    np.testing.assert_allclose(state_id, np.asarray([1.0], dtype=np.float64))
+
+    norm_stats_ood = {
+        "μX": np.zeros((3,), dtype=np.float64),
+        "σX": np.full((3,), 0.1, dtype=np.float64),
+    }
+    obs_ood, state_ood = predict_additive_residual_ood(
+        _predict_full,
+        lambda state, shock_t, theta_local: jnp.asarray([100.0], dtype=jnp.float64),
+        [0.0],
+        [1.0],
+        [0.0],
+        1,
+        norm_stats_ood,
+        z_threshold=4.0,
+    )
+    np.testing.assert_allclose(obs_ood, np.asarray([1.0], dtype=np.float64))
+    np.testing.assert_allclose(state_ood, np.asarray([1.0], dtype=np.float64))
+
     ll_additive = additive_residual_loglik_per_period(
         _predict_full,
         lambda state, shock_t, theta_local: jnp.asarray([0.5], dtype=jnp.float64),
@@ -358,6 +405,62 @@ def test_rollout_advance_and_inversion_helpers_match_toy_behavior() -> None:
     assert shocks_inv.shape == (2, 2)
     assert np.isfinite(ll_inv).all()
     assert np.isfinite(shocks_inv).all()
+
+    batch_called = {"value": False}
+    ll_batch, _ = inversion_loglik_per_period(
+        _predict_toy,
+        [0.0],
+        [0.0],
+        np.asarray([[1.0, 0.5]], dtype=np.float64),
+        [0.1],
+        [0.5, 0.0],
+        batch_eval_residual_fn=lambda x_nn: (
+            batch_called.__setitem__("value", True)
+            or np.full((1, x_nn.shape[1]), 0.5, dtype=np.float64)
+        ),
+        maxit=12,
+        tol=1e-8,
+        lambda_=1e-6,
+    )
+    assert batch_called["value"]
+    assert ll_batch.shape == ll_inv.shape
+    assert float(np.sum(ll_batch)) < float(np.sum(ll_inv))
+
+    def predict_zero(state, shock_t, theta_local):
+        return jnp.asarray([0.0], dtype=jnp.float64), jnp.asarray([state[0]], dtype=jnp.float64)
+
+    def eval_linear_shock(state, shock_t, theta_local):
+        shock_arr = jnp.asarray(shock_t, dtype=jnp.float64)
+        return jnp.asarray([shock_arr[0]], dtype=jnp.float64), jnp.asarray([state[0]], dtype=jnp.float64)
+
+    _, shocks_refined = inversion_loglik_per_period(
+        predict_zero,
+        [0.0],
+        [0.0],
+        np.asarray([[10.0]], dtype=np.float64),
+        [0.1],
+        [0.5],
+        eval_predict_fn=eval_linear_shock,
+        maxit=1,
+        tol=1e-8,
+        lambda_=1e-6,
+        refine_maxit=1,
+        refine_tol=1e-8,
+        refine_max_step_std=0.25,
+        refine_min_alpha=1e-3,
+    )
+    assert abs(shocks_refined[0, 0]) <= 0.25 * 0.5 + 1e-10
+
+    with pytest.raises(ValueError, match="refine_max_step_std must be positive"):
+        inversion_loglik_per_period(
+            _predict_toy,
+            [0.0],
+            [0.0],
+            np.asarray([[1.0]], dtype=np.float64),
+            [0.1],
+            [0.5],
+            refine_max_step_std=0.0,
+        )
 
     ll_lin_sampling = linear_reference_loglik_per_period(
         [0.0],

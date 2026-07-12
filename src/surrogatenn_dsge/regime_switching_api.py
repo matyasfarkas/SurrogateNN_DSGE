@@ -163,9 +163,9 @@ def parameters_with_theta_mode(
     mode = str(theta_mode)
     if mode == "baseline":
         return _as_float_vector(base_params, label="base_params").copy()
-    if mode == "synthetic":
+    if mode in {"synthetic", "current"}:
         if theta_values is None:
-            raise ValueError(f"{mode_label}='synthetic' requires theta values.")
+            raise ValueError(f"{mode_label}='{mode}' requires theta values.")
         return override_named_parameters(
             base_params,
             model_parameter_names,
@@ -174,7 +174,7 @@ def parameters_with_theta_mode(
             label=theta_label,
         )
     raise ValueError(
-        f"Unknown {mode_label}={theta_mode!r}. Use 'baseline' or 'synthetic'."
+        f"Unknown {mode_label}={theta_mode!r}. Use 'baseline', 'current', or 'synthetic'."
     )
 
 
@@ -233,6 +233,32 @@ def predict_from_full(
     return split_observation_state(y_full, d_obs, label="full_predict output")
 
 
+def _combine_additive_residual(
+    y_full: np.ndarray,
+    y_resid: np.ndarray,
+    d_obs: int,
+    *,
+    allow_full_residual: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    if y_resid.shape[0] == int(d_obs):
+        obs_base, state_next = split_observation_state(
+            y_full,
+            d_obs,
+            label="full_predict output",
+        )
+        return obs_base + y_resid, state_next
+    if allow_full_residual and y_resid.shape[0] == y_full.shape[0]:
+        return split_observation_state(
+            y_full + y_resid,
+            d_obs,
+            label="residual-augmented output",
+        )
+    allow_msg = f" or {y_full.shape[0]}" if allow_full_residual else ""
+    raise ValueError(
+        f"Residual output size mismatch: got {y_resid.shape[0]}, expected {int(d_obs)}{allow_msg}."
+    )
+
+
 def predict_additive_residual(
     full_predict: Callable[[Any, Any, Any], Any],
     residual_predict: Callable[[Any, Any, Any], Any],
@@ -257,22 +283,103 @@ def predict_additive_residual(
         theta,
         label="residual_predict output",
     )
-    if y_resid.shape[0] == int(d_obs):
-        obs_base, state_next = split_observation_state(
+    return _combine_additive_residual(
+        y_full,
+        y_resid,
+        d_obs,
+        allow_full_residual=allow_full_residual,
+    )
+
+
+def _norm_stats_value(norm_stats: Any, keys: tuple[str, ...], *, label: str) -> np.ndarray:
+    if isinstance(norm_stats, Mapping):
+        for key in keys:
+            if key in norm_stats:
+                return _as_float_vector(norm_stats[key], label=label)
+    else:
+        for key in keys:
+            if hasattr(norm_stats, key):
+                return _as_float_vector(getattr(norm_stats, key), label=label)
+        if isinstance(norm_stats, (tuple, list)) and len(norm_stats) >= 2:
+            if label.endswith("mean"):
+                return _as_float_vector(norm_stats[0], label=label)
+            return _as_float_vector(norm_stats[1], label=label)
+    raise ValueError(
+        f"norm_stats is missing {label}; expected one of {', '.join(keys)}."
+    )
+
+
+def _input_norm_stats(norm_stats: Any) -> tuple[np.ndarray, np.ndarray]:
+    mu = _norm_stats_value(
+        norm_stats,
+        ("μX", "muX", "mu_x", "x_mean", "input_mean", "mean", "mu"),
+        label="input mean",
+    )
+    sigma = _norm_stats_value(
+        norm_stats,
+        ("σX", "sigmaX", "sigma_x", "x_std", "input_std", "std", "sigma"),
+        label="input std",
+    )
+    if mu.shape != sigma.shape:
+        raise ValueError(f"norm_stats mean/std shape mismatch: {mu.shape} vs {sigma.shape}.")
+    if not np.isfinite(mu).all() or not np.isfinite(sigma).all():
+        raise ValueError("norm_stats contains non-finite values.")
+    if not np.all(sigma > 0):
+        raise ValueError("norm_stats input std must be strictly positive.")
+    return mu, sigma
+
+
+def predict_additive_residual_ood(
+    full_predict: Callable[[Any, Any, Any], Any],
+    residual_predict: Callable[[Any, Any, Any], Any],
+    state: Sequence[float] | np.ndarray | jax.Array,
+    shocks: Sequence[float] | np.ndarray | jax.Array,
+    theta: Sequence[float] | np.ndarray | jax.Array,
+    d_obs: int,
+    norm_stats: Any,
+    *,
+    z_threshold: float = 4.0,
+    allow_full_residual: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    threshold = float(z_threshold)
+    if threshold <= 0:
+        raise ValueError(f"z_threshold must be positive, got {z_threshold}.")
+    state_vec = _as_float_vector(state, label="state")
+    shock_vec = _as_float_vector(shocks, label="shocks")
+    theta_vec = _as_float_vector(theta, label="theta")
+    x_input = np.concatenate([state_vec, shock_vec, theta_vec], axis=0)
+    mu, sigma = _input_norm_stats(norm_stats)
+    if x_input.shape[0] != mu.shape[0]:
+        raise ValueError(
+            f"norm_stats input length mismatch: got {mu.shape[0]}, expected {x_input.shape[0]}."
+        )
+
+    y_full = _call_full_predict(
+        full_predict,
+        state,
+        shocks,
+        theta,
+        label="full_predict output",
+    )
+    if float(np.max(np.abs((x_input - mu) / sigma))) > threshold:
+        return split_observation_state(
             y_full,
             d_obs,
-            label="full_predict output",
+            label="full_predict output (OOD fallback)",
         )
-        return obs_base + y_resid, state_next
-    if allow_full_residual and y_resid.shape[0] == y_full.shape[0]:
-        return split_observation_state(
-            y_full + y_resid,
-            d_obs,
-            label="residual-augmented output",
-        )
-    allow_msg = f" or {y_full.shape[0]}" if allow_full_residual else ""
-    raise ValueError(
-        f"Residual output size mismatch: got {y_resid.shape[0]}, expected {int(d_obs)}{allow_msg}."
+
+    y_resid = _call_full_predict(
+        residual_predict,
+        state,
+        shocks,
+        theta,
+        label="residual_predict output",
+    )
+    return _combine_additive_residual(
+        y_full,
+        y_resid,
+        d_obs,
+        allow_full_residual=allow_full_residual,
     )
 
 
@@ -489,6 +596,352 @@ def _jacobian_wrt_structural_shocks(
     return jacobian
 
 
+def _full_shock_vector(d_eps: int, structural_zero_based: np.ndarray, eps_struct: np.ndarray) -> np.ndarray:
+    eps_full = np.zeros((d_eps,), dtype=np.float64)
+    eps_full[structural_zero_based] = eps_struct
+    return eps_full
+
+
+def _clamp_residual_vector(
+    values: Sequence[float] | np.ndarray | jax.Array,
+    correction_clamp: Optional[Sequence[float] | np.ndarray | jax.Array],
+    *,
+    label: str,
+) -> np.ndarray:
+    vector = _as_float_vector(values, label=label)
+    if correction_clamp is None:
+        return vector
+    clamp = np.asarray(correction_clamp, dtype=np.float64).reshape(-1)
+    if clamp.size == 1:
+        bound = np.full_like(vector, float(clamp[0]))
+    else:
+        bound = _as_float_vector(correction_clamp, label="correction_clamp")
+        if bound.shape[0] != vector.shape[0]:
+            raise ValueError(
+                "correction_clamp length mismatch: "
+                f"{bound.shape[0]} vs residual output length {vector.shape[0]}."
+            )
+    if not np.isfinite(bound).all():
+        raise ValueError("correction_clamp contains non-finite values.")
+    if not np.all(bound >= 0):
+        raise ValueError("correction_clamp must be nonnegative.")
+    return np.minimum(np.maximum(vector, -bound), bound)
+
+
+def _evaluate_inversion_model(
+    predict_fn: Callable[[Any, Any, Any], tuple[Any, Any]],
+    state: np.ndarray,
+    eps_full: np.ndarray,
+    theta: np.ndarray,
+    d_obs: int,
+    *,
+    period_idx: int,
+    eval_predict_fn: Optional[Callable[[Any, Any, Any], tuple[Any, Any]]] = None,
+    single_eval_residual_fn: Optional[Callable[[Any], Any]] = None,
+    gate_mask: Optional[np.ndarray] = None,
+    correction_clamp: Optional[Sequence[float] | np.ndarray | jax.Array] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    if single_eval_residual_fn is not None:
+        obs_rom, state_rom_next = _call_predict(predict_fn, state, eps_full, theta)
+        x_nn = np.concatenate([state, eps_full, theta], axis=0)
+        y_nn = _clamp_residual_vector(
+            single_eval_residual_fn(x_nn),
+            correction_clamp,
+            label="single_eval_residual_fn output",
+        )
+        if y_nn.shape[0] < int(d_obs):
+            raise ValueError(
+                "single_eval_residual_fn output length mismatch: "
+                f"got {y_nn.shape[0]}, expected at least d_obs={int(d_obs)}."
+            )
+        obs_pred = obs_rom + y_nn[: int(d_obs)]
+        if gate_mask is not None and bool(gate_mask[period_idx]) and y_nn.shape[0] > int(d_obs):
+            state_resid = y_nn[int(d_obs) :]
+            if state_resid.shape[0] == 0:
+                state_next = state_rom_next
+            elif state_resid.shape[0] == state_rom_next.shape[0]:
+                state_next = state_rom_next + state_resid
+            else:
+                raise ValueError(
+                    "single_eval_residual_fn state residual length mismatch: "
+                    f"{state_resid.shape[0]} vs state length {state_rom_next.shape[0]}."
+                )
+        else:
+            state_next = state_rom_next
+        return obs_pred, state_next
+    if eval_predict_fn is not None:
+        return _call_predict(eval_predict_fn, state, eps_full, theta)
+    return _call_predict(predict_fn, state, eps_full, theta)
+
+
+def _period_inversion_objective(
+    predict_fn: Callable[[Any, Any, Any], tuple[Any, Any]],
+    state: np.ndarray,
+    eps_full: np.ndarray,
+    theta: np.ndarray,
+    y_obs: np.ndarray,
+    obs_sigma: np.ndarray,
+    shock_std: np.ndarray,
+    structural_zero_based: np.ndarray,
+    obs_log_norm_const: float,
+    shock_log_norm_const: float,
+    d_obs: int,
+    *,
+    period_idx: int,
+    eval_predict_fn: Optional[Callable[[Any, Any, Any], tuple[Any, Any]]] = None,
+    single_eval_residual_fn: Optional[Callable[[Any], Any]] = None,
+    gate_mask: Optional[np.ndarray] = None,
+    correction_clamp: Optional[Sequence[float] | np.ndarray | jax.Array] = None,
+) -> tuple[float, np.ndarray, np.ndarray]:
+    obs_pred, state_next = _evaluate_inversion_model(
+        predict_fn,
+        state,
+        eps_full,
+        theta,
+        d_obs,
+        period_idx=period_idx,
+        eval_predict_fn=eval_predict_fn,
+        single_eval_residual_fn=single_eval_residual_fn,
+        gate_mask=gate_mask,
+        correction_clamp=correction_clamp,
+    )
+    if not np.isfinite(obs_pred).all() or not np.isfinite(state_next).all():
+        return -np.inf, obs_pred, state_next
+    resid = (y_obs - obs_pred) / obs_sigma
+    ll_t = -0.5 * (float(np.sum(resid**2)) + obs_log_norm_const)
+    if structural_zero_based.size:
+        eps_struct = eps_full[structural_zero_based]
+        ll_t += -0.5 * (
+            float(np.sum((eps_struct / shock_std) ** 2)) + shock_log_norm_const
+        )
+    return ll_t, obs_pred, state_next
+
+
+def _finite_difference_eval_jacobian(
+    predict_fn: Callable[[Any, Any, Any], tuple[Any, Any]],
+    state: np.ndarray,
+    theta: np.ndarray,
+    d_eps: int,
+    structural_zero_based: np.ndarray,
+    eps_struct: np.ndarray,
+    d_obs: int,
+    *,
+    period_idx: int,
+    eval_predict_fn: Optional[Callable[[Any, Any, Any], tuple[Any, Any]]] = None,
+    single_eval_residual_fn: Optional[Callable[[Any], Any]] = None,
+    gate_mask: Optional[np.ndarray] = None,
+    correction_clamp: Optional[Sequence[float] | np.ndarray | jax.Array] = None,
+) -> np.ndarray:
+    fd_step = 1e-6
+    base = np.asarray(eps_struct, dtype=np.float64)
+    base_full = _full_shock_vector(d_eps, structural_zero_based, base)
+    base_obs, _ = _evaluate_inversion_model(
+        predict_fn,
+        state,
+        base_full,
+        theta,
+        d_obs,
+        period_idx=period_idx,
+        eval_predict_fn=eval_predict_fn,
+        single_eval_residual_fn=single_eval_residual_fn,
+        gate_mask=gate_mask,
+        correction_clamp=correction_clamp,
+    )
+    jacobian = np.zeros((base_obs.shape[0], base.shape[0]), dtype=np.float64)
+    for col in range(base.shape[0]):
+        bumped = base.copy()
+        bumped[col] += fd_step
+        obs_bumped, _ = _evaluate_inversion_model(
+            predict_fn,
+            state,
+            _full_shock_vector(d_eps, structural_zero_based, bumped),
+            theta,
+            d_obs,
+            period_idx=period_idx,
+            eval_predict_fn=eval_predict_fn,
+            single_eval_residual_fn=single_eval_residual_fn,
+            gate_mask=gate_mask,
+            correction_clamp=correction_clamp,
+        )
+        jacobian[:, col] = (obs_bumped - base_obs) / fd_step
+    return jacobian
+
+
+def _as_residual_matrix(values: Any, *, label: str, periods: int) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim == 1:
+        if periods != 1:
+            raise ValueError(
+                f"{label} must be rank-2 for {periods} periods, got shape {array.shape}."
+            )
+        return array.reshape(-1, 1)
+    if array.ndim != 2:
+        raise ValueError(f"{label} must be rank-2, got shape {array.shape}.")
+    if array.shape[1] != periods:
+        raise ValueError(
+            f"{label} period mismatch: got {array.shape[1]}, expected {periods}."
+        )
+    return array
+
+
+def _clamp_residual_matrix(
+    values: Any,
+    correction_clamp: Optional[Sequence[float] | np.ndarray | jax.Array],
+    *,
+    label: str,
+    periods: int,
+) -> np.ndarray:
+    matrix = _as_residual_matrix(values, label=label, periods=periods)
+    if correction_clamp is None:
+        return matrix
+    clamp = np.asarray(correction_clamp, dtype=np.float64).reshape(-1)
+    if clamp.size == 1:
+        bound = np.full((matrix.shape[0], 1), float(clamp[0]), dtype=np.float64)
+    else:
+        if clamp.shape[0] != matrix.shape[0]:
+            raise ValueError(
+                "correction_clamp length mismatch: "
+                f"{clamp.shape[0]} vs residual output rows {matrix.shape[0]}."
+            )
+        bound = clamp.reshape(-1, 1)
+    if not np.isfinite(bound).all():
+        raise ValueError("correction_clamp contains non-finite values.")
+    if not np.all(bound >= 0):
+        raise ValueError("correction_clamp must be nonnegative.")
+    return np.minimum(np.maximum(matrix, -bound), bound)
+
+
+def _batch_residual_inversion_loglik(
+    predict_fn: Callable[[Any, Any, Any], tuple[Any, Any]],
+    s0: np.ndarray,
+    theta: np.ndarray,
+    observations: np.ndarray,
+    obs_sigma: np.ndarray,
+    shock_sigmas: np.ndarray,
+    shocks_out: np.ndarray,
+    batch_eval_residual_fn: Callable[[Any], Any],
+    structural_zero_based: np.ndarray,
+    shock_log_norm_const: float,
+    *,
+    single_eval_residual_fn: Optional[Callable[[Any], Any]] = None,
+    gate_mask: Optional[np.ndarray] = None,
+    correction_clamp: Optional[Sequence[float] | np.ndarray | jax.Array] = None,
+) -> np.ndarray:
+    d_obs, periods = observations.shape
+    d_state = s0.shape[0]
+    theta_col = theta.reshape(-1, 1)
+
+    if gate_mask is not None and single_eval_residual_fn is not None and bool(np.any(gate_mask)):
+        obs_pred = np.zeros((d_obs, periods), dtype=np.float64)
+        input_states = np.zeros((d_state, periods), dtype=np.float64)
+        state_rom = s0.copy()
+        for period in range(periods):
+            input_states[:, period] = state_rom
+            obs_t, state_next = _call_predict(
+                predict_fn,
+                state_rom,
+                shocks_out[:, period],
+                theta,
+            )
+            if bool(gate_mask[period]):
+                x_nn = np.concatenate([state_rom, shocks_out[:, period], theta], axis=0)
+                y_nn = _clamp_residual_vector(
+                    single_eval_residual_fn(x_nn),
+                    correction_clamp,
+                    label="single_eval_residual_fn output",
+                )
+                if y_nn.shape[0] < d_obs:
+                    raise ValueError(
+                        "single_eval_residual_fn output length mismatch: "
+                        f"got {y_nn.shape[0]}, expected at least d_obs={d_obs}."
+                    )
+                obs_pred[:, period] = obs_t + y_nn[:d_obs]
+                state_resid = y_nn[d_obs:]
+                if state_resid.shape[0] == state_next.shape[0]:
+                    state_rom = state_next + state_resid
+                elif state_resid.shape[0] == 0:
+                    state_rom = state_next
+                else:
+                    raise ValueError(
+                        "single_eval_residual_fn state residual length mismatch: "
+                        f"{state_resid.shape[0]} vs state length {state_next.shape[0]}."
+                    )
+            else:
+                obs_pred[:, period] = obs_t
+                state_rom = state_next
+
+        non_gate_idx = np.flatnonzero(~gate_mask)
+        if non_gate_idx.size:
+            x_nn_ng = np.vstack(
+                [
+                    input_states[:, non_gate_idx],
+                    shocks_out[:, non_gate_idx],
+                    np.repeat(theta_col, non_gate_idx.size, axis=1),
+                ]
+            )
+            y_nn_ng = _clamp_residual_matrix(
+                batch_eval_residual_fn(x_nn_ng),
+                correction_clamp,
+                label="batch_eval_residual_fn output",
+                periods=non_gate_idx.size,
+            )
+            if y_nn_ng.shape[0] < d_obs:
+                raise ValueError(
+                    "batch_eval_residual_fn output row mismatch: "
+                    f"got {y_nn_ng.shape[0]}, expected at least d_obs={d_obs}."
+                )
+            obs_pred[:, non_gate_idx] += y_nn_ng[:d_obs, :]
+    else:
+        input_states = np.zeros((d_state, periods), dtype=np.float64)
+        rom_obs = np.zeros((d_obs, periods), dtype=np.float64)
+        state_rom = s0.copy()
+        for period in range(periods):
+            input_states[:, period] = state_rom
+            obs_t, state_rom = _call_predict(
+                predict_fn,
+                state_rom,
+                shocks_out[:, period],
+                theta,
+            )
+            if obs_t.shape[0] != d_obs:
+                raise ValueError(
+                    "predict_fn observation length mismatch during batch replay: "
+                    f"{obs_t.shape[0]} vs {d_obs}."
+                )
+            rom_obs[:, period] = obs_t
+        x_nn = np.vstack(
+            [
+                input_states,
+                shocks_out,
+                np.repeat(theta_col, periods, axis=1),
+            ]
+        )
+        y_nn = _clamp_residual_matrix(
+            batch_eval_residual_fn(x_nn),
+            correction_clamp,
+            label="batch_eval_residual_fn output",
+            periods=periods,
+        )
+        if y_nn.shape[0] < d_obs:
+            raise ValueError(
+                "batch_eval_residual_fn output row mismatch: "
+                f"got {y_nn.shape[0]}, expected at least d_obs={d_obs}."
+            )
+        obs_pred = rom_obs + y_nn[:d_obs, :]
+
+    log_norm_sum = float(np.sum(np.log(2.0 * np.pi * obs_sigma**2)))
+    resid_scaled = (observations - obs_pred) / obs_sigma[:, None]
+    ll_eval = -0.5 * (np.sum(resid_scaled**2, axis=0) + log_norm_sum)
+    if structural_zero_based.size:
+        shock_std = shock_sigmas[structural_zero_based]
+        shock_penalty = -0.5 * (
+            np.sum((shocks_out[structural_zero_based, :] / shock_std[:, None]) ** 2, axis=0)
+            + shock_log_norm_const
+        )
+        ll_eval = ll_eval + shock_penalty
+    return np.asarray(ll_eval, dtype=np.float64)
+
+
 def inversion_step(
     predict_fn: Callable[[Any, Any, Any], tuple[Any, Any]],
     state: Sequence[float] | np.ndarray | jax.Array,
@@ -565,15 +1018,17 @@ def inversion_step(
         return eps_full, state_next, ll
 
     shock_log_norm_const = float(np.sum(np.log(2.0 * np.pi * shock_std**2)))
-    for _ in range(maxit_int):
-        eps_full = np.zeros((d_eps,), dtype=np.float64)
-        eps_full[structural] = eps_struct
+    lambda_eff = lambda_float
+    for inv_iter in range(maxit_int):
+        eps_full = _full_shock_vector(d_eps, structural, eps_struct)
         obs_pred, _ = _call_predict(
             predict_fn,
             state_vec,
             eps_full,
             theta_vec,
         )
+        if not np.isfinite(obs_pred).all():
+            break
         resid = (y_obs_vec - obs_pred) / obs_sigma_vec
         r = np.concatenate([resid, eps_struct / shock_std], axis=0)
 
@@ -585,24 +1040,44 @@ def inversion_step(
             structural,
             eps_struct,
         )
+        if not np.isfinite(jacobian).all():
+            break
         j_obs = -(jacobian / obs_sigma_vec[:, None])
         j_prior = np.diag(1.0 / shock_std)
         j_aug = np.vstack([j_obs, j_prior])
-        lhs = j_aug.T @ j_aug + lambda_float * np.eye(structural.shape[0], dtype=np.float64)
+        lhs = j_aug.T @ j_aug + lambda_eff * np.eye(structural.shape[0], dtype=np.float64)
+        diag_vals = np.diag(lhs)
+        kappa_approx = float(np.max(diag_vals) / max(float(np.min(diag_vals)), np.finfo(float).eps))
+        if kappa_approx > 1e10:
+            kappa = float(np.linalg.cond(lhs))
+            if kappa > 1e14:
+                lambda_eff = max(lambda_eff * 10.0, 1e-2)
+                lhs = j_aug.T @ j_aug + lambda_eff * np.eye(
+                    structural.shape[0],
+                    dtype=np.float64,
+                )
+        elif kappa_approx < 1e4 and lambda_eff > lambda_float and inv_iter > 0:
+            lambda_eff = max(lambda_eff / 2.0, lambda_float)
         rhs = -(j_aug.T @ r)
-        step = np.linalg.solve(lhs, rhs)
+        try:
+            step = np.linalg.solve(lhs, rhs)
+        except np.linalg.LinAlgError:
+            step = np.full((structural.shape[0],), np.nan, dtype=np.float64)
+        if not np.isfinite(step).all():
+            break
         eps_struct = eps_struct + step
         if np.linalg.norm(step) <= tol_float * (1.0 + np.linalg.norm(eps_struct)):
             break
 
-    eps_full = np.zeros((d_eps,), dtype=np.float64)
-    eps_full[structural] = eps_struct
+    eps_full = _full_shock_vector(d_eps, structural, eps_struct)
     obs_pred, state_next = _call_predict(
         predict_fn,
         state_vec,
         eps_full,
         theta_vec,
     )
+    if not np.isfinite(obs_pred).all() or not np.isfinite(state_next).all():
+        return eps_full, state_vec, -np.inf
     resid = (y_obs_vec - obs_pred) / obs_sigma_vec
     ll = -0.5 * (
         float(np.sum(resid**2))
@@ -621,19 +1096,50 @@ def inversion_loglik_per_period(
     obs_sigma: Sequence[float] | np.ndarray | jax.Array,
     shock_sigmas: Sequence[float] | np.ndarray | jax.Array,
     *,
+    eval_predict_fn: Optional[Callable[[Any, Any, Any], tuple[Any, Any]]] = None,
+    batch_eval_residual_fn: Optional[Callable[[Any], Any]] = None,
     maxit: int = 10,
     tol: float = 1e-6,
     lambda_: float = 1e-4,
+    refine_maxit: int = 0,
+    refine_tol: float = 1e-4,
+    refine_max_step_std: float = 2.0,
+    refine_min_alpha: float = 1e-3,
+    refine_accept_tol: float = 1e-10,
+    single_eval_residual_fn: Optional[Callable[[Any], Any]] = None,
+    gate_mask: Optional[Sequence[bool] | np.ndarray] = None,
+    correction_clamp: Optional[Sequence[float] | np.ndarray | jax.Array] = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     maxit_int = int(maxit)
     tol_float = float(tol)
     lambda_float = float(lambda_)
+    refine_maxit_int = int(refine_maxit)
+    refine_tol_float = float(refine_tol)
+    refine_max_step_std_float = float(refine_max_step_std)
+    refine_min_alpha_float = float(refine_min_alpha)
+    refine_accept_tol_float = float(refine_accept_tol)
     if maxit_int <= 0:
         raise ValueError(f"maxit must be positive, got {maxit}.")
     if tol_float <= 0:
         raise ValueError(f"tol must be positive, got {tol}.")
     if lambda_float < 0:
         raise ValueError(f"lambda must be nonnegative, got {lambda_}.")
+    if refine_maxit_int < 0:
+        raise ValueError(f"refine_maxit must be nonnegative, got {refine_maxit}.")
+    if refine_tol_float <= 0:
+        raise ValueError(f"refine_tol must be positive, got {refine_tol}.")
+    if refine_max_step_std_float <= 0:
+        raise ValueError(
+            f"refine_max_step_std must be positive, got {refine_max_step_std}."
+        )
+    if not (0.0 < refine_min_alpha_float <= 1.0):
+        raise ValueError(
+            f"refine_min_alpha must be in (0, 1], got {refine_min_alpha}."
+        )
+    if refine_accept_tol_float < 0:
+        raise ValueError(
+            f"refine_accept_tol must be nonnegative, got {refine_accept_tol}."
+        )
 
     observations = _as_float_matrix(obs_data, label="obs_data")
     obs_sigma_vec = _as_float_vector(obs_sigma, label="obs_sigma")
@@ -647,9 +1153,29 @@ def inversion_loglik_per_period(
     state = _as_float_vector(s0, label="s0")
     theta_vec = _as_float_vector(theta, label="theta")
     structural_idx = np.flatnonzero(shock_sigma_vec > 0.0) + 1
+    structural_zero = structural_idx - 1
+    shock_std = shock_sigma_vec[structural_zero] if structural_zero.size else np.zeros((0,), dtype=np.float64)
+    obs_log_norm_const = float(np.sum(np.log(2.0 * np.pi * obs_sigma_vec**2)))
+    shock_log_norm_const = (
+        float(np.sum(np.log(2.0 * np.pi * shock_std**2))) if structural_zero.size else 0.0
+    )
+    gate_vec: Optional[np.ndarray]
+    if gate_mask is None:
+        gate_vec = None
+    else:
+        gate_vec = np.asarray(gate_mask, dtype=bool).reshape(-1)
+        if gate_vec.shape[0] != observations.shape[1]:
+            raise ValueError(
+                f"gate_mask length mismatch: {gate_vec.shape[0]} vs {observations.shape[1]} periods."
+            )
     eps_init = np.zeros((structural_idx.shape[0],), dtype=np.float64)
     ll = np.zeros((observations.shape[1],), dtype=np.float64)
     shocks_out = np.zeros((shock_sigma_vec.shape[0], observations.shape[1]), dtype=np.float64)
+    do_refine = (
+        refine_maxit_int > 0
+        and structural_zero.size > 0
+        and eval_predict_fn is not None
+    )
 
     for period in range(observations.shape[1]):
         eps_full, state_next, ll_t = inversion_step(
@@ -665,10 +1191,165 @@ def inversion_loglik_per_period(
             tol=tol_float,
             lambda_=lambda_float,
         )
+        if do_refine:
+            current_obj, _, _ = _period_inversion_objective(
+                predict_fn,
+                state,
+                eps_full,
+                theta_vec,
+                observations[:, period],
+                obs_sigma_vec,
+                shock_std,
+                structural_zero,
+                obs_log_norm_const,
+                shock_log_norm_const,
+                observations.shape[0],
+                period_idx=period,
+                eval_predict_fn=eval_predict_fn,
+                single_eval_residual_fn=single_eval_residual_fn,
+                gate_mask=gate_vec,
+                correction_clamp=correction_clamp,
+            )
+            if not np.isfinite(current_obj):
+                shocks_out[:, period] = eps_full
+                ll[period] = -1e10
+                continue
+
+            for _ in range(refine_maxit_int):
+                obs_nl, _ = _evaluate_inversion_model(
+                    predict_fn,
+                    state,
+                    eps_full,
+                    theta_vec,
+                    observations.shape[0],
+                    period_idx=period,
+                    eval_predict_fn=eval_predict_fn,
+                    single_eval_residual_fn=single_eval_residual_fn,
+                    gate_mask=gate_vec,
+                    correction_clamp=correction_clamp,
+                )
+                if not np.isfinite(obs_nl).all():
+                    break
+                r_obs = observations[:, period] - obs_nl
+                if np.linalg.norm(r_obs / obs_sigma_vec) <= refine_tol_float:
+                    break
+                eps_struct = eps_full[structural_zero]
+                jacobian = _finite_difference_eval_jacobian(
+                    predict_fn,
+                    state,
+                    theta_vec,
+                    shock_sigma_vec.shape[0],
+                    structural_zero,
+                    eps_struct,
+                    observations.shape[0],
+                    period_idx=period,
+                    eval_predict_fn=eval_predict_fn,
+                    single_eval_residual_fn=single_eval_residual_fn,
+                    gate_mask=gate_vec,
+                    correction_clamp=correction_clamp,
+                )
+                if not np.isfinite(jacobian).all():
+                    break
+                j_scaled = jacobian / obs_sigma_vec[:, None]
+                j_prior = np.diag(1.0 / shock_std)
+                j_aug = np.vstack([j_scaled, j_prior])
+                r_aug = np.concatenate([r_obs / obs_sigma_vec, -eps_struct / shock_std], axis=0)
+                lhs = j_aug.T @ j_aug + lambda_float * np.eye(
+                    structural_zero.shape[0],
+                    dtype=np.float64,
+                )
+                rhs = j_aug.T @ r_aug
+                try:
+                    delta = np.linalg.solve(lhs, rhs)
+                except np.linalg.LinAlgError:
+                    delta = np.full((structural_zero.shape[0],), np.nan, dtype=np.float64)
+                if not np.isfinite(delta).all():
+                    break
+
+                max_scaled_step = float(np.max(np.abs(delta / shock_std)))
+                if max_scaled_step > refine_max_step_std_float:
+                    delta = delta * (refine_max_step_std_float / max_scaled_step)
+
+                accepted = False
+                accepted_alpha = 0.0
+                alpha = 1.0
+                while alpha >= refine_min_alpha_float:
+                    eps_candidate = eps_full.copy()
+                    eps_candidate[structural_zero] = eps_struct + alpha * delta
+                    candidate_obj, _, _ = _period_inversion_objective(
+                        predict_fn,
+                        state,
+                        eps_candidate,
+                        theta_vec,
+                        observations[:, period],
+                        obs_sigma_vec,
+                        shock_std,
+                        structural_zero,
+                        obs_log_norm_const,
+                        shock_log_norm_const,
+                        observations.shape[0],
+                        period_idx=period,
+                        eval_predict_fn=eval_predict_fn,
+                        single_eval_residual_fn=single_eval_residual_fn,
+                        gate_mask=gate_vec,
+                        correction_clamp=correction_clamp,
+                    )
+                    if np.isfinite(candidate_obj) and candidate_obj >= current_obj - refine_accept_tol_float:
+                        eps_full = eps_candidate
+                        current_obj = candidate_obj
+                        accepted = True
+                        accepted_alpha = alpha
+                        break
+                    alpha *= 0.5
+                if not accepted:
+                    break
+                if np.linalg.norm(accepted_alpha * delta) <= refine_tol_float * (
+                    1.0 + np.linalg.norm(eps_full[structural_zero])
+                ):
+                    break
+
+        ll_t, _, state_eval = _period_inversion_objective(
+            predict_fn,
+            state,
+            eps_full,
+            theta_vec,
+            observations[:, period],
+            obs_sigma_vec,
+            shock_std,
+            structural_zero,
+            obs_log_norm_const,
+            shock_log_norm_const,
+            observations.shape[0],
+            period_idx=period,
+            eval_predict_fn=eval_predict_fn,
+            single_eval_residual_fn=single_eval_residual_fn,
+            gate_mask=gate_vec,
+            correction_clamp=correction_clamp,
+        )
         shocks_out[:, period] = eps_full
-        ll[period] = ll_t
-        state = state_next
+        if np.isfinite(ll_t) and np.isfinite(state_eval).all():
+            ll[period] = ll_t
+            state = state_eval
+        else:
+            ll[period] = -1e10
         eps_init = eps_full[structural_idx - 1]
+
+    if batch_eval_residual_fn is not None:
+        return _batch_residual_inversion_loglik(
+            predict_fn,
+            _as_float_vector(s0, label="s0"),
+            theta_vec,
+            observations,
+            obs_sigma_vec,
+            shock_sigma_vec,
+            shocks_out,
+            batch_eval_residual_fn,
+            structural_zero,
+            shock_log_norm_const,
+            single_eval_residual_fn=single_eval_residual_fn,
+            gate_mask=gate_vec,
+            correction_clamp=correction_clamp,
+        ), shocks_out
 
     return ll, shocks_out
 
@@ -688,6 +1369,11 @@ def linear_reference_loglik_per_period(
     inversion_maxit: int = 10,
     inversion_tol: float = 1e-6,
     inversion_lambda: float = 1e-4,
+    inversion_refine_maxit: int = 0,
+    inversion_refine_tol: float = 1e-4,
+    inversion_refine_max_step_std: float = 2.0,
+    inversion_refine_min_alpha: float = 1e-3,
+    inversion_refine_accept_tol: float = 1e-10,
 ) -> np.ndarray:
     observations = _as_float_matrix(obs_data, label="obs_data")
     shock_matrix = _as_float_matrix(shocks, label="shocks")
@@ -724,6 +1410,11 @@ def linear_reference_loglik_per_period(
             maxit=inversion_maxit,
             tol=inversion_tol,
             lambda_=inversion_lambda,
+            refine_maxit=inversion_refine_maxit,
+            refine_tol=inversion_refine_tol,
+            refine_max_step_std=inversion_refine_max_step_std,
+            refine_min_alpha=inversion_refine_min_alpha,
+            refine_accept_tol=inversion_refine_accept_tol,
         )
         return ll
 
