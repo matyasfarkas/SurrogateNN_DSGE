@@ -34,6 +34,7 @@ from surrogatenn_dsge import (
 ROOT = Path("/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE")
 BENCH_DIR = ROOT / "benchmarks"
 CONFIG_PATH = BENCH_DIR / "nn_surrogate_validation_profile.toml"
+CONFIG_ENV = "SURROGATENN_DSGE_BENCHMARK_CONFIG"
 _SUPERSCRIPT_DIGITS = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻", "0123456789-")
 
 
@@ -69,6 +70,22 @@ def _load_config(path: Path) -> dict[str, Any]:
         return tomllib.load(str(path))
     with path.open("rb") as handle:
         return tomllib.load(handle)
+
+
+def _resolve_config_path(args: list[str] | None = None) -> Path:
+    argv = list(sys.argv[1:] if args is None else args)
+    if len(argv) > 1:
+        raise SystemExit(
+            f"Usage: profile_validation.py [config.toml]\n"
+            f"or set {CONFIG_ENV}=path/to/config.toml"
+        )
+    configured_path = argv[0] if argv else os.environ.get(CONFIG_ENV)
+    if configured_path is None:
+        return CONFIG_PATH
+    path = Path(configured_path).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve()
 
 
 def _reference_states_by_case(path: Path) -> dict[str, dict[str, Any]]:
@@ -518,65 +535,24 @@ def _report_text(
     julia_process: dict[str, float],
     system_info: dict[str, str],
 ) -> str:
-    small_case_name = payload["cases"][0]["name"]
-    medium_case_name = payload["cases"][1]["name"]
-    small_python = python_results["cases"][small_case_name]
-    small_julia = julia_results["cases"][small_case_name]
-    medium_python = python_results["cases"][medium_case_name]
-    medium_julia = julia_results["cases"][medium_case_name]
+    case_payloads = list(payload["cases"])
+    if not case_payloads:
+        raise ValueError("Benchmark payload must contain at least one case.")
+    case_names = [case["name"] for case in case_payloads]
     python_wall = python_process.get("real_s")
     julia_wall = julia_process.get("real_s")
-
-    small_solution_diff = _array_diff(
-        _stage_result(small_python, "first_order_solve").get("solution_matrix"),
-        _stage_result(small_julia, "first_order_solve").get("solution_matrix"),
+    jax_devices = python_results["cases"][case_names[0]].get("model_info", {}).get(
+        "jax_devices",
+        [],
     )
-    medium_solution_diff = _array_diff(
-        _stage_result(medium_python, "first_order_solve").get("solution_matrix"),
-        _stage_result(medium_julia, "first_order_solve").get("solution_matrix"),
+    case_descriptions = ", ".join(
+        f"`{case['name']}` (`{case.get('model_symbol', 'unknown')}`)"
+        for case in case_payloads
     )
-    small_kalman_abs, small_kalman_rel = _scalar_diff(
-        _stage_value(small_python, "kalman_value"),
-        _stage_value(small_julia, "kalman_value"),
+    uses_hlt = any(
+        case.get("model_symbol") == "Smets_Wouters_2007_HLT"
+        for case in case_payloads
     )
-    medium_kalman_abs, medium_kalman_rel = _scalar_diff(
-        _stage_value(medium_python, "kalman_value"),
-        _stage_value(medium_julia, "kalman_value"),
-    )
-    small_filter_diff = _array_diff(
-        _stage_result(small_python, "kalman_paths").get("filtered_variables"),
-        _stage_result(small_julia, "kalman_paths").get("filtered_variables"),
-    )
-    medium_filter_diff = _array_diff(
-        _stage_result(medium_python, "kalman_paths").get("filtered_variables"),
-        _stage_result(medium_julia, "kalman_paths").get("filtered_variables"),
-    )
-    small_switch_fixed_abs, small_switch_fixed_rel = _scalar_diff(
-        _stage_value(small_python, "switching_fixed"),
-        _stage_value(small_julia, "switching_fixed"),
-    )
-    medium_switch_fixed_abs, medium_switch_fixed_rel = _scalar_diff(
-        _stage_value(medium_python, "switching_fixed"),
-        _stage_value(medium_julia, "switching_fixed"),
-    )
-    small_switch_auto_abs, small_switch_auto_rel = _scalar_diff(
-        _stage_value(small_python, "switching_value"),
-        _stage_value(small_julia, "switching_value"),
-    )
-    medium_switch_auto_abs, medium_switch_auto_rel = _scalar_diff(
-        _stage_value(medium_python, "switching_value"),
-        _stage_value(medium_julia, "switching_value"),
-    )
-    grad_error = _stage_error(small_python, "kalman_grad") or _stage_error(
-        medium_python,
-        "kalman_grad",
-    )
-    nuts_error = _stage_error(small_python, "numpyro_nuts_smoke") or _stage_error(
-        medium_python,
-        "numpyro_nuts_smoke",
-    )
-    small_numpyro_kalman = _stage_value(small_python, "numpyro_kalman_log_density")
-    small_numpyro_switching = _stage_value(small_python, "numpyro_switching_log_density")
 
     report_lines = [
         "# Python/JAX vs Julia Profile",
@@ -590,81 +566,104 @@ def _report_text(
         f"- Performance cores: {system_info['perf_cores']}",
         f"- Efficiency cores: {system_info['eff_cores']}",
         f"- Memory (bytes): {system_info['mem_bytes']}",
-        f"- JAX devices: {', '.join(python_results['cases'][payload['cases'][0]['name']]['model_info']['jax_devices'])}",
+        f"- JAX devices: {', '.join(jax_devices)}",
         f"- Julia version: {julia_results['julia_version']}",
         f"- Threads requested: {config['global']['thread_count']}",
         f"- JAX platform setting: {config['global'].get('jax_platform_name', 'auto')}",
         "",
         "## Scope",
         "",
-        "- Small model: `FS2000`.",
-        "- Medium model: `Smets_Wouters_2007_HLT`.",
+        f"- Cases: {case_descriptions}.",
         "- Shared synthetic observations are generated once from the reference first-order solution and reused in both environments.",
         "- The report validates solution parity first, then Kalman likelihood/filter parity, then gate/switching parity, and only then compares timings.",
-        "- Important caveat: the Python HLT benchmark still uses a Julia-exported reference steady state so the comparison isolates already-ported solve/filter code instead of cold-start steady-state recovery.",
-        "",
-        "## Key Findings",
-        "",
     ]
+    if uses_hlt:
+        report_lines.append(
+            "- Important caveat: the Python HLT benchmark still uses a Julia-exported reference steady state so the comparison isolates already-ported solve/filter code instead of cold-start steady-state recovery."
+        )
+    report_lines.extend(
+        [
+            "",
+            "## Key Findings",
+            "",
+        ]
+    )
     if isinstance(python_wall, float) and isinstance(julia_wall, float) and python_wall > 0:
         report_lines.append(
             f"- Whole-process wall time: Python finished in {python_wall:.2f}s and Julia in {julia_wall:.2f}s, so Julia/Python = {julia_wall / python_wall:.2f}x."
         )
-    if small_solution_diff is not None:
-        report_lines.append(
-            f"- Small-model first-order solution parity max abs diff: {small_solution_diff:.3e}."
+
+    for case in case_payloads:
+        case_name = case["name"]
+        python_case = python_results["cases"][case_name]
+        julia_case = julia_results["cases"][case_name]
+        solution_diff = _array_diff(
+            _stage_result(python_case, "first_order_solve").get("solution_matrix"),
+            _stage_result(julia_case, "first_order_solve").get("solution_matrix"),
         )
-    if medium_solution_diff is not None:
-        report_lines.append(
-            f"- Medium-model first-order solution parity max abs diff: {medium_solution_diff:.3e}."
+        kalman_abs, kalman_rel = _scalar_diff(
+            _stage_value(python_case, "kalman_value"),
+            _stage_value(julia_case, "kalman_value"),
         )
-    if small_kalman_abs is not None and small_kalman_rel is not None:
-        report_lines.append(
-            f"- Small-model Kalman total loglikelihood abs/rel diff: {small_kalman_abs:.3e} / {small_kalman_rel:.3e}."
+        filter_diff = _array_diff(
+            _stage_result(python_case, "kalman_paths").get("filtered_variables"),
+            _stage_result(julia_case, "kalman_paths").get("filtered_variables"),
         )
-    if medium_kalman_abs is not None and medium_kalman_rel is not None:
-        report_lines.append(
-            f"- Medium-model Kalman total loglikelihood abs/rel diff: {medium_kalman_abs:.3e} / {medium_kalman_rel:.3e}."
+        switch_fixed_abs, switch_fixed_rel = _scalar_diff(
+            _stage_value(python_case, "switching_fixed"),
+            _stage_value(julia_case, "switching_fixed"),
         )
-    if small_filter_diff is not None:
-        report_lines.append(
-            f"- Small-model filtered-variable path parity max abs diff: {small_filter_diff:.3e}."
+        switch_auto_abs, switch_auto_rel = _scalar_diff(
+            _stage_value(python_case, "switching_value"),
+            _stage_value(julia_case, "switching_value"),
         )
-    if medium_filter_diff is not None:
+        if solution_diff is not None:
+            report_lines.append(
+                f"- `{case_name}` first-order solution parity max abs diff: {solution_diff:.3e}."
+            )
+        if kalman_abs is not None and kalman_rel is not None:
+            report_lines.append(
+                f"- `{case_name}` Kalman total loglikelihood abs/rel diff: {kalman_abs:.3e} / {kalman_rel:.3e}."
+            )
+        if filter_diff is not None:
+            report_lines.append(
+                f"- `{case_name}` filtered-variable path parity max abs diff: {filter_diff:.3e}."
+            )
+        if switch_fixed_abs is not None and switch_fixed_rel is not None:
+            report_lines.append(
+                f"- `{case_name}` fixed-gate switching abs/rel diff: {switch_fixed_abs:.3e} / {switch_fixed_rel:.3e}."
+            )
+        if switch_auto_abs is not None and switch_auto_rel is not None:
+            report_lines.append(
+                f"- `{case_name}` automatic switching abs/rel diff: {switch_auto_abs:.3e} / {switch_auto_rel:.3e}."
+            )
+        numpyro_kalman = _stage_value(python_case, "numpyro_kalman_log_density")
+        numpyro_switching = _stage_value(python_case, "numpyro_switching_log_density")
+        if numpyro_kalman is not None and numpyro_switching is not None:
+            report_lines.append(
+                f"- `{case_name}` NumPyro/JAX log densities evaluated successfully: Kalman {numpyro_kalman:.6f}, switching {numpyro_switching:.6f}."
+            )
+        grad_error = _stage_error(python_case, "kalman_grad")
+        if grad_error is not None:
+            report_lines.append(
+                f"- `{case_name}` Python/JAX reverse-mode likelihood differentiation failed with `{grad_error}`."
+            )
+        nuts_error = _stage_error(python_case, "numpyro_nuts_smoke")
+        if nuts_error is not None:
+            report_lines.append(
+                f"- `{case_name}` NumPyro NUTS smoke did not complete: `{nuts_error}`."
+            )
+
+    if jax_devices and all("CPU" in str(device) for device in jax_devices):
         report_lines.append(
-            f"- Medium-model filtered-variable path parity max abs diff: {medium_filter_diff:.3e}."
+            "- JAX only exposed CPU devices in this environment, so this remains a CPU benchmark rather than a live GPU benchmark."
         )
-    if small_switch_fixed_abs is not None and small_switch_fixed_rel is not None:
+    elif jax_devices:
         report_lines.append(
-            f"- Small-model fixed-gate switching abs/rel diff: {small_switch_fixed_abs:.3e} / {small_switch_fixed_rel:.3e}."
-        )
-    if medium_switch_fixed_abs is not None and medium_switch_fixed_rel is not None:
-        report_lines.append(
-            f"- Medium-model fixed-gate switching abs/rel diff: {medium_switch_fixed_abs:.3e} / {medium_switch_fixed_rel:.3e}."
-        )
-    if small_switch_auto_abs is not None and small_switch_auto_rel is not None:
-        report_lines.append(
-            f"- Small-model automatic switching abs/rel diff: {small_switch_auto_abs:.3e} / {small_switch_auto_rel:.3e}."
-        )
-    if medium_switch_auto_abs is not None and medium_switch_auto_rel is not None:
-        report_lines.append(
-            f"- Medium-model automatic switching abs/rel diff: {medium_switch_auto_abs:.3e} / {medium_switch_auto_rel:.3e}."
-        )
-    if grad_error is not None:
-        report_lines.append(
-            f"- Python/JAX reverse-mode likelihood differentiation still failed during the benchmark with `{grad_error}`."
-        )
-    if small_numpyro_kalman is not None and small_numpyro_switching is not None:
-        report_lines.append(
-            f"- Small-model NumPyro/JAX log densities evaluated successfully: Kalman {small_numpyro_kalman:.6f}, switching {small_numpyro_switching:.6f}."
-        )
-    if nuts_error is not None:
-        report_lines.append(
-            f"- NumPyro NUTS smoke did not complete on the benchmark DSGE model: `{nuts_error}`."
+            f"- JAX exposed non-CPU devices in this environment: {', '.join(map(str, jax_devices))}."
         )
     report_lines.extend(
         [
-            "- JAX only exposed `TFRT_CPU_0` in this environment, so this remains a CPU benchmark rather than a live GPU benchmark.",
             "- SEP remains a bounded robustness smoke stage here; it is still reported for runtime coverage, not as a validated matched-likelihood parity stage on these large models.",
             "",
             "## Whole Process",
@@ -680,12 +679,13 @@ def _report_text(
             "",
         ]
     )
-    for case in payload["cases"]:
+    for case in case_payloads:
+        case_name = case["name"]
         report_lines.append(
             _parity_table(
-                case["name"],
-                python_results["cases"][case["name"]],
-                julia_results["cases"][case["name"]],
+                case_name,
+                python_results["cases"][case_name],
+                julia_results["cases"][case_name],
             )
         )
     report_lines.extend(
@@ -694,12 +694,13 @@ def _report_text(
             "",
         ]
     )
-    for case in payload["cases"]:
+    for case in case_payloads:
+        case_name = case["name"]
         report_lines.append(
             _stage_table(
-                case["name"],
-                python_results["cases"][case["name"]],
-                julia_results["cases"][case["name"]],
+                case_name,
+                python_results["cases"][case_name],
+                julia_results["cases"][case_name],
             )
         )
     report_lines.extend(
@@ -718,7 +719,8 @@ def _report_text(
 
 
 def main() -> None:
-    config = _load_config(CONFIG_PATH)
+    config_path = _resolve_config_path()
+    config = _load_config(config_path)
     timestamp = time.strftime("%Y%m%dT%H%M%S")
     results_dir = BENCH_DIR / "results" / timestamp
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -736,7 +738,7 @@ def main() -> None:
         str(config["global"]["julia_executable"]),
         f"--project={config['global']['upstream_repo']}",
         str(BENCH_DIR / "export_reference_steady_states.jl"),
-        str(CONFIG_PATH),
+        str(config_path),
         str(reference_state_path),
     ]
     _run(export_cmd)
@@ -787,7 +789,7 @@ def main() -> None:
     system_info = _system_info()
 
     combined = {
-        "config_path": str(CONFIG_PATH),
+        "config_path": str(config_path),
         "payload_path": str(payload_path),
         "python_results": python_results,
         "julia_results": julia_results,

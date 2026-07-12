@@ -1,0 +1,72 @@
+# Opt-in long SW07 benchmark profile.
+#
+# This reuses the upstream Smets-Wouters 2007 HLT model and the existing
+# parity harness instead of rewriting SW07 equations in Python. The workload is
+# calibrated from the 2026-07-12 M4 CPU benchmark report and is intended to
+# land in the rough 2.5-3.5 hour range on that class of machine. GPU runtimes
+# and Colab runtimes can differ materially; halve or double the *_reps fields
+# after one calibration run if a tighter wall-clock target is needed.
+#
+# NumPyro log densities are exercised, but NUTS is intentionally disabled here:
+# the current SW07 sampler path can still hit JAX QR derivative limitations.
+
+[global]
+upstream_repo = "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_Estimation.jl"
+python_executable = "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/.venv/bin/python"
+julia_executable = "julia"
+thread_count = 8
+gate_quantile = 0.8
+jax_platform_name = "auto"
+report_path = "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/docs/benchmark_report_sw07_long.md"
+
+[[case]]
+name = "large_sw07_hlt_switching_order_3h"
+model_symbol = "Smets_Wouters_2007_HLT"
+model_path = "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_Estimation.jl/models/Smets_Wouters_2007_HLT.jl"
+observables = ["dy", "dc", "dinve", "labobs", "pinfobs", "dwobs", "robs"]
+parameter_subset = ["cprobp", "cindp", "curvp", "crpi", "csigl", "calfa"]
+numpyro_parameter_subset = ["cprobp", "cindp", "curvp"]
+numpyro_prior_width_scale = 0.005
+numpyro_prior_width_floor = 0.0001
+numpyro_log_density_reps = 600
+numpyro_switching_log_density_reps = 600
+numpyro_nuts_warmup = 0
+numpyro_nuts_samples = 0
+numpyro_nuts_chains = 1
+numpyro_target_accept_prob = 0.8
+numpyro_seed = 20260712
+state_names = ["dy", "dc", "dinve", "labobs", "pinfobs", "dwobs", "robs"]
+periods = 240
+shock_seed = 20260712
+shock_scale_by_exo = { ea = 1.0, eb = 1.0, eg = 1.0, em = 1.0, epinf = 1.0, eqs = 1.0, ew = 1.0 }
+measurement_error_scale = 1.0e-8
+jitter = 1.0e-9
+solve_reps = 3
+kalman_value_reps = 800
+kalman_per_period_reps = 150
+kalman_paths_reps = 40
+kalman_grad_reps = 0
+gate_stats_reps = 120
+switching_fixed_reps = 800
+switching_reps = 1800
+sep_reps = 4
+gate_periods = 1
+gate_mode = "soft"
+gate_beta_eps = 2.0
+gate_beta_y = 2.0
+gate_hard_threshold = 0.5
+gate_prob_floor = 1.0e-4
+gate_prob_ceiling = 0.9999
+soft_mixture = "logsumexp"
+sep_eval_periods = 4
+sep_periods = 3
+sep_branching_order = 1
+sep_nnodes = 3
+sep_sparse_tree = true
+sep_maxit = 6
+sep_tol = 1.0e-5
+sep_accept_tol = 1.0e-3
+sep_inv_maxit = 4
+sep_inv_step_tol = 1.0e-5
+sep_inv_resid_tol = 1.0e-5
+sep_inv_lambda = 1.0e-4

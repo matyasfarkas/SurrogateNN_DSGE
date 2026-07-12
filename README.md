@@ -9,6 +9,14 @@ The porting rule for this repository is strict:
 - only expose behavior that has been implemented and tested
 - prefer JAX-native kernels that can later feed NumPyro and GPU execution
 
+## Benchmark profiles
+
+The default profile in `benchmarks/nn_surrogate_validation_profile.toml` is a
+short parity/runtime smoke. A larger opt-in SW07/HLT stress profile lives in
+`benchmarks/sw07_long_profile.toml`; see
+[docs/sw07_long_profile.md](docs/sw07_long_profile.md) for the run command,
+runtime target, and current NUTS caveat.
+
 ## Current status
 
 Implemented:
