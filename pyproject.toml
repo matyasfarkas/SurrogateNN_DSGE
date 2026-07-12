@@ -13,7 +13,8 @@ authors = [
   {name = "Matyas Farkas"},
 ]
 dependencies = [
-  "jax>=0.4.30,<0.5",
+  "jax>=0.4.30",
+  "scipy>=1.10,<2",
   "sympy>=1.13,<2",
 ]
 
@@ -24,6 +25,12 @@ inference = [
 dev = [
   "numpyro>=0.19,<0.20",
   "pytest>=8.0,<9",
+]
+cuda12 = [
+  "jax[cuda12]>=0.6",
+]
+cuda13 = [
+  "jax[cuda13]>=0.6",
 ]
 
 [tool.hatch.build.targets.wheel]
