@@ -185,6 +185,52 @@ def test_assemble_parameter_vector_overrides_subset() -> None:
     np.testing.assert_allclose(parameter_vector, expected, rtol=1e-10, atol=1e-10)
 
 
+def test_explicit_parameter_values_override_direct_defaults_in_first_order_solution() -> None:
+    model, _, _, _, _ = _numpyro_fixture()
+    parameter_vector = assemble_parameter_vector(
+        model,
+        {
+            "rho_a": jnp.asarray(0.33, dtype=jnp.float64),
+            "rho_y": jnp.asarray(0.89, dtype=jnp.float64),
+        },
+    )
+
+    resolved = model.resolve_parameter_values(parameter_values=parameter_vector)
+    np.testing.assert_allclose(resolved, parameter_vector, rtol=0.0, atol=1e-12)
+
+    first_order_result = solve_first_order_model(
+        model,
+        parameter_values=parameter_vector,
+        steady_state_initial_guess={"a": 1.5, "y": 2.0},
+        qme_algorithm="schur",
+    )
+
+    np.testing.assert_allclose(
+        first_order_result.parameter_values,
+        parameter_vector,
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        first_order_result.jacobian[0, 2],
+        -0.33,
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        first_order_result.jacobian[1, 3],
+        -0.89,
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        first_order_result.solution.qme_solution,
+        jnp.asarray([[0.33, 0.0], [0.132, 0.89]], dtype=jnp.float64),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
 def test_numpyro_log_density_matches_manual_prior_plus_likelihood() -> None:
     model, _, observables, levels, priors = _numpyro_fixture()
     parameter_samples = {
@@ -428,6 +474,68 @@ def test_jax_numpyro_log_density_matches_manual_prior_plus_likelihood() -> None:
         manual_log_density,
         rtol=1e-10,
         atol=1e-10,
+    )
+
+
+def test_jax_loglikelihood_changes_when_sampled_parameters_change() -> None:
+    model, first_order_result, observables, levels, priors = _numpyro_fixture()
+    baseline_samples = {
+        "rho_a": jnp.asarray(0.8, dtype=jnp.float64),
+        "rho_y": jnp.asarray(0.6, dtype=jnp.float64),
+    }
+    alternative_samples = {
+        "rho_a": jnp.asarray(0.33, dtype=jnp.float64),
+        "rho_y": jnp.asarray(0.89, dtype=jnp.float64),
+    }
+
+    baseline_vector = assemble_parameter_vector(model, baseline_samples)
+    alternative_vector = assemble_parameter_vector(model, alternative_samples)
+    baseline_likelihood = kalman_loglikelihood_from_model_jax(
+        model,
+        levels,
+        observables=observables,
+        parameter_values=baseline_vector,
+        steady_state=first_order_result.steady_state,
+        qme_algorithm="schur",
+    )
+    alternative_likelihood = kalman_loglikelihood_from_model_jax(
+        model,
+        levels,
+        observables=observables,
+        parameter_values=alternative_vector,
+        steady_state=first_order_result.steady_state,
+        qme_algorithm="schur",
+    )
+    baseline_density = evaluate_numpyro_kalman_log_density_jax(
+        model,
+        levels,
+        priors,
+        baseline_samples,
+        observables=observables,
+        steady_state=first_order_result.steady_state,
+        qme_algorithm="schur",
+    )
+    alternative_density = evaluate_numpyro_kalman_log_density_jax(
+        model,
+        levels,
+        priors,
+        alternative_samples,
+        observables=observables,
+        steady_state=first_order_result.steady_state,
+        qme_algorithm="schur",
+    )
+
+    assert not np.isclose(
+        float(baseline_likelihood),
+        float(alternative_likelihood),
+        rtol=0.0,
+        atol=1e-8,
+    )
+    assert not np.isclose(
+        float(baseline_density),
+        float(alternative_density),
+        rtol=0.0,
+        atol=1e-8,
     )
 
 

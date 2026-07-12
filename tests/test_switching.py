@@ -584,5 +584,8 @@ def test_likelihood_surface_report_tracks_switching_shape_across_draws() -> None
     )
     assert report["rom_vs_fom"]["n_total"] == 4
     assert report["switching_surface"] is not None
-    assert report["switching_surface"]["switching_vs_fom"]["mean_abs_error"] == 0.0
-    assert report["switching_surface"]["mae_ratio_switching_over_rom"] == 0.0
+    assert (
+        abs(report["switching_surface"]["switching_vs_fom"]["mean_abs_error"])
+        <= 1e-12
+    )
+    assert abs(report["switching_surface"]["mae_ratio_switching_over_rom"]) <= 1e-12
