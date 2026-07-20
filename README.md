@@ -19,7 +19,7 @@ runtime target, and current NUTS caveat.
 
 For Colab, use `notebooks/colab_jax_numpyro_gemini_profile.ipynb` for the
 small GPU/NumPyro smoke run and `notebooks/colab_sw07_long_profile.ipynb` for
-the dedicated larger SW07/HLT benchmark.
+the dedicated Python-only SW07/HLT JAX + NumPyro run.
 
 ## Current status
 

@@ -49,12 +49,15 @@ def test_sw07_long_profile_notebook_is_dedicated_large_model_runner() -> None:
     notebook, code = _notebook_code(_SW07_LONG_NOTEBOOK)
 
     _assert_clean_notebook(notebook)
-    assert "PROFILE_MODE = \"long\"" in code
-    assert "large_sw07_hlt_switching_order_3h" in code
+    assert "PROFILE_MODE = \"calibration\"" in code
+    assert "SW07_SOURCE_URL" in code
     assert "Smets_Wouters_2007_HLT" in code
-    assert "periods = 240" in code
-    assert "kalman_value=scaled_reps(800)" in code
-    assert "switching=scaled_reps(1800)" in code
-    assert "numpyro_log_density=scaled_reps(600)" in code
-    assert "numpyro_nuts_samples = 0" in code
-    assert "benchmarks\" / \"profile_validation.py\"" in code
+    assert "test_payloads.json" in code
+    assert "solve_first_order_model" in code
+    assert "kalman_loglikelihood_from_model_jax" in code
+    assert "evaluate_numpyro_kalman_log_density_jax" in code
+    assert "RUN_NUTS_SMOKE = False" in code
+    assert "NumPyro log density did not change under SW07 parameter perturbations" in code
+    assert "JULIA_REPO_URL" not in code
+    assert "JULIA_ROOT" not in code
+    assert "profile_validation.py" not in code
