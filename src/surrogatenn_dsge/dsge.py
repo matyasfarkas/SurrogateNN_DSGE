@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from functools import partial
 from typing import Literal, NamedTuple, Optional, Sequence, Union
@@ -14,6 +15,9 @@ from .linalg import solve_discrete_sylvester
 from .statespace import LinearGaussianStateSpace, build_linear_gaussian_state_space
 
 QuadraticMatrixEquationAlgorithm = Literal["doubling", "schur"]
+_PURE_CALLBACK_SUPPORTS_VMAP_METHOD = (
+    "vmap_method" in inspect.signature(jax.pure_callback).parameters
+)
 
 
 class QuadraticMatrixEquationResult(NamedTuple):
@@ -796,12 +800,16 @@ def _solve_quadratic_matrix_equation_schur_callback(
         )
         return solution, np.asarray(success, dtype=np.bool_)
 
+    callback_kwargs = (
+        {"vmap_method": "sequential"} if _PURE_CALLBACK_SUPPORTS_VMAP_METHOD else {}
+    )
     return jax.pure_callback(
         _host_callback,
         result_shape,
         a,
         b,
         c,
+        **callback_kwargs,
     )
 
 

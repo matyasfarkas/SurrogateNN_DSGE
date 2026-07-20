@@ -262,6 +262,37 @@ def test_jax_schur_quadratic_matrix_equation_supports_reverse_mode_autodiff() ->
     np.testing.assert_allclose(autodiff_grad, finite_difference, rtol=5e-5, atol=5e-6)
 
 
+def test_jax_schur_quadratic_matrix_equation_supports_vmap() -> None:
+    timings, a_tilde_plus, a_tilde_zero, a_tilde_minus = _rbc_cme_qme_fixture()
+    shifts = jnp.asarray([0.0, 1.0e-5, -1.0e-5], dtype=jnp.float64)
+
+    def solve_shifted(shift: jax.Array) -> jax.Array:
+        return solve_quadratic_matrix_equation_schur_jax(
+            a_tilde_plus,
+            a_tilde_zero.at[0, 0].add(shift),
+            a_tilde_minus,
+            timings,
+        ).solution
+
+    batched = jax.jit(jax.vmap(solve_shifted))(shifts)
+
+    assert batched.shape == (3,) + a_tilde_plus.shape
+    for idx, shift in enumerate(np.asarray(shifts)):
+        expected = solve_quadratic_matrix_equation_schur(
+            a_tilde_plus,
+            a_tilde_zero.at[0, 0].add(float(shift)),
+            a_tilde_minus,
+            timings,
+        )
+        assert expected.converged
+        np.testing.assert_allclose(
+            batched[idx],
+            expected.solution,
+            rtol=1e-8,
+            atol=1e-8,
+        )
+
+
 def test_quadratic_matrix_equation_schur_handles_empty_pencils_without_crashing() -> None:
     timings = _static_qme_timings()
 
