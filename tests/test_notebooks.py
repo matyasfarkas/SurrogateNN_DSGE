@@ -50,7 +50,8 @@ def test_sw07_long_profile_notebook_is_dedicated_large_model_runner() -> None:
 
     _assert_clean_notebook(notebook)
     assert "PROFILE_MODE = \"calibration\"" in code
-    assert "SW07_SOURCE_URL" in code
+    assert "SW07_MODEL_SOURCE_PATH" in code
+    assert "benchmarks/model_sources/Smets_Wouters_2007_HLT.jl" in code
     assert "Smets_Wouters_2007_HLT" in code
     assert "test_payloads.json" in code
     assert "solve_first_order_model" in code
@@ -63,4 +64,5 @@ def test_sw07_long_profile_notebook_is_dedicated_large_model_runner() -> None:
     assert "NumPyro log density did not change under SW07 parameter perturbations" in code
     assert "JULIA_REPO_URL" not in code
     assert "JULIA_ROOT" not in code
+    assert "SurrogateNN_Estimation.jl" not in code
     assert "profile_validation.py" not in code
