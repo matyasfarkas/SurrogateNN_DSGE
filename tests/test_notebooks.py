@@ -57,6 +57,9 @@ def test_sw07_long_profile_notebook_is_dedicated_large_model_runner() -> None:
     assert "kalman_loglikelihood_from_model_jax" in code
     assert "evaluate_numpyro_kalman_log_density_jax" in code
     assert "RUN_NUTS_SMOKE = False" in code
+    assert "COLAB_SETUP_VERSION" in code
+    assert "Colab wheels changed. Restarting the runtime once" in code
+    assert "numpy>=2.1,<2.3" in code
     assert "NumPyro log density did not change under SW07 parameter perturbations" in code
     assert "JULIA_REPO_URL" not in code
     assert "JULIA_ROOT" not in code
