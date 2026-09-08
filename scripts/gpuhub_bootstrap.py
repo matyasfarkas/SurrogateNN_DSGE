@@ -37,11 +37,42 @@ def run(
     cwd: Path | str | None = None,
     check: bool = True,
     env: dict[str, str] | None = None,
+    stream: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     full_env = os.environ.copy()
     if env:
         full_env.update(env)
     print("$", " ".join(map(str, cmd)), flush=True)
+    if stream:
+        process = subprocess.Popen(
+            list(map(str, cmd)),
+            cwd=str(cwd) if cwd is not None else None,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=full_env,
+        )
+        stdout_parts: list[str] = []
+        assert process.stdout is not None
+        for line in process.stdout:
+            stdout_parts.append(line)
+            print(line, end="", flush=True)
+        returncode = process.wait()
+        stdout = "".join(stdout_parts)
+        completed = subprocess.CompletedProcess(
+            args=list(map(str, cmd)),
+            returncode=returncode,
+            stdout=stdout,
+            stderr="",
+        )
+        if check and returncode:
+            raise subprocess.CalledProcessError(
+                returncode,
+                completed.args,
+                output=stdout,
+                stderr="",
+            )
+        return completed
     completed = subprocess.run(
         list(map(str, cmd)),
         cwd=str(cwd) if cwd is not None else None,
@@ -337,7 +368,7 @@ def run_benchmark(
         heartbeat_seconds=heartbeat_seconds,
     )
     started = time.perf_counter()
-    run(cmd, cwd=root)
+    run(cmd, cwd=root, stream=True)
     print(f"{mode} wall seconds: {time.perf_counter() - started:.3f}", flush=True)
     print(f"Output: {output}", flush=True)
     return output
