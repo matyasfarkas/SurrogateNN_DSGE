@@ -9,6 +9,12 @@ Use a single RTX 5090 instance first. GPUHub instances are containers, and
 JupyterLab starts in `/root`; use `/root/gpuhub-tmp` for benchmark code and
 outputs so the run is not constrained by the small system disk.
 
+Do not rely on a provider image that advertises `JAX 0.3.10`, Ubuntu 18.04, or
+CUDA 11.1. That stack is too old for this repository and for a Blackwell-class
+RTX 5090 benchmark. It is acceptable to launch such an image only as a shell if
+`nvidia-smi` exposes a modern host driver; immediately reinstall the Python
+stack with the bootstrap below.
+
 Open a GPUHub JupyterLab terminal or SSH session and run:
 
 ```bash
@@ -18,21 +24,13 @@ git clone --depth 1 --branch codex/colab-jax-gemini-profile \
 cd SurrogateNN_DSGE
 
 python -m pip install --upgrade pip
-python -m pip install --upgrade --no-cache-dir \
-  'numpy>=2.1,<2.3' 'jax[cuda13]>=0.6' 'numpyro>=0.20' \
-  'scipy>=1.14,<2' 'sympy>=1.13,<2'
-python -m pip install -e . --no-deps
-
-nvidia-smi
-python - <<'PY'
-import jax
-import jax.numpy as jnp
-print(jax.__version__)
-print(jax.default_backend())
-print(jax.devices())
-print((jnp.ones((1024, 1024), dtype=jnp.float32) @ jnp.ones((1024, 1024), dtype=jnp.float32)).block_until_ready().dtype)
-PY
+python scripts/gpuhub_bootstrap.py --mode setup --jax-extra auto
 ```
+
+The bootstrap parses `nvidia-smi`, chooses `jax[cuda13]>=0.6` when the host
+driver supports CUDA 13, falls back to `jax[cuda12]>=0.6` for CUDA 12-capable
+drivers, uninstalls stale JAX/JAXlib packages, installs this repo without
+dependency downgrades, and refuses to continue if JAX does not see a GPU.
 
 ## Calibration Run
 
@@ -40,25 +38,7 @@ Run this first. It keeps the parameter set small and audits the first posterior
 draws against Schur determinacy.
 
 ```bash
-python benchmarks/posterior_sampling_speed.py \
-  --preset sw07_hlt \
-  --periods 80 \
-  --parameters calfa,cg,cgy,crdy,crhob,crpi \
-  --warmup 16 \
-  --samples 16 \
-  --chains 2 \
-  --chain-method vectorized \
-  --dtype float32 \
-  --qme-algorithm doubling \
-  --target-accept-prob 0.8 \
-  --max-tree-depth 8 \
-  --prior-width-scale 0.0025 \
-  --prior-width-floor 0.0001 \
-  --preflight \
-  --preflight-reps 1 \
-  --schur-support-draws 16 \
-  --force-gpu \
-  --output benchmarks/results/gpuhub_sw07_calibration_ess.json
+python scripts/gpuhub_bootstrap.py --mode calibration --skip-repo-sync --skip-install
 ```
 
 ## Proper RTX 5090 Run
@@ -67,25 +47,14 @@ Run this only after calibration has finite gradients and no Schur support
 violations.
 
 ```bash
-python benchmarks/posterior_sampling_speed.py \
-  --preset sw07_hlt \
-  --periods 160 \
-  --parameters sw07_safe_15 \
-  --warmup 256 \
-  --samples 256 \
-  --chains 4 \
-  --chain-method vectorized \
-  --dtype float32 \
-  --qme-algorithm doubling \
-  --target-accept-prob 0.8 \
-  --max-tree-depth 8 \
-  --prior-width-scale 0.0025 \
-  --prior-width-floor 0.0001 \
-  --preflight \
-  --preflight-reps 1 \
-  --schur-support-draws 64 \
-  --force-gpu \
-  --output benchmarks/results/gpuhub_sw07_proper_5090_ess.json
+python scripts/gpuhub_bootstrap.py --mode proper_5090 --skip-repo-sync --skip-install
+```
+
+To run calibration and then automatically continue to the proper run only if
+the Schur support audit passes:
+
+```bash
+python scripts/gpuhub_bootstrap.py --mode both
 ```
 
 ## Headline Metric
