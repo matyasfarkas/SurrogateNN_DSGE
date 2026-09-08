@@ -11,19 +11,22 @@ The correct workflow is:
 2. Confirm the price and only then create the instance.
 3. Open JupyterLab from `Console -> Container Instances -> Jupyterlab`.
 4. Open a JupyterLab terminal.
-5. Clone the GitHub repository into `/root/gpuhub-tmp`.
+5. Clone the GitHub repository into the data disk, usually
+   `/root/autodl-tmp` on current PyTorch images.
 6. Run the bootstrap setup/probe.
 7. Open `notebooks/gpuhub_sw07_posterior_ess.ipynb` from the cloned repo if an
    interactive notebook run is preferred, or run the CLI benchmark directly.
 8. Download benchmark JSON outputs or push/commit them if they should be
    preserved before shutting the instance down.
 
-GPUHub's docs state that JupyterLab's working directory is `/root`, while
-`/root/gpuhub-tmp` is the data disk. Use `/root/gpuhub-tmp` for the repo and
-benchmark outputs so the small system disk is not the bottleneck. JupyterLab
-upload is useful for individual files, but GPUHub documents that it does not
-support folders. For this project, clone the GitHub repo from a JupyterLab
-terminal instead of uploading the repo manually.
+GPUHub's docs state that JupyterLab's working directory is `/root`, while the
+data disk is mounted under `/root`. On the inspected PyTorch 2.12.1 image, the
+actual path is `/root/autodl-tmp`; older docs/images may call the analogous
+path `/root/gpuhub-tmp`. Use the data disk for the repo and benchmark outputs
+so the small system disk is not the bottleneck. JupyterLab upload is useful for
+individual files, but GPUHub documents that it does not support folders. For
+this project, clone the GitHub repo from a JupyterLab terminal instead of
+uploading the repo manually.
 
 The current launch form choice inspected on GPUHub is:
 
@@ -47,8 +50,9 @@ current JAX CUDA wheel explicitly.
 ## Instance Setup
 
 Use a single RTX 5090 instance first. GPUHub instances are containers, and
-JupyterLab starts in `/root`; use `/root/gpuhub-tmp` for benchmark code and
-outputs so the run is not constrained by the small system disk.
+JupyterLab starts in `/root`; use `/root/autodl-tmp` when present, otherwise
+`/root/gpuhub-tmp`, for benchmark code and outputs so the run is not
+constrained by the small system disk.
 
 Do not rely on a provider image that advertises `JAX 0.3.10`, Ubuntu 18.04, or
 CUDA 11.1. That stack is too old for this repository and for a Blackwell-class
@@ -59,7 +63,7 @@ stack with the bootstrap below.
 Open a GPUHub JupyterLab terminal or SSH session and run:
 
 ```bash
-cd /root/gpuhub-tmp
+cd /root/autodl-tmp
 git clone --depth 1 --branch codex/colab-jax-gemini-profile \
   https://github.com/matyasfarkas/SurrogateNN_DSGE.git
 cd SurrogateNN_DSGE

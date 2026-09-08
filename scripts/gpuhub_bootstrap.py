@@ -21,7 +21,14 @@ from typing import Any, Sequence
 
 DEFAULT_REPO_URL = "https://github.com/matyasfarkas/SurrogateNN_DSGE.git"
 DEFAULT_BRANCH = "codex/colab-jax-gemini-profile"
-DEFAULT_ROOT = Path("/root/gpuhub-tmp/SurrogateNN_DSGE")
+DEFAULT_DATA_ROOT = (
+    Path(os.environ["GPUHUB_DATA_DIR"])
+    if "GPUHUB_DATA_DIR" in os.environ
+    else Path("/root/autodl-tmp")
+    if Path("/root/autodl-tmp").exists()
+    else Path("/root/gpuhub-tmp")
+)
+DEFAULT_ROOT = DEFAULT_DATA_ROOT / "SurrogateNN_DSGE"
 
 
 def run(
