@@ -7,6 +7,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 _COLAB_NOTEBOOK = _ROOT / "notebooks" / "colab_jax_numpyro_gemini_profile.ipynb"
 _SW07_LONG_NOTEBOOK = _ROOT / "notebooks" / "colab_sw07_long_profile.ipynb"
+_GPUHUB_POSTERIOR_NOTEBOOK = _ROOT / "notebooks" / "gpuhub_sw07_posterior_ess.ipynb"
 
 
 def _notebook_code(path: Path) -> tuple[dict[str, object], str]:
@@ -66,3 +67,19 @@ def test_sw07_long_profile_notebook_is_dedicated_large_model_runner() -> None:
     assert "JULIA_ROOT" not in code
     assert "SurrogateNN_Estimation.jl" not in code
     assert "profile_validation.py" not in code
+
+
+def test_gpuhub_posterior_ess_notebook_is_clean_and_support_audited() -> None:
+    notebook, code = _notebook_code(_GPUHUB_POSTERIOR_NOTEBOOK)
+
+    _assert_clean_notebook(notebook)
+    assert "RTX 5090" in json.dumps(notebook)
+    assert "jax[cuda13]>=0.6" in code
+    assert "posterior_sampling_speed.py" in code
+    assert "seconds_per_min_ess" in code
+    assert "--schur-support-draws" in code
+    assert "sw07_safe_15" in code
+    assert "QME_ALGORITHM = \"doubling\"" in code
+    assert "FORCE_GPU = True" in code
+    assert "SurrogateNN_Estimation.jl" not in code
+    assert "profile_validation_julia.jl" not in code

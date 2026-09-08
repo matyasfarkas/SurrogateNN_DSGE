@@ -121,3 +121,24 @@ def test_parsed_model_determinacy_classifies_schur_cases(
         assert diagnostics.stable_count < diagnostics.expected_stable_count
     else:
         raise AssertionError(f"Unexpected stable_relation {stable_relation!r}.")
+
+
+def test_doubling_convergence_does_not_certify_schur_determinacy_support() -> None:
+    model = parse_macro_model(INDETERMINATE_SOURCE)
+    parameter_values = np.asarray(model.parameter_values, dtype=np.float64)
+
+    schur = analyze_first_order_model_determinacy(
+        model,
+        parameter_values=parameter_values,
+        steady_state_initial_guess={"k": 0.0, "q": 0.0},
+    )
+    doubling = solve_first_order_model(
+        model,
+        parameter_values=parameter_values,
+        steady_state_initial_guess={"k": 0.0, "q": 0.0},
+        qme_algorithm="doubling",
+    )
+
+    assert schur.determinacy.classification == "indeterminate"
+    assert not schur.determinacy.unique_stable_solution
+    assert doubling.solution.converged
