@@ -8,6 +8,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _COLAB_NOTEBOOK = _ROOT / "notebooks" / "colab_jax_numpyro_gemini_profile.ipynb"
 _SW07_LONG_NOTEBOOK = _ROOT / "notebooks" / "colab_sw07_long_profile.ipynb"
 _GPUHUB_POSTERIOR_NOTEBOOK = _ROOT / "notebooks" / "gpuhub_sw07_posterior_ess.ipynb"
+_COLAB_SW07_PREFLIGHT_NOTEBOOK = _ROOT / "notebooks" / "colab_sw07_posterior_preflight.ipynb"
 
 
 def _notebook_code(path: Path) -> tuple[dict[str, object], str]:
@@ -81,5 +82,17 @@ def test_gpuhub_posterior_ess_notebook_is_clean_and_support_audited() -> None:
     assert "sw07_safe_15" in code
     assert "QME_ALGORITHM = \"doubling\"" in code
     assert "FORCE_GPU = True" in code
+    assert "SurrogateNN_Estimation.jl" not in code
+    assert "profile_validation_julia.jl" not in code
+
+
+def test_colab_sw07_preflight_notebook_is_clean_and_preflight_only() -> None:
+    notebook, code = _notebook_code(_COLAB_SW07_PREFLIGHT_NOTEBOOK)
+
+    _assert_clean_notebook(notebook)
+    assert "Runtime -> Change runtime type -> T4 GPU" in json.dumps(notebook)
+    assert "gpuhub_bootstrap.py" in code
+    assert "--preflight-only" in code
+    assert "posterior_sampling_speed.py" not in code
     assert "SurrogateNN_Estimation.jl" not in code
     assert "profile_validation_julia.jl" not in code
