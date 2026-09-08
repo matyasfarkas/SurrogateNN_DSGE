@@ -200,7 +200,6 @@ def _configure_runtime(args: argparse.Namespace) -> tuple[Any, Any, Any, Any]:
             "ignore",
             message="Explicitly requested dtype .*float64.*",
             category=UserWarning,
-            module="jax",
         )
     if args.host_device_count is not None:
         numpyro.set_host_device_count(int(args.host_device_count))
@@ -748,6 +747,27 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             progress_bar=bool(args.progress_bar),
         )
 
+    benchmark_info = {
+        "preset": args.preset,
+        "case": args.case if args.preset == "sw07_hlt" else None,
+        "periods": int(observations.shape[1]),
+        "n_observables": int(observations.shape[0]),
+        "n_vars": int(model.timings.nVars),
+        "n_exo": int(model.timings.nExo),
+        "parameter_count": len(parameter_names),
+        "parameter_names": list(parameter_names),
+        "qme_algorithm": args.qme_algorithm,
+        "dtype": args.dtype,
+        "warmup": int(args.warmup),
+        "samples": int(args.samples),
+        "chains": int(args.chains),
+        "chain_method": args.chain_method,
+        "dense_mass": bool(args.dense_mass),
+        "target_accept_prob": float(args.target_accept_prob),
+        "max_tree_depth": int(args.max_tree_depth),
+        "prior_intervals": prior_intervals,
+    }
+
     preflight = None
     if args.preflight:
         with _logged_stage(args, "preflight likelihood and gradient"):
@@ -775,6 +795,18 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 f"value_steady_median={preflight['value_steady'].get('median_s')}, "
                 f"gradient_steady_median={preflight['gradient_steady'].get('median_s')}",
             )
+
+    if args.preflight_only:
+        _log(args, "preflight-only requested; skipping MCMC")
+        return {
+            "benchmark": benchmark_info,
+            "runtime": _runtime_info(jax, numpyro),
+            "preflight": preflight,
+            "throughput": None,
+            "posterior_diagnostics": None,
+            "extra_fields": None,
+            "schur_support_audit": None,
+        }
 
     _log(
         args,
@@ -848,26 +880,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     _log(args, f"throughput summary: {json.dumps(throughput, sort_keys=True, default=_json_default)}")
 
     return {
-        "benchmark": {
-            "preset": args.preset,
-            "case": args.case if args.preset == "sw07_hlt" else None,
-            "periods": int(observations.shape[1]),
-            "n_observables": int(observations.shape[0]),
-            "n_vars": int(model.timings.nVars),
-            "n_exo": int(model.timings.nExo),
-            "parameter_count": len(parameter_names),
-            "parameter_names": list(parameter_names),
-            "qme_algorithm": args.qme_algorithm,
-            "dtype": args.dtype,
-            "warmup": int(args.warmup),
-            "samples": int(args.samples),
-            "chains": int(args.chains),
-            "chain_method": args.chain_method,
-            "dense_mass": bool(args.dense_mass),
-            "target_accept_prob": float(args.target_accept_prob),
-            "max_tree_depth": int(args.max_tree_depth),
-            "prior_intervals": prior_intervals,
-        },
+        "benchmark": benchmark_info,
         "runtime": _runtime_info(jax, numpyro),
         "preflight": preflight,
         "throughput": throughput,
@@ -912,6 +925,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dense-mass", action="store_true")
     parser.add_argument("--progress-bar", action="store_true")
     parser.add_argument("--preflight", action="store_true")
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Compile and time the likelihood/gradient, then exit before MCMC.",
+    )
     parser.add_argument("--preflight-reps", type=int, default=0)
     parser.add_argument("--failure-value", type=float, default=-1.0e12)
     parser.add_argument("--schur-support-draws", type=int, default=0)
@@ -935,7 +953,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.set_defaults(suppress_dtype_warnings=True)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.preflight_only:
+        args.preflight = True
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> None:

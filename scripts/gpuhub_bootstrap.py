@@ -174,6 +174,7 @@ def build_benchmark_command(
     qme_algorithm: str,
     force_gpu: bool,
     preflight_reps: int,
+    preflight_only: bool,
     progress_bar: bool,
     verbose: bool,
     heartbeat_seconds: float,
@@ -222,6 +223,8 @@ def build_benchmark_command(
         "--output",
         str(output),
     ]
+    if preflight_only:
+        cmd.append("--preflight-only")
     if verbose:
         cmd.append("--verbose")
         cmd.extend(["--heartbeat-seconds", str(heartbeat_seconds)])
@@ -351,6 +354,7 @@ def run_benchmark(
     qme_algorithm: str,
     force_gpu: bool,
     preflight_reps: int,
+    preflight_only: bool,
     progress_bar: bool,
     verbose: bool,
     heartbeat_seconds: float,
@@ -363,6 +367,7 @@ def run_benchmark(
         qme_algorithm=qme_algorithm,
         force_gpu=force_gpu,
         preflight_reps=preflight_reps,
+        preflight_only=preflight_only,
         progress_bar=progress_bar,
         verbose=verbose,
         heartbeat_seconds=heartbeat_seconds,
@@ -395,6 +400,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("float32", "float64"), default="float32")
     parser.add_argument("--qme-algorithm", choices=("doubling", "schur"), default="doubling")
     parser.add_argument("--preflight-reps", type=int, default=1)
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Compile and time likelihood/gradient only; skip the MCMC run.",
+    )
     parser.add_argument("--progress-bar", action="store_true")
     parser.add_argument(
         "--quiet-benchmark",
@@ -447,6 +457,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             qme_algorithm=args.qme_algorithm,
             force_gpu=not args.allow_cpu,
             preflight_reps=args.preflight_reps,
+            preflight_only=bool(args.preflight_only),
             progress_bar=args.progress_bar,
             verbose=bool(args.verbose_benchmark),
             heartbeat_seconds=float(args.heartbeat_seconds),
@@ -460,6 +471,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         qme_algorithm=args.qme_algorithm,
         force_gpu=not args.allow_cpu,
         preflight_reps=args.preflight_reps,
+        preflight_only=bool(args.preflight_only),
         progress_bar=args.progress_bar,
         verbose=bool(args.verbose_benchmark),
         heartbeat_seconds=float(args.heartbeat_seconds),
@@ -476,6 +488,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         qme_algorithm=args.qme_algorithm,
         force_gpu=not args.allow_cpu,
         preflight_reps=args.preflight_reps,
+        preflight_only=bool(args.preflight_only),
         progress_bar=args.progress_bar,
         verbose=bool(args.verbose_benchmark),
         heartbeat_seconds=float(args.heartbeat_seconds),

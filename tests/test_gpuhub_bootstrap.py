@@ -83,6 +83,7 @@ def test_build_benchmark_command_uses_force_gpu_and_ess_output() -> None:
         qme_algorithm="doubling",
         force_gpu=True,
         preflight_reps=1,
+        preflight_only=True,
         progress_bar=False,
         verbose=True,
         heartbeat_seconds=15.0,
@@ -91,6 +92,7 @@ def test_build_benchmark_command_uses_force_gpu_and_ess_output() -> None:
     assert "benchmarks/posterior_sampling_speed.py" in cmd
     assert "--force-gpu" in cmd
     assert "--verbose" in cmd
+    assert "--preflight-only" in cmd
     assert "--heartbeat-seconds" in cmd
     assert "15.0" in cmd
     assert "--schur-support-draws" in cmd

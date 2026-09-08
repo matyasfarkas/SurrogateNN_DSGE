@@ -68,3 +68,12 @@ def test_prior_interval_keeps_unit_root_like_parameters_inside_unit_bounds() -> 
     lower, upper = module._prior_interval("crhoa", 0.9977, 0.01, 1.0e-4)
 
     assert 0.0 < lower < 0.9977 < upper < 1.0
+
+
+def test_parse_args_preflight_only_enables_preflight() -> None:
+    module = _load_module()
+
+    args = module._parse_args(["--preflight-only"])
+
+    assert args.preflight_only is True
+    assert args.preflight is True
