@@ -3,6 +3,47 @@
 This benchmark measures NumPyro/JAX posterior sampling throughput for the
 Python SW07/HLT translation as seconds per effective sample.
 
+## Pre-Deployment Workflow
+
+The correct workflow is:
+
+1. Choose the host and image in the GPUHub create-instance form.
+2. Confirm the price and only then create the instance.
+3. Open JupyterLab from `Console -> Container Instances -> Jupyterlab`.
+4. Open a JupyterLab terminal.
+5. Clone the GitHub repository into `/root/gpuhub-tmp`.
+6. Run the bootstrap setup/probe.
+7. Open `notebooks/gpuhub_sw07_posterior_ess.ipynb` from the cloned repo if an
+   interactive notebook run is preferred, or run the CLI benchmark directly.
+8. Download benchmark JSON outputs or push/commit them if they should be
+   preserved before shutting the instance down.
+
+GPUHub's docs state that JupyterLab's working directory is `/root`, while
+`/root/gpuhub-tmp` is the data disk. Use `/root/gpuhub-tmp` for the repo and
+benchmark outputs so the small system disk is not the bottleneck. JupyterLab
+upload is useful for individual files, but GPUHub documents that it does not
+support folders. For this project, clone the GitHub repo from a JupyterLab
+terminal instead of uploading the repo manually.
+
+The current launch form choice inspected on GPUHub is:
+
+```text
+Host: 282b4b870f / G030-R
+GPU: 1x RTX 5090 32GB
+CPU/RAM: 25 cores / 90GB RAM
+Driver/CUDA: 580.105.08 / CUDA 13.0
+Image: PyTorch 2.12.1 / Python 3.12(ubuntu22.04) / CUDA 13.0
+Billing: Pay-as-you-go
+Shown price: $0.46/hour
+Account budget: $10.00
+```
+
+This image is preferred over the platform's JAX image because GPUHub's
+documented JAX image is `JAX 0.3.10 / Python 3.8 / CUDA 11.1`, which is too old
+for the current repository. The PyTorch 2.12.1 image is only a modern base
+environment; the bootstrap still uninstalls stale JAX packages and installs the
+current JAX CUDA wheel explicitly.
+
 ## Instance Setup
 
 Use a single RTX 5090 instance first. GPUHub instances are containers, and
