@@ -107,3 +107,14 @@ def test_sanitize_jax_runtime_environment_clears_ld_library_path_for_cuda_wheels
 
     assert updates["LD_LIBRARY_PATH"] is None
     assert updates["XLA_PYTHON_CLIENT_PREALLOCATE"] == "false"
+
+
+def test_sanitize_jax_runtime_environment_can_preserve_ld_library_path() -> None:
+    module = _load_module()
+
+    updates = module.sanitize_jax_runtime_environment(
+        "jax[cuda13]>=0.6",
+        preserve_ld_library_path=True,
+    )
+
+    assert "LD_LIBRARY_PATH" not in updates

@@ -93,6 +93,7 @@ def test_colab_sw07_preflight_notebook_is_clean_and_preflight_only() -> None:
     assert "Runtime -> Change runtime type -> T4 GPU" in json.dumps(notebook)
     assert "gpuhub_bootstrap.py" in code
     assert "--preflight-only" in code
+    assert "--preserve-ld-library-path" in code
     assert "posterior_sampling_speed.py" not in code
     assert "SurrogateNN_Estimation.jl" not in code
     assert "profile_validation_julia.jl" not in code

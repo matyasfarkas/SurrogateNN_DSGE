@@ -295,7 +295,11 @@ def install_stack(root: Path, jax_requirement: str, *, force_reinstall_jax: bool
     )
 
 
-def sanitize_jax_runtime_environment(jax_requirement: str) -> dict[str, str | None]:
+def sanitize_jax_runtime_environment(
+    jax_requirement: str,
+    *,
+    preserve_ld_library_path: bool = False,
+) -> dict[str, str | None]:
     """Remove CUDA-library overrides when using JAX's pip-bundled CUDA wheels."""
 
     updates: dict[str, str | None] = {
@@ -308,7 +312,7 @@ def sanitize_jax_runtime_environment(jax_requirement: str) -> dict[str, str | No
             "0.85",
         ),
     }
-    if "cuda" in jax_requirement:
+    if "cuda" in jax_requirement and not preserve_ld_library_path:
         updates["LD_LIBRARY_PATH"] = None
     return updates
 
@@ -415,6 +419,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--heartbeat-seconds", type=float, default=30.0)
     parser.add_argument("--allow-cpu", action="store_true")
     parser.add_argument("--no-force-reinstall-jax", action="store_true")
+    parser.add_argument(
+        "--preserve-ld-library-path",
+        action="store_true",
+        help=(
+            "Keep LD_LIBRARY_PATH when probing JAX. Use this on Colab T4 runtimes "
+            "where libcuda is exposed through the runtime library path."
+        ),
+    )
     parser.add_argument("--no-strict-support", action="store_true")
     parser.set_defaults(verbose_benchmark=True)
     return parser.parse_args(argv)
@@ -435,7 +447,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         driver_version=smi_info.get("driver_version"),
     )
     print(f"Selected JAX requirement: {jax_requirement}", flush=True)
-    apply_environment_updates(sanitize_jax_runtime_environment(jax_requirement))
+    apply_environment_updates(
+        sanitize_jax_runtime_environment(
+            jax_requirement,
+            preserve_ld_library_path=bool(args.preserve_ld_library_path),
+        )
+    )
 
     if not args.skip_repo_sync:
         sync_repo(args.root, args.repo_url, args.branch)
