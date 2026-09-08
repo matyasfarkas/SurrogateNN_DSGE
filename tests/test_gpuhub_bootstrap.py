@@ -84,10 +84,15 @@ def test_build_benchmark_command_uses_force_gpu_and_ess_output() -> None:
         force_gpu=True,
         preflight_reps=1,
         progress_bar=False,
+        verbose=True,
+        heartbeat_seconds=15.0,
     )
 
     assert "benchmarks/posterior_sampling_speed.py" in cmd
     assert "--force-gpu" in cmd
+    assert "--verbose" in cmd
+    assert "--heartbeat-seconds" in cmd
+    assert "15.0" in cmd
     assert "--schur-support-draws" in cmd
     assert "sw07_safe_15" in cmd
     assert output.name == "gpuhub_sw07_posterior_ess_proper_5090_float32_doubling.json"

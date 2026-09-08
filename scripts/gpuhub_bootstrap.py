@@ -144,6 +144,8 @@ def build_benchmark_command(
     force_gpu: bool,
     preflight_reps: int,
     progress_bar: bool,
+    verbose: bool,
+    heartbeat_seconds: float,
 ) -> tuple[list[str], Path]:
     settings = benchmark_settings(mode)
     output = (
@@ -189,6 +191,9 @@ def build_benchmark_command(
         "--output",
         str(output),
     ]
+    if verbose:
+        cmd.append("--verbose")
+        cmd.extend(["--heartbeat-seconds", str(heartbeat_seconds)])
     if force_gpu:
         cmd.append("--force-gpu")
     if progress_bar:
@@ -316,6 +321,8 @@ def run_benchmark(
     force_gpu: bool,
     preflight_reps: int,
     progress_bar: bool,
+    verbose: bool,
+    heartbeat_seconds: float,
 ) -> Path:
     cmd, output = build_benchmark_command(
         python=sys.executable,
@@ -326,6 +333,8 @@ def run_benchmark(
         force_gpu=force_gpu,
         preflight_reps=preflight_reps,
         progress_bar=progress_bar,
+        verbose=verbose,
+        heartbeat_seconds=heartbeat_seconds,
     )
     started = time.perf_counter()
     run(cmd, cwd=root)
@@ -356,9 +365,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--qme-algorithm", choices=("doubling", "schur"), default="doubling")
     parser.add_argument("--preflight-reps", type=int, default=1)
     parser.add_argument("--progress-bar", action="store_true")
+    parser.add_argument(
+        "--quiet-benchmark",
+        action="store_false",
+        dest="verbose_benchmark",
+        help="Disable verbose posterior_sampling_speed.py stage logs.",
+    )
+    parser.add_argument("--heartbeat-seconds", type=float, default=30.0)
     parser.add_argument("--allow-cpu", action="store_true")
     parser.add_argument("--no-force-reinstall-jax", action="store_true")
     parser.add_argument("--no-strict-support", action="store_true")
+    parser.set_defaults(verbose_benchmark=True)
     return parser.parse_args(argv)
 
 
@@ -400,6 +417,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             force_gpu=not args.allow_cpu,
             preflight_reps=args.preflight_reps,
             progress_bar=args.progress_bar,
+            verbose=bool(args.verbose_benchmark),
+            heartbeat_seconds=float(args.heartbeat_seconds),
         )
         return
 
@@ -411,6 +430,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         force_gpu=not args.allow_cpu,
         preflight_reps=args.preflight_reps,
         progress_bar=args.progress_bar,
+        verbose=bool(args.verbose_benchmark),
+        heartbeat_seconds=float(args.heartbeat_seconds),
     )
     if not args.no_strict_support and not support_audit_ok(calibration):
         raise RuntimeError(
@@ -425,6 +446,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         force_gpu=not args.allow_cpu,
         preflight_reps=args.preflight_reps,
         progress_bar=args.progress_bar,
+        verbose=bool(args.verbose_benchmark),
+        heartbeat_seconds=float(args.heartbeat_seconds),
     )
 
 

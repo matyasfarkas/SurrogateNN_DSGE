@@ -7,10 +7,12 @@ import platform
 import statistics
 import subprocess
 import sys
+import threading
 import time
 import warnings
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -139,6 +141,43 @@ def _timing_stats(times: Sequence[float]) -> dict[str, Any]:
         "max_s": float(max(times)),
         "std_s": float(statistics.stdev(times)) if len(times) > 1 else 0.0,
     }
+
+
+def _log(args: argparse.Namespace, message: str) -> None:
+    if getattr(args, "verbose", False):
+        elapsed = time.perf_counter() - getattr(args, "_benchmark_started_at", time.perf_counter())
+        print(f"[posterior_sampling_speed +{elapsed:9.2f}s] {message}", flush=True)
+
+
+@contextmanager
+def _logged_stage(args: argparse.Namespace, name: str):
+    start = time.perf_counter()
+    _log(args, f"START {name}")
+    stop = threading.Event()
+    heartbeat_seconds = float(getattr(args, "heartbeat_seconds", 0.0) or 0.0)
+    thread: threading.Thread | None = None
+    if getattr(args, "verbose", False) and heartbeat_seconds > 0.0:
+
+        def heartbeat() -> None:
+            while not stop.wait(heartbeat_seconds):
+                elapsed = time.perf_counter() - start
+                _log(args, f"HEARTBEAT {name} still running after {elapsed:.1f}s")
+
+        thread = threading.Thread(target=heartbeat, daemon=True)
+        thread.start()
+    try:
+        yield
+    except Exception as exc:
+        elapsed = time.perf_counter() - start
+        _log(args, f"FAIL {name} after {elapsed:.2f}s: {type(exc).__name__}: {exc}")
+        raise
+    else:
+        elapsed = time.perf_counter() - start
+        _log(args, f"END {name} after {elapsed:.2f}s")
+    finally:
+        stop.set()
+        if thread is not None:
+            thread.join(timeout=0.1)
 
 
 def _configure_runtime(args: argparse.Namespace) -> tuple[Any, Any, Any, Any]:
@@ -460,6 +499,7 @@ def _support_audit(
     max_draws: int,
     schur_acceptance_tol: float,
     failure_value: float,
+    log_fn: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     draws = _flatten_posterior_draws(
         samples_by_chain,
@@ -474,6 +514,8 @@ def _support_audit(
     doubling_rejects = 0
     parameter_index = {name: idx for idx, name in enumerate(model.parameter_names)}
     for draw_idx, draw in enumerate(draws):
+        if log_fn is not None:
+            log_fn(f"support audit draw {draw_idx + 1}/{len(draws)}")
         theta = np.asarray(base_parameter_values, dtype=np.float64).copy()
         for name, value in draw.items():
             theta[parameter_index[name]] = value
@@ -533,6 +575,12 @@ def _support_audit(
                         "parameters": draw,
                     }
                 )
+        if log_fn is not None:
+            log_fn(
+                "support audit draw "
+                f"{draw_idx + 1}/{len(draws)} classified {classification}; "
+                f"schur_unique={schur_unique}; doubling_accept={doubling_accept}"
+            )
     audited = len(draws)
     return {
         "audited_draws": audited,
@@ -564,6 +612,7 @@ def _preflight_metrics(
     qme_algorithm: str,
     reps: int,
     failure_value: float,
+    log_fn: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     theta = jnp.asarray(parameter_values)
     obs = jnp.asarray(observations)
@@ -591,16 +640,32 @@ def _preflight_metrics(
         return theta.at[index].set(x)
 
     grad_fn = jax.jit(jax.value_and_grad(lambda x: value_fn(inject(x))))
+    if log_fn is not None:
+        log_fn("preflight value first call/JIT start")
     value, first_value_s = _timed_call(lambda: value_fn(theta))
+    if log_fn is not None:
+        log_fn(f"preflight value first call/JIT done in {first_value_s:.3f}s")
     value_times = []
-    for _ in range(max(reps, 0)):
+    for rep in range(max(reps, 0)):
+        if log_fn is not None:
+            log_fn(f"preflight value steady rep {rep + 1}/{reps} start")
         _, elapsed = _timed_call(lambda: value_fn(theta))
         value_times.append(elapsed)
+        if log_fn is not None:
+            log_fn(f"preflight value steady rep {rep + 1}/{reps} done in {elapsed:.3f}s")
+    if log_fn is not None:
+        log_fn("preflight gradient first call/JIT start")
     grad_value, first_grad_s = _timed_call(lambda: grad_fn(x0))
+    if log_fn is not None:
+        log_fn(f"preflight gradient first call/JIT done in {first_grad_s:.3f}s")
     grad_times = []
-    for _ in range(max(reps, 0)):
+    for rep in range(max(reps, 0)):
+        if log_fn is not None:
+            log_fn(f"preflight gradient steady rep {rep + 1}/{reps} start")
         _, elapsed = _timed_call(lambda: grad_fn(x0))
         grad_times.append(elapsed)
+        if log_fn is not None:
+            log_fn(f"preflight gradient steady rep {rep + 1}/{reps} done in {elapsed:.3f}s")
     return {
         "loglikelihood": float(np.asarray(value, dtype=np.float64)),
         "loglikelihood_dtype": str(getattr(value, "dtype", "")),
@@ -615,84 +680,121 @@ def _preflight_metrics(
 
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    jax, jnp, numpyro, dist, sdsge = _configure_runtime(args)
+    args._benchmark_started_at = time.perf_counter()
+    _log(args, "benchmark process started")
+    with _logged_stage(args, "configure JAX/NumPyro runtime"):
+        jax, jnp, numpyro, dist, sdsge = _configure_runtime(args)
+        _log(
+            args,
+            "runtime configured: "
+            f"jax={getattr(jax, '__version__', 'unknown')}, "
+            f"numpyro={getattr(numpyro, '__version__', 'unknown')}, "
+            f"backend={jax.default_backend()}, devices={jax.devices()}",
+        )
     if args.dtype == "float32":
         np_dtype = np.float32
     else:
         np_dtype = np.float64
-    data = _build_dataset(args, sdsge, jax)
+    with _logged_stage(args, "build benchmark dataset"):
+        data = _build_dataset(args, sdsge, jax)
     model = data["model"]
     steady_state = np.asarray(data["steady_state"], dtype=np_dtype)
     observations = np.asarray(data["observations"], dtype=np_dtype)
     observables = tuple(data["observables"])
     parameter_names = tuple(data["parameter_names"])
     parameter_values = np.asarray(model.parameter_values, dtype=np_dtype)
-    priors, initial_values, prior_intervals = _make_centered_uniform_priors(
-        dist,
-        model,
-        parameter_names,
-        width_scale=float(args.prior_width_scale),
-        width_floor=float(args.prior_width_floor),
+    _log(
+        args,
+        "dataset ready: "
+        f"preset={args.preset}, vars={model.timings.nVars}, exo={model.timings.nExo}, "
+        f"observations={observations.shape}, parameters={parameter_names}",
     )
+    with _logged_stage(args, "build priors"):
+        priors, initial_values, prior_intervals = _make_centered_uniform_priors(
+            dist,
+            model,
+            parameter_names,
+            width_scale=float(args.prior_width_scale),
+            width_floor=float(args.prior_width_floor),
+        )
     from numpyro.infer import MCMC, NUTS, init_to_value
 
-    numpyro_model = sdsge.build_numpyro_kalman_model_jax(
-        model,
-        observations,
-        priors,
-        observables=observables,
-        base_parameter_values=parameter_values,
-        steady_state=steady_state,
-        measurement_error_scale=float(data["measurement_error_scale"]),
-        jitter=float(data["jitter"]),
-        on_failure_loglikelihood=float(args.failure_value),
-        qme_algorithm=args.qme_algorithm,
-    )
-    kernel = NUTS(
-        numpyro_model,
-        dense_mass=bool(args.dense_mass),
-        target_accept_prob=float(args.target_accept_prob),
-        max_tree_depth=int(args.max_tree_depth),
-        init_strategy=init_to_value(values=initial_values),
-    )
-    mcmc = MCMC(
-        kernel,
-        num_warmup=int(args.warmup),
-        num_samples=int(args.samples),
-        num_chains=int(args.chains),
-        chain_method=args.chain_method,
-        progress_bar=bool(args.progress_bar),
-    )
+    with _logged_stage(args, "build NumPyro model and NUTS kernel"):
+        numpyro_model = sdsge.build_numpyro_kalman_model_jax(
+            model,
+            observations,
+            priors,
+            observables=observables,
+            base_parameter_values=parameter_values,
+            steady_state=steady_state,
+            measurement_error_scale=float(data["measurement_error_scale"]),
+            jitter=float(data["jitter"]),
+            on_failure_loglikelihood=float(args.failure_value),
+            qme_algorithm=args.qme_algorithm,
+        )
+        kernel = NUTS(
+            numpyro_model,
+            dense_mass=bool(args.dense_mass),
+            target_accept_prob=float(args.target_accept_prob),
+            max_tree_depth=int(args.max_tree_depth),
+            init_strategy=init_to_value(values=initial_values),
+        )
+        mcmc = MCMC(
+            kernel,
+            num_warmup=int(args.warmup),
+            num_samples=int(args.samples),
+            num_chains=int(args.chains),
+            chain_method=args.chain_method,
+            progress_bar=bool(args.progress_bar),
+        )
 
     preflight = None
     if args.preflight:
-        preflight = _preflight_metrics(
-            jax=jax,
-            jnp=jnp,
-            sdsge=sdsge,
-            model=model,
-            observations=observations,
-            observables=observables,
-            steady_state=steady_state,
-            parameter_values=parameter_values,
-            parameter_names=parameter_names,
-            measurement_error_scale=float(data["measurement_error_scale"]),
-            jitter=float(data["jitter"]),
-            qme_algorithm=args.qme_algorithm,
-            reps=int(args.preflight_reps),
-            failure_value=float(args.failure_value),
-        )
+        with _logged_stage(args, "preflight likelihood and gradient"):
+            preflight = _preflight_metrics(
+                jax=jax,
+                jnp=jnp,
+                sdsge=sdsge,
+                model=model,
+                observations=observations,
+                observables=observables,
+                steady_state=steady_state,
+                parameter_values=parameter_values,
+                parameter_names=parameter_names,
+                measurement_error_scale=float(data["measurement_error_scale"]),
+                jitter=float(data["jitter"]),
+                qme_algorithm=args.qme_algorithm,
+                reps=int(args.preflight_reps),
+                failure_value=float(args.failure_value),
+                log_fn=lambda message: _log(args, message),
+            )
+            _log(
+                args,
+                "preflight summary: "
+                f"loglikelihood={preflight['loglikelihood']}, "
+                f"value_steady_median={preflight['value_steady'].get('median_s')}, "
+                f"gradient_steady_median={preflight['gradient_steady'].get('median_s')}",
+            )
 
-    start = time.perf_counter()
-    mcmc.run(
-        jax.random.PRNGKey(int(args.seed)),
-        extra_fields=("accept_prob", "diverging", "num_steps"),
+    _log(
+        args,
+        "starting MCMC: "
+        f"warmup={args.warmup}, samples={args.samples}, chains={args.chains}, "
+        f"chain_method={args.chain_method}, dense_mass={args.dense_mass}",
     )
-    _block_tree(mcmc.get_samples(group_by_chain=True))
+    start = time.perf_counter()
+    with _logged_stage(args, "NumPyro MCMC run"):
+        mcmc.run(
+            jax.random.PRNGKey(int(args.seed)),
+            extra_fields=("accept_prob", "diverging", "num_steps"),
+        )
+    with _logged_stage(args, "block and collect samples"):
+        _block_tree(mcmc.get_samples(group_by_chain=True))
+        samples_by_chain = mcmc.get_samples(group_by_chain=True)
+        extra_fields = mcmc.get_extra_fields(group_by_chain=True)
     sampling_wall_s = time.perf_counter() - start
-    samples_by_chain = mcmc.get_samples(group_by_chain=True)
-    extra_fields = mcmc.get_extra_fields(group_by_chain=True)
-    sample_summary = _sample_summary(samples_by_chain, parameter_names)
+    with _logged_stage(args, "posterior diagnostics"):
+        sample_summary = _sample_summary(samples_by_chain, parameter_names)
     post_warmup_draws = int(args.samples) * int(args.chains)
     min_ess = sample_summary["min_ess"]
     mean_ess = sample_summary["mean_ess"]
@@ -718,21 +820,32 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
     support_audit = None
     if args.schur_support_draws > 0:
-        support_audit = _support_audit(
-            sdsge=sdsge,
-            model=model,
-            observations=np.asarray(observations, dtype=np.float64),
-            observables=observables,
-            steady_state=np.asarray(steady_state, dtype=np.float64),
-            samples_by_chain=samples_by_chain,
-            parameter_names=parameter_names,
-            base_parameter_values=np.asarray(model.parameter_values, dtype=np.float64),
-            measurement_error_scale=float(data["measurement_error_scale"]),
-            jitter=float(data["jitter"]),
-            max_draws=int(args.schur_support_draws),
-            schur_acceptance_tol=float(args.schur_acceptance_tol),
-            failure_value=float(args.failure_value),
-        )
+        with _logged_stage(args, "Schur support audit"):
+            support_audit = _support_audit(
+                sdsge=sdsge,
+                model=model,
+                observations=np.asarray(observations, dtype=np.float64),
+                observables=observables,
+                steady_state=np.asarray(steady_state, dtype=np.float64),
+                samples_by_chain=samples_by_chain,
+                parameter_names=parameter_names,
+                base_parameter_values=np.asarray(model.parameter_values, dtype=np.float64),
+                measurement_error_scale=float(data["measurement_error_scale"]),
+                jitter=float(data["jitter"]),
+                max_draws=int(args.schur_support_draws),
+                schur_acceptance_tol=float(args.schur_acceptance_tol),
+                failure_value=float(args.failure_value),
+                log_fn=lambda message: _log(args, message),
+            )
+            _log(
+                args,
+                "support audit summary: "
+                f"audited={support_audit['audited_draws']}, "
+                f"doubling_accepts_non_unique="
+                f"{support_audit['doubling_accepts_non_unique_count']}",
+            )
+
+    _log(args, f"throughput summary: {json.dumps(throughput, sort_keys=True, default=_json_default)}")
 
     return {
         "benchmark": {
@@ -803,6 +916,17 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--failure-value", type=float, default=-1.0e12)
     parser.add_argument("--schur-support-draws", type=int, default=0)
     parser.add_argument("--schur-acceptance-tol", type=float, default=1.0e-8)
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print stage timing and heartbeat logs while compiling/sampling.",
+    )
+    parser.add_argument(
+        "--heartbeat-seconds",
+        type=float,
+        default=30.0,
+        help="Heartbeat interval for verbose long-running stages; set 0 to disable.",
+    )
     parser.add_argument(
         "--show-dtype-warnings",
         action="store_false",
