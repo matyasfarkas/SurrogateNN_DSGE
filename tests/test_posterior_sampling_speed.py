@@ -77,3 +77,11 @@ def test_parse_args_preflight_only_enables_preflight() -> None:
 
     assert args.preflight_only is True
     assert args.preflight is True
+
+
+def test_parse_args_accepts_gpu_schur_qme_algorithm() -> None:
+    module = _load_module()
+
+    args = module._parse_args(["--qme-algorithm", "schur_gpu"])
+
+    assert args.qme_algorithm == "schur_gpu"

@@ -919,7 +919,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dtype", choices=("float64", "float32"), default="float64")
     parser.add_argument("--platform", choices=("cpu", "gpu"), default=None)
     parser.add_argument("--force-gpu", action="store_true")
-    parser.add_argument("--qme-algorithm", choices=("schur", "doubling"), default="doubling")
+    parser.add_argument(
+        "--qme-algorithm",
+        choices=("schur", "schur_gpu", "doubling"),
+        default="doubling",
+    )
     parser.add_argument("--target-accept-prob", type=float, default=0.8)
     parser.add_argument("--max-tree-depth", type=int, default=8)
     parser.add_argument("--dense-mass", action="store_true")

@@ -14,7 +14,7 @@ from jax import lax
 from .linalg import solve_discrete_sylvester
 from .statespace import LinearGaussianStateSpace, build_linear_gaussian_state_space
 
-QuadraticMatrixEquationAlgorithm = Literal["doubling", "schur"]
+QuadraticMatrixEquationAlgorithm = Literal["doubling", "schur", "schur_gpu"]
 _PURE_CALLBACK_SUPPORTS_VMAP_METHOD = (
     "vmap_method" in inspect.signature(jax.pure_callback).parameters
 )
@@ -881,6 +881,182 @@ _solve_quadratic_matrix_equation_schur_jax_core.defvjp(
 )
 
 
+def _build_qme_pencils_jax(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    timings: DSGETimings,
+) -> tuple[jax.Array, jax.Array]:
+    comb = tuple(
+        sorted(
+            set(timings.future_not_past_and_mixed_idx)
+            | set(timings.past_not_future_idx)
+        )
+    )
+    future_in_comb = _indexin(timings.future_not_past_and_mixed_idx, comb)
+    past_not_future_and_mixed_in_comb = _indexin(
+        timings.past_not_future_and_mixed_idx,
+        comb,
+    )
+    past_not_future_in_comb = _indexin(timings.past_not_future_idx, comb)
+
+    a_tilde_plus = a[:, list(future_in_comb)]
+    a_tilde_minus = c[:, list(past_not_future_and_mixed_in_comb)]
+    a_tilde_zero_plus = b[:, list(future_in_comb)]
+    past_selector = jnp.eye(
+        timings.nPast_not_future_and_mixed,
+        dtype=a.dtype,
+    )[list(timings.not_mixed_in_past_idx), :]
+    a_tilde_zero_minus = b[:, list(past_not_future_in_comb)] @ past_selector
+
+    z_plus = jnp.zeros(
+        (timings.nMixed, timings.nFuture_not_past_and_mixed),
+        dtype=a.dtype,
+    )
+    i_plus = jnp.eye(
+        timings.nFuture_not_past_and_mixed,
+        dtype=a.dtype,
+    )[list(timings.mixed_in_future_idx), :]
+    z_minus = jnp.zeros(
+        (timings.nMixed, timings.nPast_not_future_and_mixed),
+        dtype=a.dtype,
+    )
+    i_minus = jnp.eye(
+        timings.nPast_not_future_and_mixed,
+        dtype=a.dtype,
+    )[list(timings.mixed_in_past_idx), :]
+
+    d_pencil = jnp.concatenate(
+        [
+            jnp.concatenate([a_tilde_zero_minus, a_tilde_plus], axis=1),
+            jnp.concatenate([i_minus, z_plus], axis=1),
+        ],
+        axis=0,
+    )
+    e_pencil = jnp.concatenate(
+        [
+            jnp.concatenate([-a_tilde_minus, -a_tilde_zero_plus], axis=1),
+            jnp.concatenate([z_minus, i_plus], axis=1),
+        ],
+        axis=0,
+    )
+    return d_pencil, e_pencil
+
+
+def _solve_quadratic_matrix_equation_schur_gpu_impl(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    timings: DSGETimings,
+) -> tuple[jax.Array, jax.Array]:
+    if a.shape[0] == 0:
+        return jnp.zeros_like(a), jnp.asarray(True)
+
+    d_pencil, e_pencil = _build_qme_pencils_jax(a, b, c, timings)
+    companion = jnp.linalg.solve(e_pencil, d_pencil)
+    companion_eigenvalues, vectors = jnp.linalg.eig(companion)
+    zero_eigenvalue = jnp.abs(companion_eigenvalues) <= jnp.finfo(a.dtype).tiny
+    safe_eigenvalues = jnp.where(zero_eigenvalue, 1.0 + 0.0j, companion_eigenvalues)
+    roots = jnp.where(
+        zero_eigenvalue,
+        jnp.asarray(jnp.inf + 0.0j, dtype=safe_eigenvalues.dtype),
+        1.0 / safe_eigenvalues,
+    )
+    root_magnitudes = jnp.where(
+        zero_eigenvalue,
+        jnp.asarray(jnp.inf, dtype=a.dtype),
+        jnp.abs(roots),
+    )
+    stable_order = jnp.argsort(root_magnitudes)[: timings.nPast_not_future_and_mixed]
+    stable_roots = roots[stable_order]
+    stable_vectors = vectors[:, stable_order]
+
+    n_past = timings.nPast_not_future_and_mixed
+    z11 = stable_vectors[:n_past, :]
+    z21 = stable_vectors[n_past:, :]
+    d_block = jnp.linalg.solve(z11.T, z21.T).T
+    l_core = jnp.diag(stable_roots)
+    l_block = jnp.linalg.solve(z11.T, (z11 @ l_core).T).T
+
+    sol = jnp.vstack([l_block[list(timings.not_mixed_in_past_idx), :], d_block])
+    comb = tuple(
+        sorted(
+            set(timings.future_not_past_and_mixed_idx)
+            | set(timings.past_not_future_idx)
+        )
+    )
+    past_not_future_and_mixed_in_comb = _indexin(
+        timings.past_not_future_and_mixed_idx,
+        comb,
+    )
+    selection = jnp.eye(len(comb), dtype=stable_vectors.dtype)[
+        list(past_not_future_and_mixed_in_comb),
+        :,
+    ]
+    solution_complex = sol[list(timings.dynamic_order), :] @ selection
+    solution = jnp.asarray(jnp.real(solution_complex), dtype=a.dtype)
+
+    stable_count = jnp.sum(root_magnitudes < 1.0)
+    imag_tol = jnp.asarray(
+        1.0e-6 if a.dtype == jnp.float32 else 1.0e-9,
+        dtype=a.dtype,
+    )
+    success = (
+        (stable_count == n_past)
+        & (~jnp.any(jnp.isnan(root_magnitudes)))
+        & jnp.all(jnp.isfinite(stable_roots))
+        & jnp.all(jnp.isfinite(solution))
+        & (jnp.max(jnp.abs(jnp.imag(solution_complex))) <= imag_tol)
+    )
+    return solution, success
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(3,))
+def _solve_quadratic_matrix_equation_schur_gpu_jax_core(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    timings: DSGETimings,
+) -> tuple[jax.Array, jax.Array]:
+    return _solve_quadratic_matrix_equation_schur_gpu_impl(a, b, c, timings)
+
+
+def _solve_quadratic_matrix_equation_schur_gpu_jax_core_fwd(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    timings: DSGETimings,
+) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]]:
+    solution, success = _solve_quadratic_matrix_equation_schur_gpu_impl(a, b, c, timings)
+    return (solution, success), (a, b, c, solution, success)
+
+
+def _solve_quadratic_matrix_equation_schur_gpu_jax_core_bwd(
+    timings: DSGETimings,
+    residuals: tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array],
+    cotangents: tuple[jax.Array, jax.Array],
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    a, b, _, solution, success = residuals
+    solution_bar, _ = cotangents
+    zero_grads = (
+        jnp.zeros_like(a),
+        jnp.zeros_like(b),
+        jnp.zeros_like(solution),
+    )
+    return lax.cond(
+        success,
+        lambda args: _solve_qme_schur_adjoint(*args),
+        lambda _: zero_grads,
+        (a, b, solution, solution_bar),
+    )
+
+
+_solve_quadratic_matrix_equation_schur_gpu_jax_core.defvjp(
+    _solve_quadratic_matrix_equation_schur_gpu_jax_core_fwd,
+    _solve_quadratic_matrix_equation_schur_gpu_jax_core_bwd,
+)
+
+
 def solve_quadratic_matrix_equation_doubling(
     a: Union[jax.Array, np.ndarray],
     b: Union[jax.Array, np.ndarray],
@@ -1158,6 +1334,41 @@ def solve_quadratic_matrix_equation_schur_jax(
     )
 
 
+def solve_quadratic_matrix_equation_schur_gpu_jax(
+    a: Union[jax.Array, np.ndarray],
+    b: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+    timings: DSGETimings,
+    *,
+    initial_guess: Optional[Union[jax.Array, np.ndarray]] = None,
+    acceptance_tol: float = 1e-8,
+) -> QuadraticMatrixEquationResult:
+    a_arr, b_arr, c_arr = _cast_quadratic_matrix_equation_inputs(a, b, c)
+    if initial_guess is not None:
+        guess = jnp.asarray(initial_guess, dtype=a_arr.dtype)
+        if guess.shape != a_arr.shape:
+            raise ValueError(
+                f"initial_guess must match A's shape, got {guess.shape} and {a_arr.shape}."
+            )
+
+    solution, success = _solve_quadratic_matrix_equation_schur_gpu_jax_core(
+        a_arr,
+        b_arr,
+        c_arr,
+        timings,
+    )
+    acceptance_tol_arr = jnp.asarray(acceptance_tol, dtype=a_arr.dtype)
+    residual = quadratic_matrix_equation_residual(a_arr, solution, b_arr, c_arr)
+    relative_residual = jnp.where(success, residual, jnp.asarray(1.0, dtype=a_arr.dtype))
+    converged = success & (relative_residual < acceptance_tol_arr)
+    return QuadraticMatrixEquationResult(
+        solution=solution,
+        converged=converged,
+        iterations=jnp.asarray(0),
+        relative_residual=relative_residual,
+    )
+
+
 def _prepare_first_order_qme_system(
     jacobian: Union[jax.Array, np.ndarray],
     timings: DSGETimings,
@@ -1255,7 +1466,7 @@ def solve_first_order_dsge_solution(
             tol=qme_tol,
             acceptance_tol=qme_acceptance_tol,
         )
-    elif qme_algorithm == "schur":
+    elif qme_algorithm in {"schur", "schur_gpu"}:
         qme_result = solve_quadratic_matrix_equation_schur(
             a_tilde_plus,
             a_tilde_zero,
@@ -1267,7 +1478,7 @@ def solve_first_order_dsge_solution(
     else:
         raise ValueError(
             f"Unsupported quadratic matrix equation algorithm {qme_algorithm!r}. "
-            "Only 'doubling' and 'schur' are implemented."
+            "Only 'doubling', 'schur', and 'schur_gpu' are implemented."
         )
     if not qme_result.converged:
         empty = jnp.zeros((timings.nVars, timings.nPast_not_future_and_mixed + timings.nExo))
@@ -1434,10 +1645,19 @@ def solve_first_order_dsge_solution_jax(
             initial_guess=qme_initial_guess,
             acceptance_tol=qme_acceptance_tol,
         )
+    elif qme_algorithm == "schur_gpu":
+        qme_result = solve_quadratic_matrix_equation_schur_gpu_jax(
+            a_tilde_plus,
+            a_tilde_zero,
+            a_tilde_minus,
+            timings,
+            initial_guess=qme_initial_guess,
+            acceptance_tol=qme_acceptance_tol,
+        )
     else:
         raise ValueError(
             f"Unsupported quadratic matrix equation algorithm {qme_algorithm!r}. "
-            "Only 'doubling' and 'schur' are implemented."
+            "Only 'doubling', 'schur', and 'schur_gpu' are implemented."
         )
 
     reverse_dynamic_order_idx = jnp.asarray(reverse_dynamic_order, dtype=jnp.int32)

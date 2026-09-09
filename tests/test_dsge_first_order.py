@@ -14,6 +14,7 @@ from surrogatenn_dsge import (
     solve_quadratic_matrix_equation_doubling,
     solve_quadratic_matrix_equation_doubling_jax,
     solve_quadratic_matrix_equation_schur,
+    solve_quadratic_matrix_equation_schur_gpu_jax,
     solve_quadratic_matrix_equation_schur_jax,
 )
 
@@ -293,6 +294,60 @@ def test_jax_schur_quadratic_matrix_equation_supports_vmap() -> None:
         )
 
 
+def test_jax_gpu_schur_quadratic_matrix_equation_matches_scipy_schur() -> None:
+    timings, a_tilde_plus, a_tilde_zero, a_tilde_minus = _rbc_cme_qme_fixture()
+
+    result = jax.jit(
+        solve_quadratic_matrix_equation_schur_gpu_jax,
+        static_argnames=("timings",),
+    )(
+        a_tilde_plus,
+        a_tilde_zero,
+        a_tilde_minus,
+        timings,
+    )
+    expected = solve_quadratic_matrix_equation_schur(
+        a_tilde_plus,
+        a_tilde_zero,
+        a_tilde_minus,
+        timings,
+    )
+
+    assert bool(np.asarray(result.converged))
+    np.testing.assert_allclose(result.solution, expected.solution, rtol=1e-8, atol=1e-8)
+
+
+def test_jax_gpu_schur_quadratic_matrix_equation_supports_reverse_mode_autodiff() -> None:
+    timings, a_tilde_plus, a_tilde_zero, a_tilde_minus = _rbc_cme_qme_fixture()
+    compiled_grad = jax.jit(
+        jax.grad(
+            lambda shift: jnp.sum(
+                solve_quadratic_matrix_equation_schur_gpu_jax(
+                    a_tilde_plus,
+                    a_tilde_zero.at[0, 0].add(shift),
+                    a_tilde_minus,
+                    timings,
+                ).solution
+                ** 2
+            )
+        )
+    )
+    epsilon = 1e-6
+    autodiff_grad = float(np.asarray(compiled_grad(0.0)))
+
+    def objective(shift: float) -> float:
+        result = solve_quadratic_matrix_equation_schur(
+            a_tilde_plus,
+            a_tilde_zero.at[0, 0].add(shift),
+            a_tilde_minus,
+            timings,
+        )
+        return float(np.asarray(jnp.sum(result.solution ** 2)))
+
+    finite_difference = (objective(epsilon) - objective(-epsilon)) / (2.0 * epsilon)
+    np.testing.assert_allclose(autodiff_grad, finite_difference, rtol=5e-5, atol=5e-6)
+
+
 def test_quadratic_matrix_equation_schur_handles_empty_pencils_without_crashing() -> None:
     timings = _static_qme_timings()
 
@@ -429,6 +484,38 @@ def test_jax_first_order_solution_schur_matches_existing_solver() -> None:
         jacobian,
         timings,
         qme_algorithm="schur",
+    )
+
+    assert bool(np.asarray(result.converged))
+    np.testing.assert_allclose(
+        result.solution_matrix,
+        expected_solution,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        result.solution_matrix,
+        solve_first_order_dsge_solution(
+            jacobian,
+            timings,
+            qme_algorithm="schur",
+        ).solution_matrix,
+        rtol=1e-8,
+        atol=1e-8,
+    )
+
+
+def test_jax_first_order_solution_schur_gpu_matches_existing_solver() -> None:
+    timings, jacobian, expected_solution = _rbc_cme_fixture()
+    compiled = jax.jit(
+        solve_first_order_dsge_solution_jax,
+        static_argnames=("timings", "qme_algorithm"),
+    )
+
+    result = compiled(
+        jacobian,
+        timings,
+        qme_algorithm="schur_gpu",
     )
 
     assert bool(np.asarray(result.converged))
