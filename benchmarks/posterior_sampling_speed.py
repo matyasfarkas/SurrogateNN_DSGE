@@ -746,9 +746,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             width_scale=float(args.prior_width_scale),
             width_floor=float(args.prior_width_floor),
         )
-    from numpyro.infer import MCMC, NUTS, init_to_value
+    from numpyro.infer import HMC, MCMC, NUTS, init_to_value
 
-    with _logged_stage(args, "build NumPyro model and NUTS kernel"):
+    with _logged_stage(args, "build NumPyro model and MCMC kernel"):
         numpyro_model = sdsge.build_numpyro_kalman_model_jax(
             model,
             observations,
@@ -764,13 +764,26 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             parameters_are_resolved=bool(args.parameters_are_resolved),
             check_parameter_bounds=not bool(args.skip_parameter_bounds),
         )
-        kernel = NUTS(
-            numpyro_model,
-            dense_mass=bool(args.dense_mass),
-            target_accept_prob=float(args.target_accept_prob),
-            max_tree_depth=int(args.max_tree_depth),
-            init_strategy=init_to_value(values=initial_values),
-        )
+        init_strategy = init_to_value(values=initial_values)
+        if args.kernel == "nuts":
+            kernel = NUTS(
+                numpyro_model,
+                dense_mass=bool(args.dense_mass),
+                target_accept_prob=float(args.target_accept_prob),
+                max_tree_depth=int(args.max_tree_depth),
+                init_strategy=init_strategy,
+            )
+        else:
+            kernel = HMC(
+                numpyro_model,
+                dense_mass=bool(args.dense_mass),
+                target_accept_prob=float(args.target_accept_prob),
+                num_steps=int(args.hmc_num_steps),
+                step_size=float(args.hmc_step_size),
+                adapt_step_size=not bool(args.no_adapt_step_size),
+                adapt_mass_matrix=not bool(args.no_adapt_mass_matrix),
+                init_strategy=init_strategy,
+            )
         mcmc = MCMC(
             kernel,
             num_warmup=int(args.warmup),
@@ -805,6 +818,11 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "samples": int(args.samples),
         "chains": int(args.chains),
         "chain_method": args.chain_method,
+        "kernel": args.kernel,
+        "hmc_num_steps": int(args.hmc_num_steps) if args.kernel == "hmc" else None,
+        "hmc_step_size": float(args.hmc_step_size) if args.kernel == "hmc" else None,
+        "adapt_step_size": not bool(args.no_adapt_step_size),
+        "adapt_mass_matrix": not bool(args.no_adapt_mass_matrix),
         "dense_mass": bool(args.dense_mass),
         "target_accept_prob": float(args.target_accept_prob),
         "max_tree_depth": int(args.max_tree_depth),
@@ -858,7 +876,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         args,
         "starting MCMC: "
         f"warmup={args.warmup}, samples={args.samples}, chains={args.chains}, "
-        f"chain_method={args.chain_method}, dense_mass={args.dense_mass}",
+        f"chain_method={args.chain_method}, kernel={args.kernel}, "
+        f"dense_mass={args.dense_mass}",
     )
     start = time.perf_counter()
     with _logged_stage(args, "NumPyro MCMC run"):
@@ -959,6 +978,29 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--chain-method",
         choices=("parallel", "vectorized", "sequential"),
         default="vectorized",
+    )
+    parser.add_argument("--kernel", choices=("nuts", "hmc"), default="nuts")
+    parser.add_argument(
+        "--hmc-num-steps",
+        type=int,
+        default=8,
+        help="Fixed leapfrog step count used when --kernel hmc.",
+    )
+    parser.add_argument(
+        "--hmc-step-size",
+        type=float,
+        default=1.0,
+        help="Initial HMC step size used when --kernel hmc.",
+    )
+    parser.add_argument(
+        "--no-adapt-step-size",
+        action="store_true",
+        help="Disable HMC/NUTS step-size adaptation during warmup.",
+    )
+    parser.add_argument(
+        "--no-adapt-mass-matrix",
+        action="store_true",
+        help="Disable HMC/NUTS mass-matrix adaptation during warmup.",
     )
     parser.add_argument("--host-device-count", type=int, default=None)
     parser.add_argument("--seed", type=int, default=20260908)

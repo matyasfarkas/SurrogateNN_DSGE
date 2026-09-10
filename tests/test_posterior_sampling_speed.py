@@ -85,3 +85,26 @@ def test_parse_args_accepts_gpu_schur_qme_algorithm() -> None:
     args = module._parse_args(["--qme-algorithm", "schur_gpu"])
 
     assert args.qme_algorithm == "schur_gpu"
+
+
+def test_parse_args_accepts_fixed_step_hmc_kernel() -> None:
+    module = _load_module()
+
+    args = module._parse_args(
+        [
+            "--kernel",
+            "hmc",
+            "--hmc-num-steps",
+            "12",
+            "--hmc-step-size",
+            "0.25",
+            "--no-adapt-step-size",
+            "--no-adapt-mass-matrix",
+        ]
+    )
+
+    assert args.kernel == "hmc"
+    assert args.hmc_num_steps == 12
+    assert args.hmc_step_size == 0.25
+    assert args.no_adapt_step_size is True
+    assert args.no_adapt_mass_matrix is True
