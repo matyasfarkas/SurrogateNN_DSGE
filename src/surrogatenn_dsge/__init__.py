@@ -177,6 +177,14 @@ from .statespace import (
     kalman_smoother,
     simulate_linear_gaussian_state_space,
 )
+from .static_hmc import (
+    StaticHMCResult,
+    StaticHMCState,
+    bounded_log_abs_det_jacobian,
+    bounded_to_unconstrained,
+    static_hmc_sample,
+    unconstrained_to_bounded,
+)
 from .switching import (
     GateCalibrationConfig,
     GateCalibrationResult,
@@ -251,6 +259,8 @@ __all__ = [
     "SecondOrderStochasticSteadyStateResult",
     "SteadyStateResult",
     "StateSpaceSimulation",
+    "StaticHMCResult",
+    "StaticHMCState",
     "SwitchingLikelihoodConfig",
     "SwitchingLikelihoodResult",
     "SchurQZDeterminacyDiagnostics",
@@ -275,6 +285,8 @@ __all__ = [
     "build_numpyro_kalman_model_jax",
     "build_numpyro_switching_filter_model_jax",
     "build_numpyro_switching_model_jax",
+    "bounded_log_abs_det_jacobian",
+    "bounded_to_unconstrained",
     "SylvesterOutcome",
     "SylvesterResult",
     "calculate_hessian",
@@ -359,6 +371,7 @@ __all__ = [
     "sep_inversion_loglikelihood_per_period",
     "simulate_linear_gaussian_state_space",
     "simulate_model",
+    "static_hmc_sample",
     "likelihood_surface_report_from_model",
     "switching_pipeline_report_from_model",
     "switching_loglikelihood_from_model",
@@ -411,6 +424,7 @@ __all__ = [
     "split_observation_state",
     "theta_draws",
     "third_order_state_update",
+    "unconstrained_to_bounded",
     "episode_overlap",
     "evaluate_gate_budget_frontier",
     "evaluate_gate_decisions",
