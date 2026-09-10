@@ -111,10 +111,15 @@ def static_hmc_sample(
         raise ValueError("num_warmup and num_samples must be non-negative")
     if num_leapfrog_steps <= 0:
         raise ValueError("num_leapfrog_steps must be positive")
-    if step_size <= 0.0:
-        raise ValueError("step_size must be positive")
     if min_step_size <= 0.0 or max_step_size <= min_step_size:
         raise ValueError("step-size bounds must satisfy 0 < min < max")
+    step_size_array = jnp.asarray(step_size, dtype=position.dtype)
+    try:
+        if float(step_size) <= 0.0:
+            raise ValueError("step_size must be positive")
+    except (TypeError, jax.errors.ConcretizationTypeError):
+        # Dynamic JAX scalars are validated by the caller and clipped below.
+        pass
 
     if inverse_mass is None:
         inverse_mass_array = jnp.ones((position.shape[-1],), dtype=position.dtype)
@@ -129,7 +134,7 @@ def static_hmc_sample(
     state = StaticHMCState(position, initial_log_prob, initial_grad)
     log_min_step = jnp.log(jnp.asarray(min_step_size, dtype=position.dtype))
     log_max_step = jnp.log(jnp.asarray(max_step_size, dtype=position.dtype))
-    initial_log_step = jnp.log(jnp.asarray(step_size, dtype=position.dtype))
+    initial_log_step = jnp.log(step_size_array)
     initial_log_step = jnp.clip(initial_log_step, log_min_step, log_max_step)
 
     def transition(

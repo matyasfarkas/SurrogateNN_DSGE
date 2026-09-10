@@ -90,3 +90,21 @@ def test_parse_args_accepts_static_hmc_gpu_shape() -> None:
     assert args.steady_reps == 1
     assert args.platform == "gpu"
     assert args.force_gpu is True
+
+
+def test_parse_step_size_grid_accepts_commas_and_spaces() -> None:
+    module = _load_module()
+
+    assert module._parse_step_size_grid("0.05, 0.2 1.0", 0.1) == [
+        0.05,
+        0.2,
+        1.0,
+    ]
+    assert module._parse_step_size_grid(None, 0.25) == [0.25]
+
+
+def test_parse_step_size_grid_rejects_nonpositive_values() -> None:
+    module = _load_module()
+
+    with pytest.raises(ValueError, match="positive"):
+        module._parse_step_size_grid("0.1,0", 0.1)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import sys
 import time
@@ -65,6 +66,18 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, np.generic):
         return value.item()
     return str(value)
+
+
+def _parse_step_size_grid(value: str | None, fallback: float) -> list[float]:
+    if value is None:
+        return [float(fallback)]
+    parts = [part for part in re.split(r"[\s,]+", value.strip()) if part]
+    if not parts:
+        raise ValueError("--step-size-grid must contain at least one positive value")
+    step_sizes = [float(part) for part in parts]
+    if any(step_size <= 0.0 for step_size in step_sizes):
+        raise ValueError("--step-size-grid values must be positive")
+    return step_sizes
 
 
 def _samples_by_chain(
@@ -165,6 +178,7 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     upper = jnp.asarray(context["upper"], dtype=theta0.dtype)
     center = jnp.asarray(context["center"], dtype=theta0.dtype)
     prior_log_const = -jnp.sum(jnp.log(upper - lower))
+    step_size_values = _parse_step_size_grid(args.step_size_grid, args.step_size)
 
     def log_posterior_unconstrained(unconstrained_subset):
         constrained_subset = sdsge.unconstrained_to_bounded(
@@ -209,14 +223,14 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         f"parameters={context['parameter_names']}, chains={args.chains}",
     )
 
-    def sample_once(key):
+    def sample_once(key, initial_step_size):
         return sdsge.static_hmc_sample(
             log_posterior_unconstrained,
             initial_position,
             key,
             num_warmup=int(args.warmup),
             num_samples=int(args.samples),
-            step_size=float(args.step_size),
+            step_size=initial_step_size,
             num_leapfrog_steps=int(args.leapfrog_steps),
             target_accept_prob=float(args.target_accept_prob),
             adapt_step_size=not bool(args.no_adapt_step_size),
@@ -226,32 +240,62 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     compiled_sampler = jax.jit(sample_once)
-    log("START cold static-HMC run")
-    first_key, *steady_keys = jax.random.split(run_key, int(args.steady_reps) + 1)
-    first_result, first_s = _timed_call(lambda: compiled_sampler(first_key))
-    log(f"END cold static-HMC run in {first_s:.3f}s")
-    constrained_first = sdsge.unconstrained_to_bounded(first_result.samples, lower, upper)
-    first_diagnostics = _diagnostics(
-        result=first_result,
-        constrained_samples=constrained_first,
-        parameter_names=context["parameter_names"],
-        elapsed_s=first_s,
-        num_leapfrog_steps=int(args.leapfrog_steps),
-    )
-    steady_times: list[float] = []
-    steady_diagnostics = None
-    for rep, key in enumerate(steady_keys, start=1):
-        log(f"START steady static-HMC run {rep}/{args.steady_reps}")
-        result, elapsed = _timed_call(lambda key=key: compiled_sampler(key))
-        steady_times.append(elapsed)
-        log(f"END steady static-HMC run {rep}/{args.steady_reps} in {elapsed:.3f}s")
-        constrained = sdsge.unconstrained_to_bounded(result.samples, lower, upper)
-        steady_diagnostics = _diagnostics(
-            result=result,
-            constrained_samples=constrained,
+    step_size_runs: list[dict[str, Any]] = []
+    for step_index, step_size_value in enumerate(step_size_values):
+        step_run_key = jax.random.fold_in(run_key, step_index)
+        first_key, *steady_keys = jax.random.split(step_run_key, int(args.steady_reps) + 1)
+        initial_step_size = jnp.asarray(step_size_value, dtype=theta0.dtype)
+        label = "cold" if step_index == 0 else "first"
+        log(f"START {label} static-HMC run for step_size={step_size_value:g}")
+        first_result, first_s = _timed_call(
+            lambda key=first_key, step=initial_step_size: compiled_sampler(key, step)
+        )
+        log(
+            f"END {label} static-HMC run for step_size={step_size_value:g} "
+            f"in {first_s:.3f}s"
+        )
+        constrained_first = sdsge.unconstrained_to_bounded(
+            first_result.samples,
+            lower,
+            upper,
+        )
+        first_diagnostics = _diagnostics(
+            result=first_result,
+            constrained_samples=constrained_first,
             parameter_names=context["parameter_names"],
-            elapsed_s=elapsed,
+            elapsed_s=first_s,
             num_leapfrog_steps=int(args.leapfrog_steps),
+        )
+        steady_times: list[float] = []
+        steady_diagnostics = None
+        for rep, key in enumerate(steady_keys, start=1):
+            log(
+                f"START steady static-HMC run {rep}/{args.steady_reps} "
+                f"for step_size={step_size_value:g}"
+            )
+            result, elapsed = _timed_call(
+                lambda key=key, step=initial_step_size: compiled_sampler(key, step)
+            )
+            steady_times.append(elapsed)
+            log(
+                f"END steady static-HMC run {rep}/{args.steady_reps} "
+                f"for step_size={step_size_value:g} in {elapsed:.3f}s"
+            )
+            constrained = sdsge.unconstrained_to_bounded(result.samples, lower, upper)
+            steady_diagnostics = _diagnostics(
+                result=result,
+                constrained_samples=constrained,
+                parameter_names=context["parameter_names"],
+                elapsed_s=elapsed,
+                num_leapfrog_steps=int(args.leapfrog_steps),
+            )
+        step_size_runs.append(
+            {
+                "initial_step_size": float(step_size_value),
+                "first_run": first_diagnostics,
+                "steady_timing": _timing_stats(steady_times),
+                "steady_last_run": steady_diagnostics,
+            }
         )
 
     return {
@@ -270,7 +314,8 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "warmup": int(args.warmup),
             "samples": int(args.samples),
             "leapfrog_steps": int(args.leapfrog_steps),
-            "initial_step_size": float(args.step_size),
+            "initial_step_size": float(step_size_values[0]),
+            "step_size_grid": step_size_values,
             "target_accept_prob": float(args.target_accept_prob),
             "adapt_step_size": not bool(args.no_adapt_step_size),
             "adaptation_rate": float(args.adaptation_rate),
@@ -285,9 +330,10 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             ),
         },
         "runtime": posterior_speed._runtime_info(jax, context["numpyro"]),
-        "cold_run": first_diagnostics,
-        "steady_timing": _timing_stats(steady_times),
-        "steady_last_run": steady_diagnostics,
+        "cold_run": step_size_runs[0]["first_run"],
+        "steady_timing": step_size_runs[0]["steady_timing"],
+        "steady_last_run": step_size_runs[0]["steady_last_run"],
+        "step_size_runs": step_size_runs,
     }
 
 
@@ -320,6 +366,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=128)
     parser.add_argument("--leapfrog-steps", type=int, default=8)
     parser.add_argument("--step-size", type=float, default=0.1)
+    parser.add_argument(
+        "--step-size-grid",
+        default=None,
+        help="Comma- or whitespace-separated positive initial step sizes to sweep.",
+    )
     parser.add_argument("--target-accept-prob", type=float, default=0.8)
     parser.add_argument("--adaptation-rate", type=float, default=0.05)
     parser.add_argument("--min-step-size", type=float, default=1.0e-5)
@@ -363,6 +414,25 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(json.dumps(result["cold_run"], indent=2, sort_keys=True, default=_json_default))
     if result["steady_last_run"] is not None:
         print(json.dumps(result["steady_last_run"], indent=2, sort_keys=True, default=_json_default))
+    if len(result["step_size_runs"]) > 1:
+        sweep_summary = [
+            {
+                "initial_step_size": run["initial_step_size"],
+                "first_run_s": run["first_run"]["timing_s"],
+                "steady_last_run_s": (
+                    run["steady_last_run"]["timing_s"]
+                    if run["steady_last_run"] is not None
+                    else None
+                ),
+                "accepted_share": run["first_run"]["acceptance"]["accepted_share"],
+                "accept_prob_mean": run["first_run"]["acceptance"]["accept_prob"]["mean"],
+                "min_ess": run["first_run"]["min_ess"],
+                "max_r_hat": run["first_run"]["posterior_diagnostics"]["max_r_hat"],
+                "seconds_per_min_ess": run["first_run"]["seconds_per_min_ess"],
+            }
+            for run in result["step_size_runs"]
+        ]
+        print(json.dumps({"step_size_sweep": sweep_summary}, indent=2, sort_keys=True))
     print(f"Wrote {args.output}")
 
 
