@@ -276,6 +276,7 @@ def _make_centered_uniform_priors(
     model: Any,
     parameter_names: Sequence[str],
     *,
+    parameter_values: np.ndarray | None = None,
     width_scale: float,
     width_floor: float,
 ) -> tuple[dict[str, Any], dict[str, float], dict[str, tuple[float, float]]]:
@@ -283,7 +284,11 @@ def _make_centered_uniform_priors(
     priors: dict[str, Any] = {}
     initial_values: dict[str, float] = {}
     intervals: dict[str, tuple[float, float]] = {}
-    values = np.asarray(model.parameter_values, dtype=np.float64)
+    values = (
+        np.asarray(model.parameter_values, dtype=np.float64)
+        if parameter_values is None
+        else np.asarray(parameter_values, dtype=np.float64)
+    )
     for name in parameter_names:
         center = float(values[index[name]])
         lower, upper = _prior_interval(name, center, width_scale, width_floor)
@@ -609,8 +614,11 @@ def _preflight_metrics(
     measurement_error_scale: float,
     jitter: float,
     qme_algorithm: str,
+    static_equation_rows: Sequence[int] | None,
     reps: int,
     failure_value: float,
+    parameters_are_resolved: bool,
+    check_parameter_bounds: bool,
     log_fn: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     theta = jnp.asarray(parameter_values)
@@ -627,6 +635,9 @@ def _preflight_metrics(
             jitter=jitter,
             qme_algorithm=qme_algorithm,
             on_failure_loglikelihood=failure_value,
+            static_equation_rows=static_equation_rows,
+            parameters_are_resolved=parameters_are_resolved,
+            check_parameter_bounds=check_parameter_bounds,
         )
     )
     index = jnp.asarray(
@@ -701,7 +712,25 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     observations = np.asarray(data["observations"], dtype=np_dtype)
     observables = tuple(data["observables"])
     parameter_names = tuple(data["parameter_names"])
-    parameter_values = np.asarray(model.parameter_values, dtype=np_dtype)
+    raw_parameter_values = np.asarray(model.parameter_values, dtype=np.float64)
+    resolved_parameter_values = np.asarray(
+        model.resolve_parameter_values(
+            parameter_values=raw_parameter_values,
+            steady_state=np.asarray(data["steady_state"], dtype=np.float64),
+        ),
+        dtype=np.float64,
+    )
+    parameter_values = (
+        resolved_parameter_values if args.parameters_are_resolved else raw_parameter_values
+    ).astype(np_dtype, copy=False)
+    static_equation_rows = (
+        model._first_order_static_equation_rows_for_values(
+            steady_state=steady_state,
+            parameter_values=parameter_values,
+        )
+        if (args.qme_algorithm == "schur_gpu" and not model.has_obc)
+        else None
+    )
     _log(
         args,
         "dataset ready: "
@@ -713,6 +742,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             dist,
             model,
             parameter_names,
+            parameter_values=parameter_values,
             width_scale=float(args.prior_width_scale),
             width_floor=float(args.prior_width_floor),
         )
@@ -730,6 +760,9 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             jitter=float(data["jitter"]),
             on_failure_loglikelihood=float(args.failure_value),
             qme_algorithm=args.qme_algorithm,
+            static_equation_rows=static_equation_rows,
+            parameters_are_resolved=bool(args.parameters_are_resolved),
+            check_parameter_bounds=not bool(args.skip_parameter_bounds),
         )
         kernel = NUTS(
             numpyro_model,
@@ -758,6 +791,16 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "parameter_names": list(parameter_names),
         "qme_algorithm": args.qme_algorithm,
         "dtype": args.dtype,
+        "parameters_are_resolved": bool(args.parameters_are_resolved),
+        "check_parameter_bounds": not bool(args.skip_parameter_bounds),
+        "static_equation_rows": (
+            list(static_equation_rows) if static_equation_rows is not None else None
+        ),
+        "resolved_parameter_max_abs_diff": float(
+            np.max(np.abs(resolved_parameter_values - raw_parameter_values))
+        )
+        if raw_parameter_values.size
+        else 0.0,
         "warmup": int(args.warmup),
         "samples": int(args.samples),
         "chains": int(args.chains),
@@ -784,8 +827,11 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 measurement_error_scale=float(data["measurement_error_scale"]),
                 jitter=float(data["jitter"]),
                 qme_algorithm=args.qme_algorithm,
+                static_equation_rows=static_equation_rows,
                 reps=int(args.preflight_reps),
                 failure_value=float(args.failure_value),
+                parameters_are_resolved=bool(args.parameters_are_resolved),
+                check_parameter_bounds=not bool(args.skip_parameter_bounds),
                 log_fn=lambda message: _log(args, message),
             )
             _log(
@@ -861,7 +907,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 steady_state=np.asarray(steady_state, dtype=np.float64),
                 samples_by_chain=samples_by_chain,
                 parameter_names=parameter_names,
-                base_parameter_values=np.asarray(model.parameter_values, dtype=np.float64),
+                base_parameter_values=np.asarray(parameter_values, dtype=np.float64),
                 measurement_error_scale=float(data["measurement_error_scale"]),
                 jitter=float(data["jitter"]),
                 max_draws=int(args.schur_support_draws),
@@ -935,6 +981,22 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Compile and time the likelihood/gradient, then exit before MCMC.",
     )
     parser.add_argument("--preflight-reps", type=int, default=0)
+    parser.add_argument(
+        "--parameters-are-resolved",
+        action="store_true",
+        help=(
+            "Use a parameter vector that is pre-resolved against active calibration "
+            "equations and skip calibration resolution inside the JAX likelihood."
+        ),
+    )
+    parser.add_argument(
+        "--skip-parameter-bounds",
+        action="store_true",
+        help=(
+            "Skip the outer model bounds branch. Use only when NumPyro priors or "
+            "parameter transforms already enforce support."
+        ),
+    )
     parser.add_argument("--failure-value", type=float, default=-1.0e12)
     parser.add_argument("--schur-support-draws", type=int, default=0)
     parser.add_argument("--schur-acceptance-tol", type=float, default=1.0e-8)

@@ -126,6 +126,38 @@ def _coerce_parameter_vector_for_jax(
     return vector
 
 
+def _static_equation_rows_for_jax_qme(
+    model: MacroModel,
+    qme_algorithm: str,
+    steady_state: Optional[Sequence[float]],
+    static_equation_rows: Optional[Sequence[int]] = None,
+) -> Optional[tuple[int, ...]]:
+    if qme_algorithm != "schur_gpu" or model.has_obc:
+        return None
+    if static_equation_rows is not None:
+        return tuple(int(row) for row in static_equation_rows)
+    return model._first_order_static_equation_rows_for_values(steady_state=steady_state)
+
+
+def _resolve_or_use_explicit_parameters_jax(
+    model: MacroModel,
+    parameters: jax.Array,
+    full_steady_state: jax.Array,
+    *,
+    tol: float,
+    max_iter: int,
+    parameters_are_resolved: bool,
+) -> jax.Array:
+    if parameters_are_resolved:
+        return jnp.asarray(parameters, dtype=jnp.float64)
+    return model.resolve_parameter_values_jax(
+        parameter_values=parameters,
+        steady_state=full_steady_state,
+        tol=tol,
+        max_iter=max_iter,
+    )
+
+
 def _linear_state_space_from_first_order_solution_jax(
     solution_matrix: jax.Array,
     model: MacroModel,
@@ -216,6 +248,9 @@ def kalman_loglikelihood_from_model_jax(
     jitter: float = 1e-9,
     on_failure_loglikelihood: float = -np.inf,
     qme_algorithm: str = "schur",
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ) -> jax.Array:
     observable_names, observation_data = model._coerce_observations(
         observations,
@@ -245,6 +280,12 @@ def kalman_loglikelihood_from_model_jax(
         None
         if steady_state is None
         else jnp.asarray(model._coerce_full_steady_state(steady_state), dtype=jnp.float64)
+    )
+    static_equation_rows = _static_equation_rows_for_jax_qme(
+        model,
+        qme_algorithm,
+        steady_state,
+        static_equation_rows=static_equation_rows,
     )
 
     def _loglikelihood_from_full_steady_state(
@@ -300,11 +341,7 @@ def kalman_loglikelihood_from_model_jax(
             jacobian,
             model.timings,
             qme_algorithm=qme_algorithm,
-            static_equation_rows=(
-                model._first_order_static_equation_rows
-                if (qme_algorithm == "schur_gpu" and not model.has_obc)
-                else None
-            ),
+            static_equation_rows=static_equation_rows,
         )
 
         def _success(result) -> jax.Array:
@@ -332,11 +369,13 @@ def kalman_loglikelihood_from_model_jax(
 
     def _valid_loglikelihood(parameters: jax.Array) -> jax.Array:
         if explicit_steady_state is not None:
-            resolved_parameters = model.resolve_parameter_values_jax(
-                parameter_values=parameters,
-                steady_state=explicit_steady_state,
+            resolved_parameters = _resolve_or_use_explicit_parameters_jax(
+                model,
+                parameters,
+                explicit_steady_state,
                 tol=steady_state_tol,
                 max_iter=steady_state_max_iter,
+                parameters_are_resolved=parameters_are_resolved,
             )
             return _loglikelihood_from_full_steady_state(
                 explicit_steady_state,
@@ -362,6 +401,8 @@ def kalman_loglikelihood_from_model_jax(
     within_bounds = jnp.all(
         (parameter_vector >= lower_bounds_array) & (parameter_vector <= upper_bounds_array)
     )
+    if not check_parameter_bounds:
+        return _valid_loglikelihood(parameter_vector)
     return lax.cond(
         within_bounds,
         _valid_loglikelihood,
@@ -393,6 +434,9 @@ def switching_loglikelihood_from_model_jax(
     qme_algorithm: str = "schur",
     initial_state: Optional[Sequence[float]] = None,
     switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ) -> jax.Array:
     if fom_algorithm != "first_order":
         raise NotImplementedError(
@@ -456,6 +500,12 @@ def switching_loglikelihood_from_model_jax(
             dtype=jnp.float64,
         )
     )
+    static_equation_rows = _static_equation_rows_for_jax_qme(
+        model,
+        qme_algorithm,
+        steady_state,
+        static_equation_rows=static_equation_rows,
+    )
 
     def _loglikelihood_from_full_steady_state(
         full_steady_state: jax.Array,
@@ -500,6 +550,7 @@ def switching_loglikelihood_from_model_jax(
             jacobian,
             model.timings,
             qme_algorithm=qme_algorithm,
+            static_equation_rows=static_equation_rows,
         )
 
         def _success(result) -> jax.Array:
@@ -549,11 +600,13 @@ def switching_loglikelihood_from_model_jax(
 
     def _valid_loglikelihood(parameters: jax.Array) -> jax.Array:
         if explicit_steady_state is not None:
-            resolved_parameters = model.resolve_parameter_values_jax(
-                parameter_values=parameters,
-                steady_state=explicit_steady_state,
+            resolved_parameters = _resolve_or_use_explicit_parameters_jax(
+                model,
+                parameters,
+                explicit_steady_state,
                 tol=steady_state_tol,
                 max_iter=steady_state_max_iter,
+                parameters_are_resolved=parameters_are_resolved,
             )
             return _loglikelihood_from_full_steady_state(
                 explicit_steady_state,
@@ -579,6 +632,8 @@ def switching_loglikelihood_from_model_jax(
     within_bounds = jnp.all(
         (parameter_vector >= lower_bounds_array) & (parameter_vector <= upper_bounds_array)
     )
+    if not check_parameter_bounds:
+        return _valid_loglikelihood(parameter_vector)
     return lax.cond(
         within_bounds,
         _valid_loglikelihood,
@@ -938,6 +993,9 @@ def _estimate_observed_shocks_and_variables_matrix_model_jax(
     initial_covariance_strategy: str = "theoretical",
     jitter: float = 1e-9,
     on_failure_fill_value: float = np.nan,
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ) -> tuple[tuple[str, ...], jax.Array, jax.Array, jax.Array, jax.Array]:
     filter_name = str(filter)
     if filter_name not in {"kalman", "inversion"}:
@@ -980,6 +1038,12 @@ def _estimate_observed_shocks_and_variables_matrix_model_jax(
         None
         if steady_state is None
         else jnp.asarray(model._coerce_full_steady_state(steady_state), dtype=jnp.float64)
+    )
+    static_equation_rows = _static_equation_rows_for_jax_qme(
+        model,
+        qme_algorithm,
+        steady_state,
+        static_equation_rows=static_equation_rows,
     )
 
     def _failure_result(_: Any) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
@@ -1038,6 +1102,7 @@ def _estimate_observed_shocks_and_variables_matrix_model_jax(
             jacobian,
             model.timings,
             qme_algorithm=qme_algorithm,
+            static_equation_rows=static_equation_rows,
         )
 
         def _success(result: Any) -> tuple[jax.Array, jax.Array]:
@@ -1117,11 +1182,13 @@ def _estimate_observed_shocks_and_variables_matrix_model_jax(
 
     def _valid_paths(parameters: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
         if explicit_steady_state is not None:
-            resolved_parameters = model.resolve_parameter_values_jax(
-                parameter_values=parameters,
-                steady_state=explicit_steady_state,
+            resolved_parameters = _resolve_or_use_explicit_parameters_jax(
+                model,
+                parameters,
+                explicit_steady_state,
                 tol=steady_state_tol,
                 max_iter=steady_state_max_iter,
+                parameters_are_resolved=parameters_are_resolved,
             )
             return _paths_from_full_steady_state(
                 explicit_steady_state,
@@ -1147,11 +1214,15 @@ def _estimate_observed_shocks_and_variables_matrix_model_jax(
     within_bounds = jnp.all(
         (parameter_vector >= lower_bounds_array) & (parameter_vector <= upper_bounds_array)
     )
-    full_steady_state_out, solution_matrix_out, shocks_matrix, variables_matrix = lax.cond(
-        within_bounds,
-        _valid_paths,
-        _failure_result,
-        parameter_vector,
+    full_steady_state_out, solution_matrix_out, shocks_matrix, variables_matrix = (
+        _valid_paths(parameter_vector)
+        if not check_parameter_bounds
+        else lax.cond(
+            within_bounds,
+            _valid_paths,
+            _failure_result,
+            parameter_vector,
+        )
     )
     return (
         observable_names,
@@ -1184,6 +1255,8 @@ def estimate_observed_shocks_matrix_jax(
     initial_covariance_strategy: str = "theoretical",
     jitter: float = 1e-9,
     on_failure_fill_value: float = np.nan,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ) -> jax.Array:
     _, _, _, shocks_matrix, _ = _estimate_observed_shocks_and_variables_matrix_model_jax(
         model,
@@ -1204,6 +1277,8 @@ def estimate_observed_shocks_matrix_jax(
         initial_covariance_strategy=initial_covariance_strategy,
         jitter=jitter,
         on_failure_fill_value=on_failure_fill_value,
+        parameters_are_resolved=parameters_are_resolved,
+        check_parameter_bounds=check_parameter_bounds,
     )
     if expected_rows is not None and shocks_matrix.shape[0] != int(expected_rows):
         raise ValueError(
@@ -1239,6 +1314,8 @@ def estimate_observed_variables_matrix_jax(
     initial_covariance_strategy: str = "theoretical",
     jitter: float = 1e-9,
     on_failure_fill_value: float = np.nan,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ) -> jax.Array:
     _, _, _, _, variables_matrix = _estimate_observed_shocks_and_variables_matrix_model_jax(
         model,
@@ -1259,6 +1336,8 @@ def estimate_observed_variables_matrix_jax(
         initial_covariance_strategy=initial_covariance_strategy,
         jitter=jitter,
         on_failure_fill_value=on_failure_fill_value,
+        parameters_are_resolved=parameters_are_resolved,
+        check_parameter_bounds=check_parameter_bounds,
     )
     if expected_rows is not None and variables_matrix.shape[0] != int(expected_rows):
         raise ValueError(
@@ -1405,6 +1484,9 @@ def compute_linear_gate_stats_from_filter_model_jax(
     initial_covariance_strategy: str = "theoretical",
     jitter: float = 1e-9,
     on_failure_fill_value: float = np.nan,
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ) -> LinearGateStatsResult:
     del state_names
     if periods is not None and int(periods) <= 0:
@@ -1430,6 +1512,9 @@ def compute_linear_gate_stats_from_filter_model_jax(
             initial_covariance_strategy=initial_covariance_strategy,
             jitter=jitter,
             on_failure_fill_value=on_failure_fill_value,
+            static_equation_rows=static_equation_rows,
+            parameters_are_resolved=parameters_are_resolved,
+            check_parameter_bounds=check_parameter_bounds,
         )
     )
     observable_indices = model.resolve_observable_indices(observable_names)
@@ -1524,6 +1609,9 @@ def switching_loglikelihood_from_model_filter_gates_jax(
     qme_algorithm: str = "schur",
     initial_state: Optional[Sequence[float]] = None,
     switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ) -> jax.Array:
     gate_stats = compute_linear_gate_stats_from_filter_model_jax(
         model,
@@ -1546,6 +1634,9 @@ def switching_loglikelihood_from_model_filter_gates_jax(
         initial_covariance_strategy=initial_covariance_strategy,
         jitter=jitter,
         on_failure_fill_value=np.nan,
+        static_equation_rows=static_equation_rows,
+        parameters_are_resolved=parameters_are_resolved,
+        check_parameter_bounds=check_parameter_bounds,
     )
     gate_probs = gate_probabilities_jax(
         gate_stats.e_stat,
@@ -1577,6 +1668,9 @@ def switching_loglikelihood_from_model_filter_gates_jax(
             qme_algorithm=qme_algorithm,
             initial_state=initial_state,
             switching_config=switching_config,
+            static_equation_rows=static_equation_rows,
+            parameters_are_resolved=parameters_are_resolved,
+            check_parameter_bounds=check_parameter_bounds,
         )
 
     return lax.cond(
@@ -1606,6 +1700,9 @@ def compute_linear_gate_stats_from_shocks_model_jax(
     shock_norm: str = "l2",
     error_norm: str = "l2",
     on_failure_fill_value: float = np.nan,
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ) -> LinearGateStatsResult:
     observable_names, observation_data = model._coerce_observations(
         observations,
@@ -1674,6 +1771,12 @@ def compute_linear_gate_stats_from_shocks_model_jax(
         )
     )
     fill_value = jnp.asarray(on_failure_fill_value, dtype=jnp.float64)
+    static_equation_rows = _static_equation_rows_for_jax_qme(
+        model,
+        qme_algorithm,
+        steady_state,
+        static_equation_rows=static_equation_rows,
+    )
 
     def _failure_result(_: Any) -> LinearGateStatsResult:
         return LinearGateStatsResult(
@@ -1728,6 +1831,7 @@ def compute_linear_gate_stats_from_shocks_model_jax(
             jacobian,
             model.timings,
             qme_algorithm=qme_algorithm,
+            static_equation_rows=static_equation_rows,
         )
 
         def _success(result: Any) -> LinearGateStatsResult:
@@ -1773,11 +1877,13 @@ def compute_linear_gate_stats_from_shocks_model_jax(
 
     def _valid_stats(parameters: jax.Array) -> LinearGateStatsResult:
         if explicit_steady_state is not None:
-            resolved_parameters = model.resolve_parameter_values_jax(
-                parameter_values=parameters,
-                steady_state=explicit_steady_state,
+            resolved_parameters = _resolve_or_use_explicit_parameters_jax(
+                model,
+                parameters,
+                explicit_steady_state,
                 tol=steady_state_tol,
                 max_iter=steady_state_max_iter,
+                parameters_are_resolved=parameters_are_resolved,
             )
             return _stats_from_full_steady_state(
                 explicit_steady_state,
@@ -1803,6 +1909,8 @@ def compute_linear_gate_stats_from_shocks_model_jax(
     within_bounds = jnp.all(
         (parameter_vector >= lower_bounds_array) & (parameter_vector <= upper_bounds_array)
     )
+    if not check_parameter_bounds:
+        return _valid_stats(parameter_vector)
     return lax.cond(
         within_bounds,
         _valid_stats,
@@ -1905,6 +2013,9 @@ def build_numpyro_kalman_model_jax(
     jitter: float = 1e-9,
     on_failure_loglikelihood: float = -np.inf,
     qme_algorithm: str = "schur",
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ):
     numpyro, _, _ = _require_numpyro()
 
@@ -1919,6 +2030,12 @@ def build_numpyro_kalman_model_jax(
             + "."
         )
     base_parameters = _coerce_base_parameter_vector(model, base_parameter_values)
+    static_equation_rows = _static_equation_rows_for_jax_qme(
+        model,
+        qme_algorithm,
+        steady_state,
+        static_equation_rows=static_equation_rows,
+    )
 
     def numpyro_model() -> None:
         sampled_values = {
@@ -1946,6 +2063,9 @@ def build_numpyro_kalman_model_jax(
             jitter=jitter,
             on_failure_loglikelihood=on_failure_loglikelihood,
             qme_algorithm=qme_algorithm,
+            static_equation_rows=static_equation_rows,
+            parameters_are_resolved=parameters_are_resolved,
+            check_parameter_bounds=check_parameter_bounds,
         )
         numpyro.deterministic("parameter_vector", parameter_vector)
         numpyro.deterministic("loglikelihood", loglikelihood)
@@ -1977,6 +2097,9 @@ def build_numpyro_switching_model_jax(
     qme_algorithm: str = "schur",
     initial_state: Optional[Sequence[float]] = None,
     switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ):
     numpyro, _, _ = _require_numpyro()
 
@@ -1991,6 +2114,12 @@ def build_numpyro_switching_model_jax(
             + "."
         )
     base_parameters = _coerce_base_parameter_vector(model, base_parameter_values)
+    static_equation_rows = _static_equation_rows_for_jax_qme(
+        model,
+        qme_algorithm,
+        steady_state,
+        static_equation_rows=static_equation_rows,
+    )
 
     def numpyro_model() -> None:
         sampled_values = {
@@ -2023,6 +2152,9 @@ def build_numpyro_switching_model_jax(
             qme_algorithm=qme_algorithm,
             initial_state=initial_state,
             switching_config=switching_config,
+            static_equation_rows=static_equation_rows,
+            parameters_are_resolved=parameters_are_resolved,
+            check_parameter_bounds=check_parameter_bounds,
         )
         numpyro.deterministic("parameter_vector", parameter_vector)
         numpyro.deterministic("loglikelihood", loglikelihood)
@@ -2060,6 +2192,9 @@ def build_numpyro_switching_filter_model_jax(
     qme_algorithm: str = "schur",
     initial_state: Optional[Sequence[float]] = None,
     switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ):
     numpyro, _, _ = _require_numpyro()
 
@@ -2074,6 +2209,12 @@ def build_numpyro_switching_filter_model_jax(
             + "."
         )
     base_parameters = _coerce_base_parameter_vector(model, base_parameter_values)
+    static_equation_rows = _static_equation_rows_for_jax_qme(
+        model,
+        qme_algorithm,
+        steady_state,
+        static_equation_rows=static_equation_rows,
+    )
 
     def numpyro_model() -> None:
         sampled_values = {
@@ -2112,6 +2253,9 @@ def build_numpyro_switching_filter_model_jax(
             qme_algorithm=qme_algorithm,
             initial_state=initial_state,
             switching_config=switching_config,
+            static_equation_rows=static_equation_rows,
+            parameters_are_resolved=parameters_are_resolved,
+            check_parameter_bounds=check_parameter_bounds,
         )
         numpyro.deterministic("parameter_vector", parameter_vector)
         numpyro.deterministic("loglikelihood", loglikelihood)
@@ -2187,6 +2331,9 @@ def evaluate_numpyro_switching_log_density_jax(
     qme_algorithm: str = "schur",
     initial_state: Optional[Sequence[float]] = None,
     switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ) -> jax.Array:
     _, _, log_density = _require_numpyro()
     numpyro_model = build_numpyro_switching_model_jax(
@@ -2211,6 +2358,9 @@ def evaluate_numpyro_switching_log_density_jax(
         qme_algorithm=qme_algorithm,
         initial_state=initial_state,
         switching_config=switching_config,
+        static_equation_rows=static_equation_rows,
+        parameters_are_resolved=parameters_are_resolved,
+        check_parameter_bounds=check_parameter_bounds,
     )
     log_joint, _ = log_density(numpyro_model, (), {}, parameter_samples)
     return jnp.asarray(log_joint, dtype=jnp.float64)
@@ -2246,6 +2396,9 @@ def evaluate_numpyro_switching_filter_log_density_jax(
     qme_algorithm: str = "schur",
     initial_state: Optional[Sequence[float]] = None,
     switching_config: SwitchingLikelihoodConfig = SwitchingLikelihoodConfig(),
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ) -> jax.Array:
     _, _, log_density = _require_numpyro()
     numpyro_model = build_numpyro_switching_filter_model_jax(
@@ -2276,6 +2429,9 @@ def evaluate_numpyro_switching_filter_log_density_jax(
         qme_algorithm=qme_algorithm,
         initial_state=initial_state,
         switching_config=switching_config,
+        static_equation_rows=static_equation_rows,
+        parameters_are_resolved=parameters_are_resolved,
+        check_parameter_bounds=check_parameter_bounds,
     )
     log_joint, _ = log_density(numpyro_model, (), {}, parameter_samples)
     return jnp.asarray(log_joint, dtype=jnp.float64)
@@ -2300,6 +2456,9 @@ def evaluate_numpyro_kalman_log_density_jax(
     jitter: float = 1e-9,
     on_failure_loglikelihood: float = -np.inf,
     qme_algorithm: str = "schur",
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
 ) -> jax.Array:
     _, _, log_density = _require_numpyro()
     numpyro_model = build_numpyro_kalman_model_jax(
@@ -2319,6 +2478,9 @@ def evaluate_numpyro_kalman_log_density_jax(
         jitter=jitter,
         on_failure_loglikelihood=on_failure_loglikelihood,
         qme_algorithm=qme_algorithm,
+        static_equation_rows=static_equation_rows,
+        parameters_are_resolved=parameters_are_resolved,
+        check_parameter_bounds=check_parameter_bounds,
     )
     log_joint, _ = log_density(numpyro_model, (), {}, parameter_samples)
     return jnp.asarray(log_joint, dtype=jnp.float64)

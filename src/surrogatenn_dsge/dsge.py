@@ -11,7 +11,7 @@ import numpy as np
 import scipy.linalg as scipy_linalg
 from jax import lax
 
-from .linalg import solve_discrete_sylvester
+from .linalg import solve_discrete_sylvester, solve_discrete_sylvester_doubling
 from .statespace import LinearGaussianStateSpace, build_linear_gaussian_state_space
 
 QuadraticMatrixEquationAlgorithm = Literal["doubling", "schur", "schur_gpu"]
@@ -819,15 +819,17 @@ def _solve_qme_schur_adjoint(
     solution: jax.Array,
     cotangent: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    n = solution.shape[0]
     left = (a @ solution + b).T
-    system = jnp.kron(jnp.eye(n, dtype=solution.dtype), left) + jnp.kron(
-        solution,
-        a.T,
-    )
-    rhs = jnp.ravel(cotangent.T)
-    y_vec = jnp.linalg.solve(system, rhs)
-    y_matrix = jnp.reshape(y_vec, solution.shape).T
+    sylvester_a = -jnp.linalg.solve(left, a.T)
+    sylvester_c = jnp.linalg.solve(left, cotangent)
+    y_matrix = solve_discrete_sylvester_doubling(
+        sylvester_a,
+        solution.T,
+        sylvester_c,
+        tol=1e-14,
+        acceptance_tol=1e-10,
+        max_iter=500,
+    ).solution
     return (
         -(y_matrix @ (solution @ solution).T),
         -(y_matrix @ solution.T),
@@ -953,19 +955,46 @@ def _solve_quadratic_matrix_equation_schur_gpu_impl(
         return jnp.zeros_like(a), jnp.asarray(True)
 
     d_pencil, e_pencil = _build_qme_pencils_jax(a, b, c, timings)
-    companion = jnp.linalg.solve(e_pencil, d_pencil)
-    companion_eigenvalues, vectors = jnp.linalg.eig(companion)
-    zero_eigenvalue = jnp.abs(companion_eigenvalues) <= jnp.finfo(a.dtype).tiny
-    safe_eigenvalues = jnp.where(zero_eigenvalue, 1.0 + 0.0j, companion_eigenvalues)
+    complex_dtype = jnp.result_type(a.dtype, jnp.complex64)
+    if a.dtype == jnp.float64:
+        complex_dtype = jnp.complex128
+    d_complex = jnp.asarray(d_pencil, dtype=complex_dtype)
+    e_complex = jnp.asarray(e_pencil, dtype=complex_dtype)
+    cayley_shift = jnp.asarray(1.0j, dtype=complex_dtype)
+    transformed = jnp.linalg.solve(
+        d_complex - cayley_shift * e_complex,
+        d_complex + cayley_shift * e_complex,
+    )
+    cayley_eigenvalues, vectors = jnp.linalg.eig(transformed)
+    cayley_tol = jnp.asarray(jnp.sqrt(jnp.finfo(a.dtype).eps), dtype=a.dtype)
+    near_zero_root = jnp.abs(cayley_eigenvalues - 1.0) <= cayley_tol
+    near_infinite_root = jnp.abs(cayley_eigenvalues + 1.0) <= cayley_tol
+    root_denominator = cayley_shift * (cayley_eigenvalues + 1.0)
+    safe_root_denominator = jnp.where(
+        near_infinite_root,
+        jnp.asarray(1.0 + 0.0j, dtype=complex_dtype),
+        root_denominator,
+    )
+    finite_roots = (cayley_eigenvalues - 1.0) / safe_root_denominator
+    infinite_root = jnp.asarray(jnp.inf + 0.0j, dtype=complex_dtype)
     roots = jnp.where(
-        zero_eigenvalue,
-        jnp.asarray(jnp.inf + 0.0j, dtype=safe_eigenvalues.dtype),
-        1.0 / safe_eigenvalues,
+        near_zero_root,
+        jnp.asarray(0.0 + 0.0j, dtype=complex_dtype),
+        jnp.where(near_infinite_root, infinite_root, finite_roots),
     )
     root_magnitudes = jnp.where(
-        zero_eigenvalue,
+        near_zero_root,
+        jnp.asarray(0.0, dtype=a.dtype),
+        jnp.where(
+            near_infinite_root,
+            jnp.asarray(jnp.inf, dtype=a.dtype),
+            jnp.abs(roots),
+        ),
+    )
+    root_magnitudes = jnp.where(
+        jnp.isnan(root_magnitudes),
         jnp.asarray(jnp.inf, dtype=a.dtype),
-        jnp.abs(roots),
+        root_magnitudes,
     )
     stable_order = jnp.argsort(root_magnitudes)[: timings.nPast_not_future_and_mixed]
     stable_roots = roots[stable_order]
@@ -1003,7 +1032,7 @@ def _solve_quadratic_matrix_equation_schur_gpu_impl(
     )
     success = (
         (stable_count == n_past)
-        & (~jnp.any(jnp.isnan(root_magnitudes)))
+        & jnp.all(jnp.isfinite(transformed))
         & jnp.all(jnp.isfinite(stable_roots))
         & jnp.all(jnp.isfinite(solution))
         & (jnp.max(jnp.abs(jnp.imag(solution_complex))) <= imag_tol)

@@ -365,6 +365,28 @@ def test_jax_gpu_schur_quadratic_matrix_equation_supports_reverse_mode_autodiff(
     np.testing.assert_allclose(autodiff_grad, finite_difference, rtol=5e-5, atol=5e-6)
 
 
+def test_jax_gpu_schur_quadratic_matrix_equation_adjoint_avoids_kronecker_solve() -> None:
+    timings, a_tilde_plus, a_tilde_zero, a_tilde_minus = _rbc_cme_qme_fixture()
+
+    jaxpr = str(
+        jax.make_jaxpr(
+            jax.grad(
+                lambda shifted_zero: jnp.sum(
+                    solve_quadratic_matrix_equation_schur_gpu_jax(
+                        a_tilde_plus,
+                        shifted_zero,
+                        a_tilde_minus,
+                        timings,
+                    ).solution
+                    ** 2
+                )
+            )
+        )(a_tilde_zero)
+    )
+
+    assert "kron" not in jaxpr
+
+
 def test_quadratic_matrix_equation_schur_handles_empty_pencils_without_crashing() -> None:
     timings = _static_qme_timings()
 

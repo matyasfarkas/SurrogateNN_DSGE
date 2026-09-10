@@ -128,7 +128,17 @@ def run_stage_profile(args: argparse.Namespace) -> dict[str, Any]:
     )
     observations = np.asarray(observation_data, dtype=np_dtype)
     steady_state = np.asarray(data["steady_state"], dtype=np_dtype)
-    parameter_values = np.asarray(model.parameter_values, dtype=np_dtype)
+    raw_parameter_values = np.asarray(model.parameter_values, dtype=np.float64)
+    resolved_parameter_values = np.asarray(
+        model.resolve_parameter_values(
+            parameter_values=raw_parameter_values,
+            steady_state=np.asarray(data["steady_state"], dtype=np.float64),
+        ),
+        dtype=np.float64,
+    )
+    parameter_values = (
+        resolved_parameter_values if args.parameters_are_resolved else raw_parameter_values
+    ).astype(np_dtype, copy=False)
     observables = observable_names
     observable_indices = model.resolve_observable_indices(observables)
     observable_index_array = jnp.asarray(observable_indices, dtype=jnp.int32)
@@ -138,12 +148,17 @@ def run_stage_profile(args: argparse.Namespace) -> dict[str, Any]:
     shocks0 = jnp.zeros((model.timings.nExo,), dtype=theta.dtype)
     demeaned_observations = obs - steady[observable_index_array, None]
     static_equation_rows = (
-        model._first_order_static_equation_rows
+        model._first_order_static_equation_rows_for_values(
+            steady_state=steady_state,
+            parameter_values=parameter_values,
+        )
         if (args.qme_algorithm == "schur_gpu" and not model.has_obc)
         else None
     )
 
     def resolve_parameters(current_theta):
+        if args.parameters_are_resolved:
+            return current_theta
         return model.resolve_parameter_values_jax(
             parameter_values=current_theta,
             steady_state=steady,
@@ -237,6 +252,9 @@ def run_stage_profile(args: argparse.Namespace) -> dict[str, Any]:
             jitter=float(data["jitter"]),
             qme_algorithm=args.qme_algorithm,
             on_failure_loglikelihood=float(args.failure_value),
+            static_equation_rows=static_equation_rows,
+            parameters_are_resolved=args.parameters_are_resolved,
+            check_parameter_bounds=not args.skip_parameter_bounds,
         )
 
     def full_loglikelihood_gradient(current_theta):
@@ -318,6 +336,13 @@ def run_stage_profile(args: argparse.Namespace) -> dict[str, Any]:
             "n_exo": int(model.timings.nExo),
             "qme_algorithm": args.qme_algorithm,
             "dtype": args.dtype,
+            "parameters_are_resolved": bool(args.parameters_are_resolved),
+            "check_parameter_bounds": not bool(args.skip_parameter_bounds),
+            "resolved_parameter_max_abs_diff": float(
+                np.max(np.abs(resolved_parameter_values - raw_parameter_values))
+            )
+            if raw_parameter_values.size
+            else 0.0,
             "static_equation_rows": (
                 list(static_equation_rows) if static_equation_rows is not None else None
             ),
@@ -389,6 +414,22 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--gradient-reps", type=int, default=0)
+    parser.add_argument(
+        "--parameters-are-resolved",
+        action="store_true",
+        help=(
+            "Profile the fast compiled path that assumes the supplied parameter "
+            "vector already satisfies active calibration equations."
+        ),
+    )
+    parser.add_argument(
+        "--skip-parameter-bounds",
+        action="store_true",
+        help=(
+            "Skip the outer model bounds branch. Use only when priors or parameter "
+            "transforms already enforce support, as in optimized HMC profiles."
+        ),
+    )
     parser.add_argument("--failure-value", type=float, default=-1.0e12)
     parser.add_argument("--trace-dir", type=Path, default=None)
     parser.add_argument("--verbose", action="store_true")

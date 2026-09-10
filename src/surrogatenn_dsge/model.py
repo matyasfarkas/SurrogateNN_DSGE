@@ -11,6 +11,7 @@ from jax import lax
 import jax.numpy as jnp
 import jax.scipy.special as jsp_special
 import numpy as np
+import scipy.linalg as scipy_linalg
 import scipy.optimize as scipy_optimize
 import scipy.special as scipy_special
 import sympy as sp
@@ -144,6 +145,40 @@ def _maximum_symbolic_row_matching(pattern_by_column: Sequence[Sequence[int]]) -
             )
     column_to_row = {column: row for row, column in row_to_column.items()}
     return tuple(column_to_row[column] for column in range(len(pattern_by_column)))
+
+
+def _pivot_present_only_rows(
+    present_block: np.ndarray,
+    n_present_only: int,
+) -> Optional[tuple[int, ...]]:
+    if n_present_only == 0:
+        return ()
+    block = np.asarray(present_block, dtype=np.float64)
+    if block.ndim != 2 or block.shape[1] != n_present_only:
+        return None
+    if not np.isfinite(block).all():
+        return None
+    try:
+        _, r_matrix, pivots = scipy_linalg.qr(
+            block.T,
+            mode="economic",
+            pivoting=True,
+            check_finite=False,
+        )
+    except Exception:
+        return None
+    rows = tuple(int(row) for row in pivots[:n_present_only])
+    candidate = block[list(rows), :]
+    if candidate.shape != (n_present_only, n_present_only):
+        return None
+    scale = max(float(np.max(np.abs(block))), 1.0)
+    rank_tol = np.finfo(np.float64).eps * max(block.shape) * scale
+    diagonal = np.abs(np.diag(r_matrix)[:n_present_only])
+    if diagonal.shape != (n_present_only,) or float(np.min(diagonal)) <= rank_tol:
+        return None
+    if np.linalg.matrix_rank(candidate, tol=rank_tol) != n_present_only:
+        return None
+    return rows
 
 
 class SteadyStateResult(NamedTuple):
@@ -467,6 +502,10 @@ class MacroModel:
 
     @cached_property
     def _first_order_static_equation_rows(self) -> tuple[int, ...]:
+        return self._first_order_symbolic_static_equation_rows
+
+    @cached_property
+    def _first_order_symbolic_static_equation_rows(self) -> tuple[int, ...]:
         if self.timings.nPresent_only == 0:
             return ()
         current_start = self.timings.nFuture_not_past_and_mixed
@@ -483,6 +522,48 @@ class MacroModel:
             for column in present_only_columns
         )
         return _maximum_symbolic_row_matching(pattern_by_column)
+
+    def _first_order_static_equation_rows_for_values(
+        self,
+        steady_state: Optional[Sequence[float]] = None,
+        parameter_values: Optional[Sequence[float]] = None,
+    ) -> tuple[int, ...]:
+        if self.timings.nPresent_only == 0:
+            return ()
+        if self.has_obc or steady_state is None:
+            return self._first_order_symbolic_static_equation_rows
+        try:
+            full_steady_state = np.asarray(
+                self._coerce_full_steady_state(steady_state),
+                dtype=np.float64,
+            )
+            resolved_parameters = self._coerce_parameter_values(parameter_values)
+            steady_reference_values = np.asarray(
+                self._steady_reference_values(full_steady_state),
+                dtype=np.float64,
+            )
+            jacobian = np.asarray(
+                self._evaluate_dynamic_jacobian_with_context(
+                    full_steady_state,
+                    full_steady_state,
+                    full_steady_state,
+                    np.zeros((self.timings.nExo,), dtype=np.float64),
+                    parameter_values=resolved_parameters,
+                    steady_reference_values=steady_reference_values,
+                ),
+                dtype=np.float64,
+            )
+        except Exception:
+            return self._first_order_symbolic_static_equation_rows
+        current_start = self.timings.nFuture_not_past_and_mixed
+        present_only_columns = tuple(
+            current_start + idx for idx in self.timings.present_only_idx
+        )
+        rows = _pivot_present_only_rows(
+            jacobian[:, present_only_columns],
+            self.timings.nPresent_only,
+        )
+        return rows if rows is not None else self._first_order_symbolic_static_equation_rows
 
     @cached_property
     def _steady_state_solution_cache(

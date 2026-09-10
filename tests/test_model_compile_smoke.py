@@ -7,6 +7,7 @@ import shutil
 import subprocess
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -323,6 +324,183 @@ def test_hlt_kalman_loglikelihood_matches_julia_reference() -> None:
 
     np.testing.assert_allclose(high_level, expected, rtol=1e-10, atol=1e-10)
     np.testing.assert_allclose(compiled, expected, rtol=1e-10, atol=1e-10)
+
+
+def test_hlt_schur_gpu_static_rows_are_numerically_full_rank() -> None:
+    case = _hlt_case()
+    model = parse_macro_model(Path(case["model_path"]).read_text())
+    steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
+    parameters = np.asarray(model.parameter_values, dtype=np.float64)
+    steady_reference_values = np.asarray(
+        model._steady_reference_values(steady_state),
+        dtype=np.float64,
+    )
+    jacobian = np.asarray(
+        model._evaluate_dynamic_jacobian_with_context(
+            steady_state,
+            steady_state,
+            steady_state,
+            np.zeros((model.timings.nExo,), dtype=np.float64),
+            parameter_values=parameters,
+            steady_reference_values=steady_reference_values,
+        ),
+        dtype=np.float64,
+    )
+    current_start = model.timings.nFuture_not_past_and_mixed
+    present_only_columns = [
+        current_start + idx for idx in model.timings.present_only_idx
+    ]
+
+    rows = model._first_order_static_equation_rows_for_values(
+        steady_state=steady_state,
+        parameter_values=parameters,
+    )
+    static_present = jacobian[list(rows)][:, present_only_columns]
+    symbolic_static_present = jacobian[list(model._first_order_static_equation_rows)][
+        :,
+        present_only_columns,
+    ]
+
+    assert len(rows) == model.timings.nPresent_only
+    assert np.linalg.matrix_rank(static_present) == model.timings.nPresent_only
+    assert np.linalg.matrix_rank(symbolic_static_present) < model.timings.nPresent_only
+
+
+def test_hlt_compiled_kalman_loglikelihood_schur_gpu_matches_schur() -> None:
+    case = _hlt_case()
+    model = parse_macro_model(Path(case["model_path"]).read_text())
+    observations = np.asarray(case["observations"], dtype=np.float64)[:, :10]
+    steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
+    parameters = np.asarray(model.parameter_values, dtype=np.float64)
+    static_equation_rows = model._first_order_static_equation_rows_for_values(
+        steady_state=steady_state,
+        parameter_values=parameters,
+    )
+
+    expected = float(
+        kalman_loglikelihood_from_model_jax(
+            model,
+            observations,
+            observables=case["observables"],
+            steady_state=steady_state,
+            parameter_values=parameters,
+            measurement_error_scale=0.0,
+            jitter=0.0,
+            on_failure_loglikelihood=-1e12,
+            qme_algorithm="schur",
+        )
+    )
+    compiled_schur_gpu = jax.jit(
+        lambda theta: kalman_loglikelihood_from_model_jax(
+            model,
+            observations,
+            observables=case["observables"],
+            steady_state=steady_state,
+            parameter_values=theta,
+            measurement_error_scale=0.0,
+            jitter=0.0,
+            on_failure_loglikelihood=-1e12,
+            qme_algorithm="schur_gpu",
+            static_equation_rows=static_equation_rows,
+        )
+    )
+    value = float(compiled_schur_gpu(parameters))
+
+    assert expected > -1e11
+    assert value > -1e11
+    np.testing.assert_allclose(value, expected, rtol=1e-8, atol=1e-8)
+
+
+def test_hlt_schur_gpu_resolved_parameter_fast_path_matches_default_likelihood() -> None:
+    case = _hlt_case()
+    model = parse_macro_model(Path(case["model_path"]).read_text())
+    observations = np.asarray(case["observations"], dtype=np.float64)[:, :10]
+    steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
+    raw_parameters = np.asarray(model.parameter_values, dtype=np.float64)
+    resolved_parameters = np.asarray(
+        model.resolve_parameter_values(
+            parameter_values=raw_parameters,
+            steady_state=steady_state,
+        ),
+        dtype=np.float64,
+    )
+    static_equation_rows = model._first_order_static_equation_rows_for_values(
+        steady_state=steady_state,
+        parameter_values=resolved_parameters,
+    )
+
+    assert np.max(np.abs(resolved_parameters - raw_parameters)) > 1e-6
+
+    default_value = kalman_loglikelihood_from_model_jax(
+        model,
+        observations,
+        observables=case["observables"],
+        steady_state=steady_state,
+        parameter_values=raw_parameters,
+        measurement_error_scale=0.0,
+        jitter=0.0,
+        on_failure_loglikelihood=-1e12,
+        qme_algorithm="schur_gpu",
+        static_equation_rows=static_equation_rows,
+    )
+    fast_value = kalman_loglikelihood_from_model_jax(
+        model,
+        observations,
+        observables=case["observables"],
+        steady_state=steady_state,
+        parameter_values=resolved_parameters,
+        measurement_error_scale=0.0,
+        jitter=0.0,
+        on_failure_loglikelihood=-1e12,
+        qme_algorithm="schur_gpu",
+        static_equation_rows=static_equation_rows,
+        parameters_are_resolved=True,
+        check_parameter_bounds=False,
+    )
+
+    np.testing.assert_allclose(fast_value, default_value, rtol=1e-9, atol=1e-9)
+
+
+def test_hlt_schur_gpu_resolved_parameter_fast_path_has_finite_gradient() -> None:
+    case = _hlt_case()
+    model = parse_macro_model(Path(case["model_path"]).read_text())
+    observations = np.asarray(case["observations"], dtype=np.float64)[:, :10]
+    steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
+    raw_parameters = np.asarray(model.parameter_values, dtype=np.float64)
+    resolved_parameters = np.asarray(
+        model.resolve_parameter_values(
+            parameter_values=raw_parameters,
+            steady_state=steady_state,
+        ),
+        dtype=np.float64,
+    )
+    static_equation_rows = model._first_order_static_equation_rows_for_values(
+        steady_state=steady_state,
+        parameter_values=resolved_parameters,
+    )
+
+    objective = jax.jit(
+        jax.grad(
+            lambda theta: kalman_loglikelihood_from_model_jax(
+                model,
+                observations,
+                observables=case["observables"],
+                steady_state=steady_state,
+                parameter_values=theta,
+                measurement_error_scale=0.0,
+                jitter=0.0,
+                on_failure_loglikelihood=-1e12,
+                qme_algorithm="schur_gpu",
+                static_equation_rows=static_equation_rows,
+                parameters_are_resolved=True,
+                check_parameter_bounds=False,
+            )
+        )
+    )
+    gradient = objective(jnp.asarray(resolved_parameters, dtype=jnp.float64))
+
+    assert gradient.shape == resolved_parameters.shape
+    assert np.isfinite(np.asarray(gradient)).all()
 
 
 def test_hlt_kalman_filter_paths_match_julia_reference() -> None:
