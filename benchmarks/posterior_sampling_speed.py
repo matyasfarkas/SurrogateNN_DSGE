@@ -779,6 +779,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 dense_mass=bool(args.dense_mass),
                 target_accept_prob=float(args.target_accept_prob),
                 num_steps=int(args.hmc_num_steps),
+                trajectory_length=None,
                 step_size=float(args.hmc_step_size),
                 adapt_step_size=not bool(args.no_adapt_step_size),
                 adapt_mass_matrix=not bool(args.no_adapt_mass_matrix),
