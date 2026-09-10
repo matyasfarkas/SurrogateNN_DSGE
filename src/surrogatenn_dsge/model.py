@@ -114,6 +114,38 @@ LoopIndex = Union[int, str]
 LoopCollections = Mapping[str, tuple[LoopIndex, ...]]
 
 
+def _is_symbolically_nonzero(expression: sp.Expr) -> bool:
+    if expression == 0:
+        return False
+    if expression.is_zero is True:
+        return False
+    return True
+
+
+def _maximum_symbolic_row_matching(pattern_by_column: Sequence[Sequence[int]]) -> tuple[int, ...]:
+    row_to_column: dict[int, int] = {}
+
+    def visit(column: int, seen_rows: set[int]) -> bool:
+        for row in pattern_by_column[column]:
+            if row in seen_rows:
+                continue
+            seen_rows.add(row)
+            previous_column = row_to_column.get(row)
+            if previous_column is None or visit(previous_column, seen_rows):
+                row_to_column[row] = column
+                return True
+        return False
+
+    for column in range(len(pattern_by_column)):
+        if not visit(column, set()):
+            raise ValueError(
+                "Could not find structurally independent equations for "
+                "present-only variable elimination."
+            )
+    column_to_row = {column: row for row, column in row_to_column.items()}
+    return tuple(column_to_row[column] for column in range(len(pattern_by_column)))
+
+
 class SteadyStateResult(NamedTuple):
     steady_state: jax.Array
     base_steady_state: jax.Array
@@ -424,6 +456,33 @@ class MacroModel:
             self._dynamic_matrix,
             modules=_jax_lambdify_modules(),
         )
+
+    @cached_property
+    def _dynamic_jacobian_jax_fn(self) -> object:
+        return sp.lambdify(
+            self._dynamic_input_symbols,
+            self._dynamic_jacobian,
+            modules=_jax_lambdify_modules(),
+        )
+
+    @cached_property
+    def _first_order_static_equation_rows(self) -> tuple[int, ...]:
+        if self.timings.nPresent_only == 0:
+            return ()
+        current_start = self.timings.nFuture_not_past_and_mixed
+        present_only_columns = tuple(
+            current_start + idx for idx in self.timings.present_only_idx
+        )
+        jacobian = self._dynamic_jacobian
+        pattern_by_column = tuple(
+            tuple(
+                row
+                for row in range(self.timings.nVars)
+                if _is_symbolically_nonzero(jacobian[row, column])
+            )
+            for column in present_only_columns
+        )
+        return _maximum_symbolic_row_matching(pattern_by_column)
 
     @cached_property
     def _steady_state_solution_cache(
@@ -2220,6 +2279,31 @@ class MacroModel:
             dtype=np.float64,
         )
         return jnp.asarray(values, dtype=jnp.float64)
+
+    def _evaluate_dynamic_jacobian_with_context_jax(
+        self,
+        lag_state: Sequence[float],
+        current_state: Sequence[float],
+        lead_state: Sequence[float],
+        shock: Sequence[float],
+        *,
+        parameter_values: Sequence[float],
+        steady_reference_values: Sequence[float],
+    ) -> jax.Array:
+        if self.has_obc:
+            raise ValueError(
+                "JAX symbolic dynamic Jacobians are not used for OBC models; "
+                "use autodiff/subgradient residual differentiation instead."
+            )
+        args = self._dynamic_input_args_from_context(
+            lag_state,
+            current_state,
+            lead_state,
+            shock,
+            parameter_values=parameter_values,
+            steady_reference_values=steady_reference_values,
+        )
+        return jnp.asarray(self._dynamic_jacobian_jax_fn(*args), dtype=jnp.float64)
 
     def evaluate_dynamic_residual(
         self,

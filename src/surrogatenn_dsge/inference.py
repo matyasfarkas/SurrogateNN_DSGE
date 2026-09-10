@@ -285,11 +285,26 @@ def kalman_loglikelihood_from_model_jax(
                 steady_reference_values=steady_reference_values,
             )
 
-        jacobian = jax.jacrev(residual_from_dynamic_vector)(dynamic_point)
+        if model.has_obc:
+            jacobian = jax.jacrev(residual_from_dynamic_vector)(dynamic_point)
+        else:
+            jacobian = model._evaluate_dynamic_jacobian_with_context_jax(
+                full_steady_state,
+                full_steady_state,
+                full_steady_state,
+                jnp.zeros((model.timings.nExo,), dtype=jnp.float64),
+                parameter_values=parameters,
+                steady_reference_values=steady_reference_values,
+            )
         first_order_result = solve_first_order_dsge_solution_jax(
             jacobian,
             model.timings,
             qme_algorithm=qme_algorithm,
+            static_equation_rows=(
+                model._first_order_static_equation_rows
+                if (qme_algorithm == "schur_gpu" and not model.has_obc)
+                else None
+            ),
         )
 
         def _success(result) -> jax.Array:

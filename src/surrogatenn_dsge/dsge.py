@@ -1586,6 +1586,7 @@ def solve_first_order_dsge_solution_jax(
     qme_initial_guess: Optional[Union[jax.Array, np.ndarray]] = None,
     qme_tol: float = 1e-14,
     qme_acceptance_tol: float = 1e-8,
+    static_equation_rows: Optional[Sequence[int]] = None,
 ) -> FirstOrderDSGEResult:
     grad = jnp.asarray(jacobian, dtype=jnp.float64)
     if grad.ndim != 2:
@@ -1615,17 +1616,54 @@ def solve_first_order_dsge_solution_jax(
     grad_minus = grad[:, n_future + n_vars : n_future + n_vars + n_past]
     grad_exo = grad[:, n_future + n_vars + n_past :]
 
-    q_complete = jnp.linalg.qr(
-        grad_zero[:, timings.present_only_idx],
-        mode="complete",
-    )[0]
-    a_plus = q_complete.T @ grad_plus
-    a_zero = q_complete.T @ grad_zero
-    a_minus = q_complete.T @ grad_minus
+    if static_equation_rows is None:
+        q_complete = jnp.linalg.qr(
+            grad_zero[:, timings.present_only_idx],
+            mode="complete",
+        )[0]
+        a_plus = q_complete.T @ grad_plus
+        a_zero = q_complete.T @ grad_zero
+        a_minus = q_complete.T @ grad_minus
+        static_a_plus = a_plus[: timings.nPresent_only]
+        static_a_zero = a_zero[: timings.nPresent_only]
+        static_a_minus = a_minus[: timings.nPresent_only]
+        dynamic_a_plus = a_plus[dyn_index]
+        dynamic_a_zero = a_zero[dyn_index]
+        dynamic_a_minus = a_minus[dyn_index]
+    else:
+        static_rows = tuple(int(row) for row in static_equation_rows)
+        if len(static_rows) != timings.nPresent_only:
+            raise ValueError(
+                "static_equation_rows must contain one row per present-only "
+                f"variable; got {len(static_rows)} rows for {timings.nPresent_only} variables."
+            )
+        dynamic_rows = tuple(row for row in range(timings.nVars) if row not in static_rows)
+        if len(dynamic_rows) != timings.nVars - timings.nPresent_only:
+            raise ValueError("static_equation_rows must be unique valid equation indices.")
+        static_row_idx = jnp.asarray(static_rows, dtype=jnp.int32)
+        dynamic_row_idx = jnp.asarray(dynamic_rows, dtype=jnp.int32)
+        static_a_plus = grad_plus[static_row_idx]
+        static_a_zero = grad_zero[static_row_idx]
+        static_a_minus = grad_minus[static_row_idx]
+        dynamic_plus_raw = grad_plus[dynamic_row_idx]
+        dynamic_zero_raw = grad_zero[dynamic_row_idx]
+        dynamic_minus_raw = grad_minus[dynamic_row_idx]
+        static_present = static_a_zero[:, timings.present_only_idx]
+        dynamic_present = dynamic_zero_raw[:, timings.present_only_idx]
 
-    a_tilde_plus = a_plus[dyn_index] @ selector[list(future_in_comb), :]
-    a_tilde_zero = a_zero[dyn_index][:, comb]
-    a_tilde_minus = a_minus[dyn_index] @ selector[list(past_in_comb), :]
+        def eliminate(dynamic_block: jax.Array, static_block: jax.Array) -> jax.Array:
+            return dynamic_block - dynamic_present @ jnp.linalg.solve(
+                static_present,
+                static_block,
+            )
+
+        dynamic_a_plus = eliminate(dynamic_plus_raw, static_a_plus)
+        dynamic_a_zero = eliminate(dynamic_zero_raw, static_a_zero)
+        dynamic_a_minus = eliminate(dynamic_minus_raw, static_a_minus)
+
+    a_tilde_plus = dynamic_a_plus @ selector[list(future_in_comb), :]
+    a_tilde_zero = dynamic_a_zero[:, comb]
+    a_tilde_minus = dynamic_a_minus @ selector[list(past_in_comb), :]
 
     if qme_algorithm == "doubling":
         qme_result = solve_quadratic_matrix_equation_doubling_jax(
@@ -1693,10 +1731,10 @@ def solve_first_order_dsge_solution_jax(
 
         l_block = qme_solution[past_not_future_and_mixed_idx][:, past_in_comb_idx]
 
-        a_bar_zero_u = a_zero[: timings.nPresent_only][:, timings.present_only_idx]
-        a_plus_u = a_plus[: timings.nPresent_only]
-        a_tilde_zero_u = a_zero[: timings.nPresent_only][:, timings.present_but_not_only_idx]
-        a_minus_u = a_minus[: timings.nPresent_only]
+        a_bar_zero_u = static_a_zero[:, timings.present_only_idx]
+        a_plus_u = static_a_plus
+        a_tilde_zero_u = static_a_zero[:, timings.present_but_not_only_idx]
+        a_minus_u = static_a_minus
 
         if timings.nPresent_only > 0:
             rhs = a_tilde_zero_u @ qme_solution[:, past_in_comb_idx]

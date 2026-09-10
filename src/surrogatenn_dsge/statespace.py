@@ -43,6 +43,91 @@ class KalmanSmootherResult(NamedTuple):
     smoothed_covariances: jax.Array
 
 
+def _symmetrize(matrix: jax.Array) -> jax.Array:
+    return 0.5 * (matrix + matrix.T)
+
+
+def _cholesky_solve(cholesky_factor: jax.Array, rhs: jax.Array) -> jax.Array:
+    rhs_arr = jnp.asarray(rhs, dtype=cholesky_factor.dtype)
+    rhs_is_vector = rhs_arr.ndim == 1
+    rhs_matrix = rhs_arr[:, None] if rhs_is_vector else rhs_arr
+    forward = lax.linalg.triangular_solve(
+        cholesky_factor,
+        rhs_matrix,
+        left_side=True,
+        lower=True,
+    )
+    solution = lax.linalg.triangular_solve(
+        cholesky_factor.T,
+        forward,
+        left_side=True,
+        lower=False,
+    )
+    return solution[:, 0] if rhs_is_vector else solution
+
+
+def _kalman_predict_update(
+    model: LinearGaussianStateSpace,
+    filtered_mean_prev: jax.Array,
+    filtered_cov_prev: jax.Array,
+    y_t: jax.Array,
+    *,
+    jitter: float,
+) -> tuple[jax.Array, ...]:
+    state_dim = model.transition_matrix.shape[0]
+    obs_dim = model.observation_matrix.shape[0]
+    identity = jnp.eye(state_dim, dtype=model.transition_matrix.dtype)
+    obs_identity = jnp.eye(obs_dim, dtype=model.transition_matrix.dtype)
+
+    predicted_mean = model.transition_matrix @ filtered_mean_prev
+    predicted_cov = _symmetrize(
+        model.transition_matrix @ filtered_cov_prev @ model.transition_matrix.T
+        + model.process_noise_covariance
+    )
+
+    innovation = y_t - model.observation_matrix @ predicted_mean
+    innovation_cov = _symmetrize(
+        model.observation_matrix @ predicted_cov @ model.observation_matrix.T
+        + model.observation_noise_covariance
+        + jitter * obs_identity
+    )
+    innovation_chol = jnp.linalg.cholesky(innovation_cov)
+    innovation_precision_innovation = _cholesky_solve(innovation_chol, innovation)
+    predicted_cov_observation_t = predicted_cov @ model.observation_matrix.T
+    kalman_gain = _cholesky_solve(
+        innovation_chol,
+        predicted_cov_observation_t.T,
+    ).T
+
+    filtered_mean = predicted_mean + kalman_gain @ innovation
+    joseph_left = identity - kalman_gain @ model.observation_matrix
+    filtered_cov = _symmetrize(
+        joseph_left @ predicted_cov @ joseph_left.T
+        + kalman_gain @ model.observation_noise_covariance @ kalman_gain.T
+    )
+
+    logdet = 2.0 * jnp.sum(jnp.log(jnp.diag(innovation_chol)))
+    quadratic_form = innovation @ innovation_precision_innovation
+    base_loglik = -0.5 * (obs_dim * LOG_2PI + logdet + quadratic_form)
+    valid = (
+        jnp.all(jnp.isfinite(innovation_chol))
+        & jnp.all(jnp.diag(innovation_chol) > 0.0)
+        & jnp.all(jnp.isfinite(filtered_mean))
+        & jnp.all(jnp.isfinite(filtered_cov))
+        & jnp.isfinite(base_loglik)
+    )
+    return (
+        filtered_mean,
+        filtered_cov,
+        predicted_mean,
+        predicted_cov,
+        innovation,
+        innovation_cov,
+        base_loglik,
+        valid,
+    )
+
+
 def _cast_statespace_matrix(
     value: Union[jax.Array, np.ndarray],
     name: str,
@@ -211,43 +296,29 @@ def kalman_filter(
             f"observations must have shape ({obs_dim}, T), got {y.shape}."
         )
 
-    state_dim = model.transition_matrix.shape[0]
-    identity = jnp.eye(state_dim, dtype=model.transition_matrix.dtype)
-    obs_identity = jnp.eye(obs_dim, dtype=model.transition_matrix.dtype)
-
     def step(
         carry: tuple[jax.Array, jax.Array],
         inputs: tuple[jax.Array, jax.Array],
     ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, ...]]:
         filtered_mean_prev, filtered_cov_prev = carry
         y_t, active = inputs
-
-        predicted_mean = model.transition_matrix @ filtered_mean_prev
-        predicted_cov = (
-            model.transition_matrix @ filtered_cov_prev @ model.transition_matrix.T
-            + model.process_noise_covariance
+        (
+            filtered_mean,
+            filtered_cov,
+            predicted_mean,
+            predicted_cov,
+            innovation,
+            innovation_cov,
+            base_loglik,
+            valid,
+        ) = _kalman_predict_update(
+            model,
+            filtered_mean_prev,
+            filtered_cov_prev,
+            y_t,
+            jitter=jitter,
         )
-
-        innovation = y_t - model.observation_matrix @ predicted_mean
-        innovation_cov = (
-            model.observation_matrix @ predicted_cov @ model.observation_matrix.T
-            + model.observation_noise_covariance
-            + jitter * obs_identity
-        )
-        innovation_precision = jnp.linalg.inv(innovation_cov)
-        kalman_gain = predicted_cov @ model.observation_matrix.T @ innovation_precision
-
-        filtered_mean = predicted_mean + kalman_gain @ innovation
-        joseph_left = identity - kalman_gain @ model.observation_matrix
-        filtered_cov = (
-            joseph_left @ predicted_cov @ joseph_left.T
-            + kalman_gain @ model.observation_noise_covariance @ kalman_gain.T
-        )
-
-        sign, logdet = jnp.linalg.slogdet(innovation_cov)
-        quadratic_form = innovation @ innovation_precision @ innovation
-        base_loglik = -0.5 * (obs_dim * LOG_2PI + logdet + quadratic_form)
-        loglik_t = jnp.where(jnp.logical_and(active, sign > 0), base_loglik, 0.0)
+        loglik_t = jnp.where(jnp.logical_and(active, valid), base_loglik, 0.0)
 
         outputs = (
             filtered_mean,
@@ -296,12 +367,39 @@ def kalman_loglikelihood(
     presample_periods: int = 0,
     jitter: float = 1e-9,
 ) -> jax.Array:
-    return kalman_filter(
-        model,
-        observations,
-        presample_periods=presample_periods,
-        jitter=jitter,
-    ).total_loglikelihood
+    y = jnp.asarray(observations, dtype=model.transition_matrix.dtype)
+    if y.ndim != 2:
+        raise ValueError(f"observations must be rank-2, got shape {y.shape}.")
+    obs_dim = model.observation_matrix.shape[0]
+    if y.shape[0] != obs_dim:
+        raise ValueError(
+            f"observations must have shape ({obs_dim}, T), got {y.shape}."
+        )
+
+    def step(
+        carry: tuple[jax.Array, jax.Array, jax.Array],
+        inputs: tuple[jax.Array, jax.Array],
+    ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], None]:
+        filtered_mean_prev, filtered_cov_prev, total = carry
+        y_t, active = inputs
+        filtered_mean, filtered_cov, *_rest, base_loglik, valid = _kalman_predict_update(
+            model,
+            filtered_mean_prev,
+            filtered_cov_prev,
+            y_t,
+            jitter=jitter,
+        )
+        loglik_t = jnp.where(jnp.logical_and(active, valid), base_loglik, 0.0)
+        return (filtered_mean, filtered_cov, total + loglik_t), None
+
+    active_periods = jnp.arange(y.shape[1]) >= presample_periods
+    initial_total = jnp.asarray(0.0, dtype=model.transition_matrix.dtype)
+    (_, _, total_loglikelihood), _ = lax.scan(
+        step,
+        (model.initial_mean, model.initial_covariance, initial_total),
+        (y.T, active_periods),
+    )
+    return total_loglikelihood
 
 
 def kalman_loglikelihood_per_period(

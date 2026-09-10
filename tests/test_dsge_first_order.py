@@ -554,6 +554,77 @@ def test_jax_first_order_solution_schur_gpu_matches_existing_solver() -> None:
     )
 
 
+def test_jax_first_order_solution_schur_gpu_static_rows_match_existing_solver() -> None:
+    timings, jacobian, expected_solution = _rbc_cme_fixture()
+    compiled = jax.jit(
+        solve_first_order_dsge_solution_jax,
+        static_argnames=("timings", "qme_algorithm", "static_equation_rows"),
+    )
+
+    result = compiled(
+        jacobian,
+        timings,
+        qme_algorithm="schur_gpu",
+        static_equation_rows=(0, 2),
+    )
+
+    assert bool(np.asarray(result.converged))
+    np.testing.assert_allclose(
+        result.solution_matrix,
+        expected_solution,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        result.solution_matrix,
+        solve_first_order_dsge_solution(
+            jacobian,
+            timings,
+            qme_algorithm="schur",
+        ).solution_matrix,
+        rtol=1e-8,
+        atol=1e-8,
+    )
+
+
+def test_jax_first_order_solution_schur_gpu_static_rows_avoid_qr() -> None:
+    timings, jacobian, _ = _rbc_cme_fixture()
+
+    jaxpr = str(
+        jax.make_jaxpr(
+            lambda shifted_jacobian: solve_first_order_dsge_solution_jax(
+                shifted_jacobian,
+                timings,
+                qme_algorithm="schur_gpu",
+                static_equation_rows=(0, 2),
+            ).solution_matrix
+        )(jacobian)
+    )
+
+    assert "qr[" not in jaxpr
+
+
+def test_jax_first_order_solution_schur_gpu_static_rows_support_reverse_mode() -> None:
+    timings, jacobian, _ = _rbc_cme_fixture()
+    compiled_grad = jax.jit(
+        jax.grad(
+            lambda shift: jnp.sum(
+                solve_first_order_dsge_solution_jax(
+                    jacobian.at[2, 3].add(shift),
+                    timings,
+                    qme_algorithm="schur_gpu",
+                    static_equation_rows=(0, 2),
+                ).solution_matrix
+                ** 2
+            )
+        )
+    )
+
+    grad_value = compiled_grad(jnp.asarray(0.0, dtype=jnp.float64))
+
+    assert np.isfinite(np.asarray(grad_value))
+
+
 def test_first_order_solution_feeds_state_space_layer() -> None:
     timings, jacobian, _ = _rbc_cme_fixture()
     result = solve_first_order_dsge_solution(jacobian, timings)

@@ -168,6 +168,50 @@ def discrete_sylvester_residual(
     return jnp.linalg.norm(residual) / denom
 
 
+def _solve_discrete_lyapunov_direct_solution_impl(
+    a_arr: jax.Array,
+    c_arr: jax.Array,
+) -> jax.Array:
+    n = a_arr.shape[0]
+    system = jnp.eye(n * n, dtype=a_arr.dtype) - jnp.kron(a_arr, a_arr)
+    rhs = jnp.ravel(c_arr.T)
+    solution_vec = jnp.linalg.solve(system, rhs)
+    return jnp.reshape(solution_vec, (n, n)).T
+
+
+@jax.custom_vjp
+def _solve_discrete_lyapunov_direct_solution(
+    a_arr: jax.Array,
+    c_arr: jax.Array,
+) -> jax.Array:
+    return _solve_discrete_lyapunov_direct_solution_impl(a_arr, c_arr)
+
+
+def _solve_discrete_lyapunov_direct_solution_fwd(
+    a_arr: jax.Array,
+    c_arr: jax.Array,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+    solution = _solve_discrete_lyapunov_direct_solution_impl(a_arr, c_arr)
+    return solution, (a_arr, solution)
+
+
+def _solve_discrete_lyapunov_direct_solution_bwd(
+    residuals: tuple[jax.Array, jax.Array],
+    cotangent: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    a_arr, solution = residuals
+    adjoint = _solve_discrete_lyapunov_direct_solution_impl(a_arr.T, cotangent)
+    a_bar = adjoint @ a_arr @ solution.T + adjoint.T @ a_arr @ solution
+    c_bar = adjoint
+    return a_bar, c_bar
+
+
+_solve_discrete_lyapunov_direct_solution.defvjp(
+    _solve_discrete_lyapunov_direct_solution_fwd,
+    _solve_discrete_lyapunov_direct_solution_bwd,
+)
+
+
 def solve_discrete_lyapunov_direct(
     a: Union[jax.Array, np.ndarray],
     c: Union[jax.Array, np.ndarray],
@@ -175,11 +219,7 @@ def solve_discrete_lyapunov_direct(
     acceptance_tol: float = 1e-12,
 ) -> LyapunovResult:
     a_arr, c_arr = _cast_matrix_inputs(a, c)
-    n = a_arr.shape[0]
-    system = jnp.eye(n * n, dtype=a_arr.dtype) - jnp.kron(a_arr, a_arr)
-    rhs = jnp.ravel(c_arr.T)
-    solution_vec = jnp.linalg.solve(system, rhs)
-    solution = jnp.reshape(solution_vec, (n, n)).T
+    solution = _solve_discrete_lyapunov_direct_solution(a_arr, c_arr)
     rel_residual = discrete_lyapunov_residual(a_arr, solution, c_arr)
     converged = rel_residual < acceptance_tol
     return LyapunovResult(solution, converged, jnp.asarray(0), rel_residual)

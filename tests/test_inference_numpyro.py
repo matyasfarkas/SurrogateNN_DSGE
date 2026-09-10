@@ -338,6 +338,63 @@ def test_jax_fixed_steady_state_loglikelihood_matches_high_level_path() -> None:
     )
 
 
+def test_jax_symbolic_dynamic_jacobian_matches_residual_autodiff() -> None:
+    model, first_order_result, _, _, _ = _numpyro_fixture()
+    steady_state = jnp.asarray(first_order_result.steady_state, dtype=jnp.float64)
+    parameter_values = jnp.asarray(first_order_result.parameter_values, dtype=jnp.float64)
+    steady_reference_values = model._steady_reference_values_jax(steady_state)
+    future_index_array = jnp.asarray(
+        model.timings.future_not_past_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+    past_index_array = jnp.asarray(
+        model.timings.past_not_future_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+    dynamic_point = jnp.concatenate(
+        [
+            steady_state[future_index_array],
+            steady_state,
+            steady_state[past_index_array],
+            jnp.zeros((model.timings.nExo,), dtype=jnp.float64),
+        ]
+    )
+
+    def residual_from_dynamic_vector(dynamic_vector: jax.Array) -> jax.Array:
+        lead_state = steady_state.at[future_index_array].set(
+            dynamic_vector[: model.timings.nFuture_not_past_and_mixed]
+        )
+        current_start = model.timings.nFuture_not_past_and_mixed
+        current_end = current_start + model.timings.nVars
+        current_state = dynamic_vector[current_start:current_end]
+        lag_state = steady_state.at[past_index_array].set(
+            dynamic_vector[
+                current_end : current_end + model.timings.nPast_not_future_and_mixed
+            ]
+        )
+        shock = dynamic_vector[current_end + model.timings.nPast_not_future_and_mixed :]
+        return model._evaluate_dynamic_residual_with_context(
+            lag_state,
+            current_state,
+            lead_state,
+            shock,
+            parameter_values=parameter_values,
+            steady_reference_values=steady_reference_values,
+        )
+
+    symbolic = model._evaluate_dynamic_jacobian_with_context_jax(
+        steady_state,
+        steady_state,
+        steady_state,
+        jnp.zeros((model.timings.nExo,), dtype=jnp.float64),
+        parameter_values=parameter_values,
+        steady_reference_values=steady_reference_values,
+    )
+    autodiff = jax.jacrev(residual_from_dynamic_vector)(dynamic_point)
+
+    np.testing.assert_allclose(symbolic, autodiff, rtol=1e-12, atol=1e-12)
+
+
 def test_jax_fixed_steady_state_loglikelihood_defaults_to_schur() -> None:
     model, first_order_result, observables, levels, _ = _numpyro_fixture()
     parameter_vector = assemble_parameter_vector(

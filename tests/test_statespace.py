@@ -41,8 +41,26 @@ def test_kalman_loglikelihood_matches_sum_of_per_period_values() -> None:
 
     total = kalman_loglikelihood(model, simulation.observations)
     per_period = kalman_loglikelihood_per_period(model, simulation.observations)
+    filter_total = kalman_filter(model, simulation.observations).total_loglikelihood
 
     np.testing.assert_allclose(total, jnp.sum(per_period), rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(total, filter_total, rtol=1e-12, atol=1e-12)
+
+
+def test_kalman_loglikelihood_uses_cholesky_without_explicit_inverse() -> None:
+    model, simulation = _build_test_model()
+
+    jaxpr = str(
+        jax.make_jaxpr(
+            lambda transition: kalman_loglikelihood(
+                model._replace(transition_matrix=transition),
+                simulation.observations,
+            )
+        )(model.transition_matrix)
+    )
+
+    assert "cholesky" in jaxpr
+    assert "inv[" not in jaxpr
 
 
 def test_filter_and_smoother_return_finite_outputs() -> None:

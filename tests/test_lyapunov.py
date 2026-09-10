@@ -71,6 +71,33 @@ def test_direct_solver_is_autodiff_friendly() -> None:
     np.testing.assert_allclose(grad_value, expected, rtol=1e-10, atol=1e-10)
 
 
+def test_direct_solver_matrix_adjoint_matches_finite_difference() -> None:
+    a = jnp.array([[0.25, 0.05], [-0.03, 0.35]], dtype=jnp.float64)
+    c = jnp.array([[0.8, 0.1], [0.1, 0.4]], dtype=jnp.float64)
+    a_direction = jnp.array([[0.02, -0.03], [0.04, 0.01]], dtype=jnp.float64)
+    c_direction = jnp.array([[0.03, -0.01], [-0.01, 0.02]], dtype=jnp.float64)
+    weight = jnp.array([[0.5, -0.2], [0.1, 0.7]], dtype=jnp.float64)
+
+    def objective(a_matrix: jax.Array, c_matrix: jax.Array) -> jax.Array:
+        solution = solve_discrete_lyapunov_direct(a_matrix, c_matrix).solution
+        return jnp.sum(solution * weight)
+
+    a_bar, c_bar = jax.grad(objective, argnums=(0, 1))(a, c)
+    autodiff_directional = jnp.sum(a_bar * a_direction) + jnp.sum(c_bar * c_direction)
+    epsilon = 1.0e-6
+    finite_difference = (
+        objective(a + epsilon * a_direction, c + epsilon * c_direction)
+        - objective(a - epsilon * a_direction, c - epsilon * c_direction)
+    ) / (2.0 * epsilon)
+
+    np.testing.assert_allclose(
+        autodiff_directional,
+        finite_difference,
+        rtol=1e-7,
+        atol=1e-7,
+    )
+
+
 def test_doubling_kernel_is_jittable() -> None:
     a = jnp.array([[0.3, 0.1], [0.0, 0.25]])
     c = jnp.array([[0.5, 0.0], [0.0, 0.25]])
