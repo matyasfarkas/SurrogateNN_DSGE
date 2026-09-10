@@ -195,6 +195,14 @@ def _make_likelihood_context(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def run_batched_profile(args: argparse.Namespace) -> dict[str, Any]:
+    started_at = time.perf_counter()
+
+    def log(message: str) -> None:
+        if args.verbose:
+            elapsed = time.perf_counter() - started_at
+            print(f"[batched-profile +{elapsed:9.2f}s] {message}", flush=True)
+
+    log("configure runtime and build dataset")
     context = _make_likelihood_context(args)
     jax = context["jax"]
     jnp = context["jnp"]
@@ -227,6 +235,12 @@ def run_batched_profile(args: argparse.Namespace) -> dict[str, Any]:
     value_batch = jax.jit(jax.vmap(loglikelihood_from_subset))
     value_grad_batch = jax.jit(jax.vmap(jax.value_and_grad(loglikelihood_from_subset)))
     max_batch = max(args.batch_sizes)
+    log(
+        "dataset ready: "
+        f"vars={model.timings.nVars}, exo={model.timings.nExo}, "
+        f"observations={context['observations'].shape}, "
+        f"parameters={context['parameter_names']}, max_batch={max_batch}",
+    )
     draws = _make_centered_draws(
         center=context["center"],
         lower=context["lower"],
@@ -237,12 +251,19 @@ def run_batched_profile(args: argparse.Namespace) -> dict[str, Any]:
     )
     results: dict[str, Any] = {}
     for batch_size in args.batch_sizes:
+        log(f"START batch {batch_size} value first call/JIT")
         batch = jnp.asarray(draws[:batch_size])
         value, first_value_s = _timed_call(lambda: value_batch(batch))
+        log(f"END batch {batch_size} value first call/JIT in {first_value_s:.3f}s")
         value_times: list[float] = []
-        for _ in range(max(args.reps, 0)):
+        for rep in range(max(args.reps, 0)):
+            log(f"START batch {batch_size} value steady rep {rep + 1}/{args.reps}")
             _, elapsed = _timed_call(lambda: value_batch(batch))
             value_times.append(elapsed)
+            log(
+                f"END batch {batch_size} value steady rep {rep + 1}/{args.reps} "
+                f"in {elapsed:.3f}s"
+            )
         value_array = np.asarray(value, dtype=np.float64)
         batch_result: dict[str, Any] = {
             "value_first_call_s": float(first_value_s),
@@ -258,11 +279,21 @@ def run_batched_profile(args: argparse.Namespace) -> dict[str, Any]:
             "failure_count": int(np.sum(value_array <= float(args.failure_value) / 10.0)),
         }
         if args.include_gradient:
+            log(f"START batch {batch_size} gradient first call/JIT")
             grad_value, first_grad_s = _timed_call(lambda: value_grad_batch(batch))
+            log(f"END batch {batch_size} gradient first call/JIT in {first_grad_s:.3f}s")
             grad_times: list[float] = []
-            for _ in range(max(args.gradient_reps, 0)):
+            for rep in range(max(args.gradient_reps, 0)):
+                log(
+                    f"START batch {batch_size} gradient steady rep "
+                    f"{rep + 1}/{args.gradient_reps}"
+                )
                 _, elapsed = _timed_call(lambda: value_grad_batch(batch))
                 grad_times.append(elapsed)
+                log(
+                    f"END batch {batch_size} gradient steady rep "
+                    f"{rep + 1}/{args.gradient_reps} in {elapsed:.3f}s"
+                )
             grad_values, gradients = grad_value
             grad_value_array = np.asarray(grad_values, dtype=np.float64)
             grad_array = np.asarray(gradients, dtype=np.float64)
@@ -289,6 +320,7 @@ def run_batched_profile(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
         results[str(batch_size)] = batch_result
+        log(f"END batch {batch_size}")
     return {
         "benchmark": {
             "preset": args.preset,
@@ -368,6 +400,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Skip model bound checks when generated draws are already in support.",
     )
     parser.add_argument("--failure-value", type=float, default=-1.0e12)
+    parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     return parser.parse_args(argv)
 
