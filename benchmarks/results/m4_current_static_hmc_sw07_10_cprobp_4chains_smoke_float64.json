@@ -1,0 +1,171 @@
+{
+  "benchmark": {
+    "adapt_step_size": true,
+    "adaptation_rate": 0.05,
+    "case": "medium_sw07_hlt",
+    "chains": 4,
+    "check_parameter_bounds": false,
+    "dtype": "float64",
+    "initial_jitter": 0.05,
+    "initial_step_size": 0.05,
+    "leapfrog_steps": 3,
+    "n_exo": 7,
+    "n_observables": 7,
+    "n_vars": 66,
+    "parameter_count": 1,
+    "parameter_names": [
+      "cprobp"
+    ],
+    "parameters_are_resolved": true,
+    "periods": 10,
+    "preset": "sw07_hlt",
+    "qme_algorithm": "schur_gpu",
+    "resolved_parameter_max_abs_diff": 0.3333333333333329,
+    "samples": 8,
+    "static_equation_rows": [
+      19,
+      65,
+      23,
+      51,
+      48,
+      46,
+      25,
+      17,
+      13,
+      15,
+      27,
+      47,
+      49,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      44,
+      21
+    ],
+    "target_accept_prob": 0.8,
+    "warmup": 4
+  },
+  "cold_run": {
+    "acceptance": {
+      "accept_prob": {
+        "max": 1.0,
+        "mean": 0.9999878842224432,
+        "median": 0.9999983461690938,
+        "min": 0.9998691364959452
+      },
+      "accepted_share": 1.0,
+      "num_steps": {
+        "max": 3.0,
+        "mean": 3.0,
+        "median": 3.0,
+        "min": 3.0
+      },
+      "warmup_accept_prob": {
+        "max": 1.0,
+        "mean": 0.9999976028910476,
+        "median": 0.9999993928944308,
+        "min": 0.9999895493179984
+      }
+    },
+    "draws_per_second": 0.6470384154001771,
+    "final_log_prob_mean": -77.25354084110552,
+    "final_step_size": 0.05141177774409732,
+    "mean_ess": 3.5539439188939173,
+    "min_ess": 3.5539439188939173,
+    "post_warmup_draws": 32,
+    "posterior_diagnostics": {
+      "max_r_hat": 2.256229608004425,
+      "mean_ess": 3.5539439188939173,
+      "min_ess": 3.5539439188939173,
+      "parameters": {
+        "cprobp": {
+          "mean": 0.6001413793195141,
+          "n_eff": 3.5539439188939173,
+          "r_hat": 2.256229608004425,
+          "shape": [
+            4,
+            8
+          ],
+          "std": 0.0002962998103028337
+        }
+      }
+    },
+    "seconds_per_mean_ess": 13.915837284059359,
+    "seconds_per_min_ess": 13.915837284059359,
+    "timing_s": 49.456105292000004
+  },
+  "runtime": {
+    "jax_default_backend": "cpu",
+    "jax_devices": [
+      "TFRT_CPU_0"
+    ],
+    "jax_enable_x64": true,
+    "jax_version": "0.4.30",
+    "numpyro_version": "0.19.0",
+    "nvidia_smi": "",
+    "platform": "macOS-15.7.3-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.9.6 (default, Dec  2 2025, 07:27:58) \n[Clang 17.0.0 (clang-1700.6.3.2)]"
+  },
+  "steady_last_run": {
+    "acceptance": {
+      "accept_prob": {
+        "max": 1.0,
+        "mean": 0.9999880520880072,
+        "median": 0.9999999773208619,
+        "min": 0.9998525800827902
+      },
+      "accepted_share": 1.0,
+      "num_steps": {
+        "max": 3.0,
+        "mean": 3.0,
+        "median": 3.0,
+        "min": 3.0
+      },
+      "warmup_accept_prob": {
+        "max": 1.0,
+        "mean": 0.9999949946336147,
+        "median": 0.9999978671891079,
+        "min": 0.9999771309941168
+      }
+    },
+    "draws_per_second": 3.2099188498660145,
+    "final_log_prob_mean": -77.22111845057283,
+    "final_step_size": 0.05141176178050589,
+    "mean_ess": 2.2171848858830856,
+    "min_ess": 2.2171848858830856,
+    "post_warmup_draws": 32,
+    "posterior_diagnostics": {
+      "max_r_hat": 5.439935126862651,
+      "mean_ess": 2.2171848858830856,
+      "min_ess": 2.2171848858830856,
+      "parameters": {
+        "cprobp": {
+          "mean": 0.6001004796105178,
+          "n_eff": 2.2171848858830856,
+          "r_hat": 5.439935126862651,
+          "shape": [
+            4,
+            8
+          ],
+          "std": 0.0004248203659257866
+        }
+      }
+    },
+    "seconds_per_mean_ess": 4.496286907994771,
+    "seconds_per_min_ess": 4.496286907994771,
+    "timing_s": 9.969099374999999
+  },
+  "steady_timing": {
+    "max_s": 9.969099374999999,
+    "mean_s": 9.969099374999999,
+    "median_s": 9.969099374999999,
+    "min_s": 9.969099374999999,
+    "reps": 1,
+    "std_s": 0.0
+  }
+}

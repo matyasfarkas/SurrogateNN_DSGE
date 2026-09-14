@@ -1,0 +1,138 @@
+{
+  "benchmark": {
+    "case": "medium_sw07_hlt",
+    "check_parameter_bounds": false,
+    "dtype": "float64",
+    "n_exo": 7,
+    "n_observables": 7,
+    "n_vars": 66,
+    "parameters_are_resolved": true,
+    "periods": 10,
+    "preset": "sw07_hlt",
+    "qme_algorithm": "schur_gpu",
+    "resolved_parameter_max_abs_diff": 0.3333333333333329,
+    "static_equation_rows": [
+      19,
+      65,
+      23,
+      51,
+      48,
+      46,
+      25,
+      17,
+      13,
+      15,
+      27,
+      47,
+      49,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      44,
+      21
+    ]
+  },
+  "runtime": {
+    "jax_default_backend": "cpu",
+    "jax_devices": [
+      "TFRT_CPU_0"
+    ],
+    "jax_enable_x64": true,
+    "jax_version": "0.4.30",
+    "numpyro_version": "0.19.0",
+    "nvidia_smi": "",
+    "platform": "macOS-15.7.3-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.9.6 (default, Dec  2 2025, 07:27:58) \n[Clang 17.0.0 (clang-1700.6.3.2)]"
+  },
+  "timings": {
+    "dynamic_jacobian": {
+      "first_call_s": 2.053217208,
+      "steady": {
+        "max_s": 4.533300000009177e-05,
+        "mean_s": 3.418066666653156e-05,
+        "median_s": 3.058399999922301e-05,
+        "min_s": 2.6625000000279897e-05,
+        "reps": 3,
+        "std_s": 9.858971768649942e-06
+      }
+    },
+    "first_order_solution": {
+      "first_call_s": 0.6714130410000001,
+      "steady": {
+        "max_s": 0.03312404099999977,
+        "mean_s": 0.021909236000000238,
+        "median_s": 0.021651500000000823,
+        "min_s": 0.010952167000000124,
+        "reps": 3,
+        "std_s": 0.01108818380314093
+      }
+    },
+    "full_loglikelihood": {
+      "first_call_s": 2.3730741250000005,
+      "steady": {
+        "max_s": 0.014077916999999829,
+        "mean_s": 0.013548986333333938,
+        "median_s": 0.013739917000000545,
+        "min_s": 0.01282912500000144,
+        "reps": 3,
+        "std_s": 0.0006459189224820018
+      }
+    },
+    "full_loglikelihood_gradient": {
+      "first_call_s": 6.303307625,
+      "steady": {
+        "max_s": 0.08078333300000118,
+        "mean_s": 0.05085901400000026,
+        "median_s": 0.036985708999999645,
+        "min_s": 0.03480799999999995,
+        "reps": 3,
+        "std_s": 0.025938085026318575
+      }
+    },
+    "kalman_loglikelihood_only": {
+      "first_call_s": 0.18370562499999998,
+      "steady": {
+        "max_s": 0.00016895800000060746,
+        "mean_s": 0.00016361133333327635,
+        "median_s": 0.00016095899999957197,
+        "min_s": 0.0001609169999996496,
+        "reps": 3,
+        "std_s": 4.63039677983006e-06
+      }
+    },
+    "resolve_parameters": {
+      "first_call_s": 0.004931457999999722,
+      "steady": {
+        "max_s": 8.459000000016204e-06,
+        "mean_s": 4.986333333345527e-06,
+        "median_s": 3.6250000001736282e-06,
+        "min_s": 2.87499999984675e-06,
+        "reps": 3,
+        "std_s": 3.0307070682394887e-06
+      }
+    },
+    "state_space_and_initial_covariance": {
+      "first_call_s": 0.56585325,
+      "steady": {
+        "max_s": 0.014314166000000128,
+        "mean_s": 0.01307949966666655,
+        "median_s": 0.01266337499999981,
+        "min_s": 0.012260957999999711,
+        "reps": 3,
+        "std_s": 0.001088019106667161
+      }
+    }
+  },
+  "values": {
+    "first_order_converged": true,
+    "full_loglikelihood": -75.75558174239787,
+    "full_loglikelihood_gradient_max_abs": 133.0800990860891,
+    "loglikelihood": -75.75558174239787,
+    "qme_solution_max_abs": 201.0822350866062
+  }
+}

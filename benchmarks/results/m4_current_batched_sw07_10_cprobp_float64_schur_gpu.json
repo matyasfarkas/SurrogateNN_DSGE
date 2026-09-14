@@ -1,0 +1,188 @@
+{
+  "batches": {
+    "1": {
+      "failure_count": 0,
+      "gradient_draws_per_second_median": 15.217351408422491,
+      "gradient_failure_count": 0,
+      "gradient_first_call_s": 8.654932625,
+      "gradient_loglikelihood_max": -75.75558174239205,
+      "gradient_loglikelihood_min": -75.75558174239205,
+      "gradient_max_abs": 13.366978104801515,
+      "gradient_per_draw_steady_median_s": 0.06571445799999864,
+      "gradient_steady": {
+        "max_s": 0.06988979199999967,
+        "mean_s": 0.06546640266666633,
+        "median_s": 0.06571445799999864,
+        "min_s": 0.060794958000000676,
+        "reps": 3,
+        "std_s": 0.004552488325979583
+      },
+      "loglikelihood_max": -75.75558174239175,
+      "loglikelihood_min": -75.75558174239175,
+      "value_draws_per_second_median": 34.827733324045454,
+      "value_first_call_s": 3.8160873330000005,
+      "value_per_draw_steady_median_s": 0.028712750000000398,
+      "value_steady": {
+        "max_s": 0.029322958999999926,
+        "mean_s": 0.02816345866666688,
+        "median_s": 0.028712750000000398,
+        "min_s": 0.02645466700000032,
+        "reps": 3,
+        "std_s": 0.00151098162661626
+      }
+    },
+    "16": {
+      "failure_count": 0,
+      "gradient_draws_per_second_median": 20.251574116251433,
+      "gradient_failure_count": 0,
+      "gradient_first_call_s": 32.314429000000004,
+      "gradient_loglikelihood_max": -75.74882629840651,
+      "gradient_loglikelihood_min": -75.7625985039618,
+      "gradient_max_abs": 13.633806890933156,
+      "gradient_per_draw_steady_median_s": 0.04937887762500015,
+      "gradient_steady": {
+        "max_s": 0.8000060419999926,
+        "mean_s": 0.7931548333333325,
+        "median_s": 0.7900620420000024,
+        "min_s": 0.7893964160000024,
+        "reps": 3,
+        "std_s": 0.0059426475277066515
+      },
+      "loglikelihood_max": -75.74882629840651,
+      "loglikelihood_min": -75.7625985039618,
+      "value_draws_per_second_median": 38.62985151037571,
+      "value_first_call_s": 14.480376292000003,
+      "value_per_draw_steady_median_s": 0.025886716125000042,
+      "value_steady": {
+        "max_s": 0.4185970840000053,
+        "mean_s": 0.40215576399999975,
+        "median_s": 0.4141874580000007,
+        "min_s": 0.3736827499999933,
+        "reps": 3,
+        "std_s": 0.024756728278357017
+      }
+    },
+    "4": {
+      "failure_count": 0,
+      "gradient_draws_per_second_median": 14.770646478885375,
+      "gradient_failure_count": 0,
+      "gradient_first_call_s": 12.306229166000001,
+      "gradient_loglikelihood_max": -75.75426613545666,
+      "gradient_loglikelihood_min": -75.76259850396315,
+      "gradient_max_abs": 13.633806890902463,
+      "gradient_per_draw_steady_median_s": 0.06770184375000099,
+      "gradient_steady": {
+        "max_s": 0.2733269999999983,
+        "mean_s": 0.26326758333333444,
+        "median_s": 0.27080737500000396,
+        "min_s": 0.24566837500000105,
+        "reps": 3,
+        "std_s": 0.015293339334664709
+      },
+      "loglikelihood_max": -75.75426613545666,
+      "loglikelihood_min": -75.76259850396315,
+      "value_draws_per_second_median": 44.83471419209016,
+      "value_first_call_s": 4.688158874999999,
+      "value_per_draw_steady_median_s": 0.022304145750000615,
+      "value_steady": {
+        "max_s": 0.09835649999999774,
+        "mean_s": 0.08980477766666677,
+        "median_s": 0.08921658300000246,
+        "min_s": 0.08184125000000009,
+        "reps": 3,
+        "std_s": 0.00827332160410949
+      }
+    },
+    "64": {
+      "failure_count": 0,
+      "gradient_draws_per_second_median": 21.033542255564644,
+      "gradient_failure_count": 0,
+      "gradient_first_call_s": 32.527610208,
+      "gradient_loglikelihood_max": -75.74864741652449,
+      "gradient_loglikelihood_min": -75.76266580785747,
+      "gradient_max_abs": 13.636329305616574,
+      "gradient_per_draw_steady_median_s": 0.04754310937500028,
+      "gradient_steady": {
+        "max_s": 3.1402314169999954,
+        "mean_s": 3.056991833333342,
+        "median_s": 3.042759000000018,
+        "min_s": 2.9879850830000123,
+        "reps": 3,
+        "std_s": 0.07711463358292793
+      },
+      "loglikelihood_max": -75.74864741652449,
+      "loglikelihood_min": -75.76266580785747,
+      "value_draws_per_second_median": 50.371932457632404,
+      "value_first_call_s": 14.506090791000005,
+      "value_per_draw_steady_median_s": 0.019852325515625102,
+      "value_steady": {
+        "max_s": 1.4392839580000043,
+        "mean_s": 1.3260764720000016,
+        "median_s": 1.2705488330000065,
+        "min_s": 1.268396624999994,
+        "reps": 3,
+        "std_s": 0.098046464314882
+      }
+    }
+  },
+  "benchmark": {
+    "batch_sizes": [
+      1,
+      4,
+      16,
+      64
+    ],
+    "case": "medium_sw07_hlt",
+    "check_parameter_bounds": false,
+    "dtype": "float64",
+    "n_exo": 7,
+    "n_observables": 7,
+    "n_vars": 66,
+    "parameter_count": 1,
+    "parameter_names": [
+      "cprobp"
+    ],
+    "parameters_are_resolved": true,
+    "periods": 10,
+    "preset": "sw07_hlt",
+    "qme_algorithm": "schur_gpu",
+    "resolved_parameter_max_abs_diff": 0.3333333333333329,
+    "static_equation_rows": [
+      19,
+      65,
+      23,
+      51,
+      48,
+      46,
+      25,
+      17,
+      13,
+      15,
+      27,
+      47,
+      49,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      44,
+      21
+    ]
+  },
+  "runtime": {
+    "jax_default_backend": "cpu",
+    "jax_devices": [
+      "TFRT_CPU_0"
+    ],
+    "jax_enable_x64": true,
+    "jax_version": "0.4.30",
+    "numpyro_version": "0.19.0",
+    "nvidia_smi": "",
+    "platform": "macOS-15.7.3-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.9.6 (default, Dec  2 2025, 07:27:58) \n[Clang 17.0.0 (clang-1700.6.3.2)]"
+  }
+}

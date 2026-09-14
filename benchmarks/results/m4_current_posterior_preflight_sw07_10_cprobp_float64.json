@@ -1,0 +1,100 @@
+{
+  "benchmark": {
+    "case": "medium_sw07_hlt",
+    "chain_method": "vectorized",
+    "chains": 1,
+    "check_parameter_bounds": false,
+    "dense_mass": false,
+    "dtype": "float64",
+    "max_tree_depth": 8,
+    "n_exo": 7,
+    "n_observables": 7,
+    "n_vars": 66,
+    "parameter_count": 1,
+    "parameter_names": [
+      "cprobp"
+    ],
+    "parameters_are_resolved": true,
+    "periods": 10,
+    "preset": "sw07_hlt",
+    "prior_intervals": {
+      "cprobp": [
+        0.5985,
+        0.6014999999999999
+      ]
+    },
+    "qme_algorithm": "schur_gpu",
+    "resolved_parameter_max_abs_diff": 0.3333333333333329,
+    "samples": 1,
+    "static_equation_rows": [
+      19,
+      65,
+      23,
+      51,
+      48,
+      46,
+      25,
+      17,
+      13,
+      15,
+      27,
+      47,
+      49,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      44,
+      21
+    ],
+    "target_accept_prob": 0.8,
+    "warmup": 1
+  },
+  "extra_fields": null,
+  "posterior_diagnostics": null,
+  "preflight": {
+    "gradient": [
+      13.366978104844181
+    ],
+    "gradient_dtype": "float64",
+    "gradient_first_call_s": 7.910859208999999,
+    "gradient_steady": {
+      "max_s": 0.08547191599999948,
+      "mean_s": 0.05370937466666644,
+      "median_s": 0.04348529199999973,
+      "min_s": 0.032170916000000105,
+      "reps": 3,
+      "std_s": 0.02808287823623336
+    },
+    "gradient_value": -75.75558174239664,
+    "loglikelihood": -75.75558174239787,
+    "loglikelihood_dtype": "float64",
+    "value_first_call_s": 2.4717792499999995,
+    "value_steady": {
+      "max_s": 0.012338583000000014,
+      "mean_s": 0.012089458333333228,
+      "median_s": 0.01210154199999991,
+      "min_s": 0.011828249999999763,
+      "reps": 3,
+      "std_s": 0.00025538099767288434
+    }
+  },
+  "runtime": {
+    "jax_default_backend": "cpu",
+    "jax_devices": [
+      "TFRT_CPU_0"
+    ],
+    "jax_enable_x64": true,
+    "jax_version": "0.4.30",
+    "numpyro_version": "0.19.0",
+    "nvidia_smi": "",
+    "platform": "macOS-15.7.3-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.9.6 (default, Dec  2 2025, 07:27:58) \n[Clang 17.0.0 (clang-1700.6.3.2)]"
+  },
+  "schur_support_audit": null,
+  "throughput": null
+}
