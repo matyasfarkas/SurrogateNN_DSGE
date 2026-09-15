@@ -1,6 +1,6 @@
 # DSGE Speed Comparison
 
-Validation directory: `/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/results/20260712T083357`
+Validation directory: `/root/autodl-tmp/SurrogateNN_DSGE/benchmarks/results/20260712T083357`
 
 ## Scope
 
@@ -39,6 +39,7 @@ Best measured GPU static-HMC is 4.29x faster than the best measured M4 NumPyro s
 | Linux / JAX gpu | JAX static HMC | 4 | 16 | 32 | 40 | 15 | 1.000 | cold compile+run | 175.2 | 0.731 | 28.03 | 6.251 | 1.071 | 0.880 |
 | Linux / JAX gpu | JAX static HMC | 8 | 16 | 32 | 40 | 15 | 1.000 | cold compile+run | 207.5 | 1.234 | 82.24 | 2.523 | 1.066 | 0.881 |
 | Linux / JAX gpu | JAX static HMC | 16 | 16 | 32 | 40 | 15 | 1.000 | cold compile+run | 289.9 | 1.766 | 235.4 | 1.231 | 1.053 | 0.866 |
+| Linux / JAX gpu | JAX static HMC | 32 | 32 | 64 | 40 | 15 | 0.050 | steady replay | 309.7 | 6.613 | 27.02 | 11.46 | 1.925 | 1.000 |
 | Linux / JAX gpu | JAX static HMC | 32 | 16 | 32 | 40 | 15 | 0.200 | cold compile+run | 298.5 | 3.430 | 170.7 | 1.749 | 1.116 | 0.994 |
 | Linux / JAX gpu | JAX static HMC | 32 | 16 | 32 | 40 | 15 | 0.600 | post-compile run | 155.3 | 6.595 |  |  | 0.972 | 0.969 |
 | Linux / JAX gpu | JAX static HMC | 32 | 16 | 32 | 40 | 15 | 1.000 | post-compile run | 155.0 | 6.605 | 548.3 | 0.283 | 1.035 | 0.873 |
