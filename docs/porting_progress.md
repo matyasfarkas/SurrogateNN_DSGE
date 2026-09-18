@@ -979,6 +979,24 @@ Python/JAX status:
 - added `benchmarks/validate_parameter_config_julia_parity.py`, which includes the Julia source file and checks every parameter name, prior type, prior parameter, bound, description, and baseline value against the Python port
 - tests cover parameter-set names/counts, baseline-vector ordering, the intentionally trimmed mapped SEP support of `investment_4p_supported`, NumPyro log-probability support masking, JIT-safe JAX bounds checks, spec validation, and optional Julia parity through `SURROGATENN_RUN_JULIA_PARITY=1`
 
+### 63. HLT surrogate parameter-design sampling
+
+Julia reference:
+
+- `scripts/hlt_surrogate/test_lhs_sampling.jl`
+- `scripts/hlt_surrogate/README_PHASE1_18PARAM.md`
+
+Python/JAX status:
+
+- added a NumPy-first `ParameterDesign` layer for training-design matrices using the same `(parameters, samples)` orientation as the Julia HLT surrogate scripts
+- ported the Julia `lhs_to_bounds` affine bound transformation exactly for parameter matrices and added a deterministic Julia parity benchmark against the reference transformation
+- added `latin_hypercube_unit(...)` and `sample_lhs_parameters(...)`, producing true one-draw-per-stratum Latin hypercube designs for high-dimensional HLT parameter sets
+- added `parameter_grid(...)` with Julia-compatible nested-loop ordering for low-dimensional legacy grids and a `max_points` guard to prevent accidental `5^18` design explosions
+- added `sample_parameter_design(...)` and `summarize_parameter_design(...)` convenience helpers for dataset-pipeline use and coverage/correlation diagnostics
+- added `benchmarks/validate_parameter_sampling_julia_parity.py`, which checks fixed `lhs_to_bounds` output and the legacy `5^3` grid ordering against Julia
+- tests cover LHS stratification, parameter bounds, coverage/correlation diagnostics, grid ordering, high-dimensional grid refusal, dispatch validation, and optional Julia parity through `SURROGATENN_RUN_JULIA_PARITY=1`
+- no claim is made that Python reproduces the exact random stream of Julia's `LatinHypercubeSampling.randomLHC`; the tested parity target is the deterministic transformation and grid behavior the dataset pipeline depends on
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart` Sylvester variant is not ported yet, and `:dqgmres` is currently provided as a compatibility alias to the SciPy GMRES backend rather than as a distinct implementation.
@@ -998,6 +1016,7 @@ Python/JAX status:
 - The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, branch-frozen subgradient Jacobians for parsed OBC models on the Gauss-Hermite path, Julia-style nonlinear-solver controls for `linear_solver`, `fallback_solver`, stall detection, bounded backtracking line search, the updated low-level `accept_tol` semantics, parsed-model homotopy sigma continuation, and the Julia-style chained homotopy trajectory helper. The remaining SEP gap is now narrower: sparse-tree-specific Jacobian/runtime optimizations and broader OBC-specific subdifferential SEP machinery are still unported.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - The concrete HLT surrogate-estimation model factory is still not fully ported. The Python port now has the exact parameter metadata, bounded NumPyro priors, and frozen NN prediction layer, but the updated Julia `compute_surrogate_loglikelihood` factory is itself still a placeholder in the reference scripts and the full end-to-end HLT nonlinear surrogate estimation wrapper remains a pipeline gap.
+- The HLT parameter-design layer now covers LHS and legacy grid designs, but not Julia's exact `randomLHC` random-number stream or prior-draw design mode.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed SEP path with both full-tree and sparse fishbone branching.
 - One upstream model source, `models/testqipf.jl`, is still intentionally excluded from source-compatibility parity because it appears to contain a literal typo (`1GAMM`) rather than a parser feature gap.
