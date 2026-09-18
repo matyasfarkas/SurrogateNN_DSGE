@@ -1059,6 +1059,25 @@ Python/JAX status:
 - tests verify full `SurrogateTrainingResult` and raw `FrozenResNet` round trips, prediction equality after reload, metadata preservation, split-index preservation, validation-metric preservation, and CPU device placement after load
 - this is intentionally not a reader for Julia's internal `Serialization.serialize` `.jls` files; cross-language exchange should use an explicit numeric export format rather than relying on Julia's private serialization format
 
+### 68. Supervised ROM/FOM surrogate pipeline and Colab GPU smoke
+
+Julia reference:
+
+- `scripts/hlt_sep_surrogate_train.jl`
+- `scripts/hlt_surrogate/hlt_sep_surrogate_dataset_parallel.jl`
+- `scripts/hlt_surrogate/hlt_sep_surrogate_nn_utils.jl`
+
+Python/JAX status:
+
+- added `fit_surrogate_pipeline(...)`, a one-call supervised surrogate workflow that builds a ROM/FOM dataset, summarizes its quality, trains the selected JAX MLP/ResNet architecture on a requested device, and optionally saves a portable `.snn` bundle
+- added `SurrogatePipelineResult` with the generated `SurrogateDataset`, dataset summary, `SurrogateTrainingResult`, and optional saved bundle path
+- added `benchmarks/surrogate_training_smoke.py`, a deterministic small-batch parity/runtime smoke that runs the same synthetic ROM/FOM residual payload through Python/JAX training and the current Julia NN utilities
+- added `notebooks/colab_surrogate_training_smoke.ipynb`, a GPU-specific Colab smoke notebook that installs CUDA JAX, verifies a real `CudaDevice`, and runs the Python/JAX training benchmark without attempting a Julia install on Colab
+- Colab T4 smoke was manually run on September 18, 2026; the notebook kernel reported JAX 0.11.2, NumPyro 0.22.0, `JAX devices: [CudaDevice(id=0)]`, `Default backend: gpu`, and the terminal benchmark returned `status="ok"` for both MLP and ResNet with `bundle_roundtrip_max_abs=0.0` on `cuda:0`
+- the Colab notebook now sets `JAX_SKIP_CUDA_CONSTRAINTS_CHECK=1` for CUDA13/CUPTI compatibility and disables child-process GPU memory preallocation so the benchmark subprocess can coexist with the notebook kernel
+- local M4 CPU smoke against Julia 1.12.6 passed on the same payload: Julia CPU trained both MLP and ResNet with the upstream utility, and Python/JAX CPU trained, validated, saved, and reloaded both bundle types
+- tests cover the new one-call pipeline from callback ROM/FOM predictors through dataset construction, JAX training, bundle writing, bundle loading, metadata preservation, and prediction equality after reload
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart` Sylvester variant is not ported yet, and `:dqgmres` is currently provided as a compatibility alias to the SciPy GMRES backend rather than as a distinct implementation.
@@ -1087,5 +1106,5 @@ Python/JAX status:
 
 ## Environment note
 
-- A local git repository can be maintained here.
-- A remote GitHub repository has not been created from this environment because `gh` is not installed/configured.
+- The local git repository is linked to `https://github.com/matyasfarkas/SurrogateNN_DSGE.git`.
+- Feature work is being recorded on `codex/...` branches and pushed after focused tests pass.

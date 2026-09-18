@@ -7,6 +7,7 @@ import pytest
 from surrogatenn_dsge import (
     FrozenResNet,
     SurrogateDataset,
+    fit_surrogate_pipeline,
     load_surrogate_bundle,
     predict_frozen_batch,
     resolve_jax_device,
@@ -205,6 +206,85 @@ def test_save_and_load_raw_resnet_bundle_round_trips_predictions(tmp_path) -> No
     )
     assert loaded.metadata["raw"] is True
     assert loaded.validation_rmse is None
+
+
+def test_fit_surrogate_pipeline_builds_trains_and_saves_bundle(tmp_path) -> None:
+    theta = np.asarray(
+        [
+            [0.1, 0.3, 0.5],
+            [0.8, 1.0, 1.2],
+        ],
+        dtype=np.float64,
+    )
+    shocks = np.asarray(
+        [
+            [0.10, -0.20, 0.15, -0.05, 0.08],
+            [0.05, 0.12, -0.08, 0.02, -0.04],
+        ],
+        dtype=np.float64,
+    )
+
+    def rom_predict(state, shock, theta_t):
+        state = np.asarray(state, dtype=np.float64)
+        shock = np.asarray(shock, dtype=np.float64)
+        theta_t = np.asarray(theta_t, dtype=np.float64)
+        obs = np.asarray([0.4 * state[0] + shock[0] + 0.1 * theta_t[0]], dtype=np.float64)
+        next_state = np.asarray(
+            [
+                0.65 * state[0] + 0.10 * state[1] + shock[0],
+                0.20 * state[0] + 0.55 * state[1] + theta_t[1] * shock[1],
+            ],
+            dtype=np.float64,
+        )
+        return obs, next_state
+
+    def fom_predict(state, shock, theta_t):
+        obs_rom, next_rom = rom_predict(state, shock, theta_t)
+        state = np.asarray(state, dtype=np.float64)
+        shock = np.asarray(shock, dtype=np.float64)
+        obs_resid = np.asarray([0.2 * state[0] * theta_t[0] + 0.05 * shock[0] ** 2], dtype=np.float64)
+        state_resid = np.asarray([0.02 * shock[0] ** 2, -0.03 * state[1] * shock[1]], dtype=np.float64)
+        return obs_rom + obs_resid, next_rom + state_resid
+
+    result = fit_surrogate_pipeline(
+        rom_predict,
+        fom_predict,
+        initial_state=np.asarray([0.2, -0.1], dtype=np.float64),
+        shocks=shocks,
+        theta_design=theta,
+        target_mode="fom_obs",
+        architecture="mlp",
+        rom_residual=True,
+        validation_fraction=0.25,
+        train_seed=11,
+        d_hidden=10,
+        d_hidden2=None,
+        nepoch=12,
+        eta_init=2e-3,
+        batch_size=8,
+        device="cpu",
+        bundle_path=tmp_path / "pipeline_surrogate.snn",
+        bundle_metadata={"experiment": "pipeline-unit"},
+    )
+
+    assert result.dataset.n_samples == theta.shape[1] * shocks.shape[1]
+    assert result.dataset_summary["n_samples"] == result.dataset.n_samples
+    assert result.training.metadata["architecture"] == "mlp"
+    assert result.training.metadata["jax_device_platform"] == "cpu"
+    assert result.bundle_path is not None
+    assert result.bundle_path.is_file()
+
+    loaded = load_surrogate_bundle(result.bundle_path, device="cpu")
+    assert loaded.metadata["pipeline"] == "fit_surrogate_pipeline"
+    assert loaded.metadata["experiment"] == "pipeline-unit"
+    assert loaded.metadata["dataset_summary"]["n_samples"] == result.dataset.n_samples
+    X_probe = result.dataset.X[:, :4]
+    np.testing.assert_allclose(
+        predict_frozen_batch(loaded.frozen, X_probe),
+        predict_frozen_batch(result.training.frozen, X_probe),
+        rtol=1e-12,
+        atol=1e-12,
+    )
 
 
 def test_resolve_jax_device_requires_requested_gpu_backend() -> None:

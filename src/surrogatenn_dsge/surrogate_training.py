@@ -21,7 +21,12 @@ from .surrogate import (
     train_resnet,
     validate_surrogate,
 )
-from .surrogate_dataset import SurrogateDataset
+from .surrogate_dataset import (
+    PredictTupleFn,
+    SurrogateDataset,
+    build_surrogate_residual_dataset,
+    summarize_surrogate_dataset,
+)
 
 
 SURROGATE_BUNDLE_VERSION = 1
@@ -129,6 +134,19 @@ class SurrogateBundle:
                 continue
             dtype = np.int64 if field in {"train_idx", "val_idx", "train_theta_ids", "val_theta_ids"} else np.float64
             object.__setattr__(self, field, np.asarray(values, dtype=dtype).reshape(-1))
+
+
+@dataclass(frozen=True)
+class SurrogatePipelineResult:
+    dataset: SurrogateDataset
+    dataset_summary: dict[str, object]
+    training: SurrogateTrainingResult
+    bundle_path: Optional[Path] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "dataset_summary", dict(self.dataset_summary))
+        if self.bundle_path is not None:
+            object.__setattr__(self, "bundle_path", Path(self.bundle_path))
 
 
 def split_surrogate_dataset(
@@ -674,4 +692,100 @@ def train_surrogate_from_dataset(
         target_is_residual=bool(rom_residual),
         output_indices=out_idx,
         metadata=metadata,
+    )
+
+
+def fit_surrogate_pipeline(
+    rom_predict: PredictTupleFn,
+    fom_predict: PredictTupleFn,
+    initial_state: Any,
+    shocks: Any,
+    theta_design: Any,
+    *,
+    target_mode: str = "fom_obs",
+    samples_per_theta: Optional[int] = None,
+    sample_replace: bool = True,
+    dataset_seed: int = 0,
+    min_stable_periods: int = 1,
+    input_names: Sequence[str] = (),
+    output_names: Sequence[str] = (),
+    architecture: str = "resnet",
+    rom_residual: bool = True,
+    output_indices: Optional[Sequence[int] | np.ndarray] = None,
+    validation_fraction: float = 0.10,
+    split_by_theta: bool = False,
+    only_full_success: bool = False,
+    train_seed: int = 1,
+    sample_weights: Optional[Any] = None,
+    d_hidden: int = 128,
+    d_hidden2: Optional[int] = 64,
+    n_blocks: int = 3,
+    nepoch: Optional[int] = None,
+    eta_init: float = 1e-3,
+    batch_size: Optional[int] = None,
+    weight_decay: float = 1e-5,
+    clip_norm: float = 5.0,
+    activation: str = "silu",
+    device: Optional[Any] = None,
+    bundle_path: Optional[str | Path] = None,
+    bundle_metadata: Optional[dict[str, object]] = None,
+) -> SurrogatePipelineResult:
+    """Build a ROM/FOM dataset, train a surrogate, and optionally save it.
+
+    This is the supervised-learning counterpart to the SEP/switching pipeline:
+    the expensive FOM callback supplies targets, the ROM callback supplies the
+    baseline path, and the resulting frozen JAX surrogate can be placed on CPU
+    or GPU through `device`.
+    """
+
+    dataset = build_surrogate_residual_dataset(
+        rom_predict,
+        fom_predict,
+        initial_state,
+        shocks,
+        theta_design,
+        target_mode=target_mode,
+        samples_per_theta=samples_per_theta,
+        sample_replace=sample_replace,
+        seed=dataset_seed,
+        min_stable_periods=min_stable_periods,
+        input_names=input_names,
+        output_names=output_names,
+    )
+    dataset_summary = summarize_surrogate_dataset(dataset)
+    training = train_surrogate_from_dataset(
+        dataset,
+        architecture=architecture,
+        rom_residual=rom_residual,
+        output_indices=output_indices,
+        validation_fraction=validation_fraction,
+        split_by_theta=split_by_theta,
+        only_full_success=only_full_success,
+        seed=train_seed,
+        sample_weights=sample_weights,
+        d_hidden=d_hidden,
+        d_hidden2=d_hidden2,
+        n_blocks=n_blocks,
+        nepoch=nepoch,
+        eta_init=eta_init,
+        batch_size=batch_size,
+        weight_decay=weight_decay,
+        clip_norm=clip_norm,
+        activation=activation,
+        device=device,
+    )
+    saved_path: Optional[Path] = None
+    if bundle_path is not None:
+        metadata = {
+            "pipeline": "fit_surrogate_pipeline",
+            "dataset_summary": dataset_summary,
+        }
+        if bundle_metadata is not None:
+            metadata.update(bundle_metadata)
+        saved_path = save_surrogate_bundle(bundle_path, training, metadata=metadata)
+    return SurrogatePipelineResult(
+        dataset=dataset,
+        dataset_summary=dataset_summary,
+        training=training,
+        bundle_path=saved_path,
     )

@@ -19,7 +19,9 @@ runtime target, and current NUTS caveat.
 
 For Colab, use `notebooks/colab_jax_numpyro_gemini_profile.ipynb` for the
 small GPU/NumPyro smoke run and `notebooks/colab_sw07_long_profile.ipynb` for
-the dedicated Python-only SW07/HLT JAX + NumPyro run.
+the dedicated Python-only SW07/HLT JAX + NumPyro run. Use
+`notebooks/colab_surrogate_training_smoke.ipynb` for the small supervised
+surrogate-training GPU smoke test.
 
 ## Current status
 
@@ -103,6 +105,8 @@ Implemented:
 - the high-level switching bridge is now regression-tested on a nonlinear sparse-tree SEP FOM path as well, so ROM Kalman plus sparse-tree SEP inversion can be compared end to end against a manual likelihood mixture on the same model
 - HMC expectation backend for both SEP callback APIs, including parsed-model SEP solves and optional parallel tempering
 - parsed-model `solve_sep_at_noise_level(...)`, `homotopy_sep(...)`, and `homotopy_chained_trajectory(...)` utilities, porting the updated Julia sigma-continuation SEP robustness workflow; `sigma = 0` now forces a deterministic perfect-foresight SEP step, intermediate noise levels scale deterministic shocks directly, adaptive subdivision retries harder nonlinear paths before giving up, and the chained helper turns that continuation logic into a period-by-period nonlinear trajectory generator
+- one-call supervised ROM/FOM surrogate workflow via `fit_surrogate_pipeline(...)`, which builds the callback dataset, summarizes it, trains the JAX MLP/ResNet on the requested device, and optionally saves a portable `.snn` bundle
+- deterministic surrogate-training smoke benchmark and Colab GPU notebook; the September 18, 2026 Colab T4 run verified JAX GPU visibility and returned `status="ok"` with zero bundle round-trip error for both MLP and ResNet on `cuda:0`
 - parsed-model stochastic extended path solve path with JAX dynamic residual evaluation and residual-expectation averaging over future branches
 - focused tests for residuals, symmetry, fallback behavior, JIT, autodiff, parser parity, inversion filtering, switching likelihoods, gate calibration, and multi-model JAX compile smoke across upstream model files
 

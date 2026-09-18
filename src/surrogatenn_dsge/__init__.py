@@ -238,8 +238,10 @@ from .surrogate_dataset import (
 )
 from .surrogate_training import (
     SurrogateBundle,
+    SurrogatePipelineResult,
     SurrogateTrainingResult,
     SurrogateTrainValidationSplit,
+    fit_surrogate_pipeline,
     load_surrogate_bundle,
     save_surrogate_bundle,
     split_surrogate_dataset,
@@ -338,6 +340,7 @@ __all__ = [
     "StaticHMCState",
     "SurrogateBundle",
     "SurrogateDataset",
+    "SurrogatePipelineResult",
     "SurrogateTrainingResult",
     "SurrogateValidationResult",
     "SurrogateTrainValidationSplit",
@@ -427,6 +430,7 @@ __all__ = [
     "first_order_inversion_loglikelihood",
     "first_order_inversion_loglikelihood_per_period",
     "first_order_state_update",
+    "fit_surrogate_pipeline",
     "format_parameter_summary",
     "inversion_loglikelihood_from_model",
     "inversion_loglikelihood_per_period_from_model",
