@@ -946,6 +946,22 @@ Python/JAX status:
 - tests now also cover direct NumPy and JAX homotopy fallback solves plus a forced control-flow regression where the main Newton stack must fall through to homotopy before converging; along with that, the existing coverage still includes parsed option capture, OBC runtime horizon routing, steady-state recovery from a non-finite default guess, nearest-solution steady-state cache reuse on both NumPy and JAX paths, Bartels-Stewart parity, iterative Lyapunov/Sylvester convergence, and iterative-to-direct fallback
 - a manual upstream spot-check on `Guerrieri_Iacoviello_2017.jl` now lands at residual norm about `1.19e-2` after the hybrid rescue, down from about `4.32e-1` before it, but still not at full automatic convergence under the default budget
 
+### 61. Frozen surrogate NN layer for nonlinear SEP residual estimation
+
+Julia reference:
+
+- `scripts/hlt_surrogate/hlt_sep_surrogate_nn_utils.jl`
+- `src/regime_switching/likelihood.jl`
+
+Python/JAX status:
+
+- added a Julia-compatible frozen surrogate layer with `NormStats`, `FrozenMLP`, `FrozenResNet`, `ResBlock`, `predict_frozen`, `predict_frozen_batch`, `predict_frozen_safe`, `compute_ood_flag`, `weighted_mse`, and `validate_surrogate`
+- added a lightweight JAX-native `train_mlp(...)` using AdamW, cosine warmup/decay, gradient clipping, optional sample weights, and the same `(features, samples)` data convention as the Julia training utility
+- added convenience wrappers that connect frozen NN residual corrections to the existing additive-residual likelihood and inversion likelihood APIs, including batched residual evaluation for the inversion replay stage
+- added an explicit economic smell test: if a filter state is out of the surrogate training support, the OOD guard suppresses a pathological nonlinear correction and preserves the stable ROM likelihood instead of accepting an absurd observation jump
+- added `benchmarks/validate_surrogate_julia_parity.py`, which constructs the same deterministic frozen MLP and ResNet in Julia and Python and confirms matching predictions to tight numerical tolerance
+- tests cover formula parity, batched-vs-single prediction consistency, OOD guards, validation diagnostics, JAX training on a controlled map, additive likelihood integration, inversion likelihood integration, and optional Julia parity through `SURROGATENN_RUN_JULIA_PARITY=1`
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart` Sylvester variant is not ported yet, and `:dqgmres` is currently provided as a compatibility alias to the SciPy GMRES backend rather than as a distinct implementation.
