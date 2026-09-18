@@ -653,6 +653,191 @@ def train_mlp(
     )
 
 
+def train_resnet(
+    X: Any,
+    Y: Any,
+    *,
+    d_theta: int,
+    d_hidden: int = 128,
+    n_blocks: int = 3,
+    nepoch: int = 600,
+    eta_init: float = 1e-3,
+    batch_size: Optional[int] = None,
+    seed: int = 1,
+    weight_decay: float = 1e-5,
+    clip_norm: float = 5.0,
+    sample_weights: Optional[ArrayLike] = None,
+) -> FrozenResNet:
+    """Train the Julia-style FiLM residual surrogate with JAX AdamW.
+
+    Inputs are shaped `(features, samples)` and must end with `d_theta`
+    parameter rows, matching `FrozenResNet` and the HLT residual dataset
+    convention `X = [state_t; shock_t; theta]`.
+    """
+
+    theta_dim = int(d_theta)
+    hidden = int(d_hidden)
+    block_count = int(n_blocks)
+    epochs = int(nepoch)
+    if theta_dim <= 0:
+        raise ValueError(f"d_theta must be positive, got {d_theta}.")
+    if hidden <= 0:
+        raise ValueError(f"d_hidden must be positive, got {d_hidden}.")
+    if block_count < 0:
+        raise ValueError(f"n_blocks must be nonnegative, got {n_blocks}.")
+    if epochs <= 0:
+        raise ValueError(f"nepoch must be positive, got {nepoch}.")
+    if eta_init <= 0.0:
+        raise ValueError(f"eta_init must be positive, got {eta_init}.")
+    if weight_decay < 0.0:
+        raise ValueError(f"weight_decay must be nonnegative, got {weight_decay}.")
+    if clip_norm < 0.0:
+        raise ValueError(f"clip_norm must be nonnegative, got {clip_norm}.")
+
+    X_std, Y_std, norm = standardize_xy(X, Y, copy=True)
+    d_in, n_samples = X_std.shape
+    d_out = Y_std.shape[0]
+    if theta_dim >= d_in:
+        raise ValueError(f"d_theta must be smaller than input dimension {d_in}, got {d_theta}.")
+    d_state_shock = d_in - theta_dim
+
+    if batch_size is None:
+        batch = min(512, max(32, n_samples // 20))
+    else:
+        batch = int(batch_size)
+    if batch <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}.")
+    batch = min(batch, n_samples)
+
+    if sample_weights is None:
+        weights_np = np.ones((n_samples,), dtype=np.float64)
+    else:
+        weights_np = np.asarray(sample_weights, dtype=np.float64).reshape(-1)
+        if weights_np.shape[0] != n_samples:
+            raise ValueError(f"sample_weights length mismatch: {weights_np.shape[0]} vs {n_samples}.")
+        if not np.isfinite(weights_np).all() or np.any(weights_np < 0.0) or not np.sum(weights_np) > 0.0:
+            raise ValueError("sample_weights must be finite, nonnegative, and have positive sum.")
+
+    key = jax.random.PRNGKey(int(seed))
+    key_iter = iter(jax.random.split(key, 4 + 2 * block_count))
+    params: dict[str, Any] = {
+        "W_embed": _he_init(next(key_iter), (hidden, d_state_shock), math.sqrt(2.0 / max(1, d_state_shock))),
+        "b_embed": jnp.zeros((hidden,), dtype=jnp.float64),
+        "W_gamma": 0.02 * jax.random.normal(next(key_iter), (hidden, theta_dim), dtype=jnp.float64),
+        "b_gamma": jnp.ones((hidden,), dtype=jnp.float64),
+        "W_beta": 0.02 * jax.random.normal(next(key_iter), (hidden, theta_dim), dtype=jnp.float64),
+        "b_beta": jnp.zeros((hidden,), dtype=jnp.float64),
+    }
+    blocks: list[dict[str, jax.Array]] = []
+    hidden_scale = math.sqrt(2.0 / max(1, hidden))
+    for _ in range(block_count):
+        blocks.append(
+            {
+                "W1": _he_init(next(key_iter), (hidden, hidden), hidden_scale),
+                "b1": jnp.zeros((hidden,), dtype=jnp.float64),
+                "W2": 0.01 * jax.random.normal(next(key_iter), (hidden, hidden), dtype=jnp.float64),
+                "b2": jnp.zeros((hidden,), dtype=jnp.float64),
+            }
+        )
+    params["blocks"] = tuple(blocks)
+    params["W_out"] = 0.01 * jax.random.normal(next(key_iter), (d_out, hidden), dtype=jnp.float64)
+    params["b_out"] = jnp.zeros((d_out,), dtype=jnp.float64)
+
+    opt_m = jax.tree_util.tree_map(jnp.zeros_like, params)
+    opt_v = jax.tree_util.tree_map(jnp.zeros_like, params)
+    X_jax = jnp.asarray(X_std, dtype=jnp.float64)
+    Y_jax = jnp.asarray(Y_std, dtype=jnp.float64)
+    weights_jax = jnp.asarray(weights_np, dtype=jnp.float64)
+
+    def forward(params_local: Mapping[str, Any], X_batch: jax.Array) -> jax.Array:
+        x_state_shock = X_batch[:d_state_shock, :]
+        x_theta = X_batch[d_state_shock:, :]
+        z = silu(_linear(params_local["W_embed"], params_local["b_embed"], x_state_shock))
+        gamma = _linear(params_local["W_gamma"], params_local["b_gamma"], x_theta)
+        beta = _linear(params_local["W_beta"], params_local["b_beta"], x_theta)
+        z = gamma * z + beta
+        for block in params_local["blocks"]:
+            z = z + _linear(block["W2"], block["b2"], silu(_linear(block["W1"], block["b1"], z)))
+        return _linear(params_local["W_out"], params_local["b_out"], z)
+
+    def loss_fn(params_local: Mapping[str, Any], X_batch: jax.Array, Y_batch: jax.Array, w_batch: jax.Array) -> jax.Array:
+        pred = forward(params_local, X_batch)
+        diff_sq = jnp.sum((pred - Y_batch) ** 2, axis=0)
+        return jnp.sum(diff_sq * w_batch) / jnp.sum(w_batch)
+
+    value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
+
+    @jax.jit
+    def update_step(
+        params_local: Mapping[str, Any],
+        m_local: Mapping[str, Any],
+        v_local: Mapping[str, Any],
+        grads: Mapping[str, Any],
+        lr: jax.Array,
+        step: jax.Array,
+    ) -> tuple[Any, Any, Any]:
+        leaves = [g for g in jax.tree_util.tree_leaves(grads) if g is not None]
+        global_norm = jnp.sqrt(sum(jnp.sum(g * g) for g in leaves))
+        scale = jnp.where((clip_norm > 0.0) & (global_norm > clip_norm), clip_norm / (global_norm + 1e-12), 1.0)
+        grads_scaled = jax.tree_util.tree_map(lambda g: g * scale, grads)
+        beta1, beta2, eps = 0.9, 0.999, 1e-8
+        m_next = jax.tree_util.tree_map(lambda m, g: beta1 * m + (1.0 - beta1) * g, m_local, grads_scaled)
+        v_next = jax.tree_util.tree_map(lambda v, g: beta2 * v + (1.0 - beta2) * (g * g), v_local, grads_scaled)
+        m_hat = jax.tree_util.tree_map(lambda m: m / (1.0 - beta1**step), m_next)
+        v_hat = jax.tree_util.tree_map(lambda v: v / (1.0 - beta2**step), v_next)
+        params_next = jax.tree_util.tree_map(
+            lambda p, m, v: p - lr * (m / (jnp.sqrt(v) + eps) + weight_decay * p),
+            params_local,
+            m_hat,
+            v_hat,
+        )
+        return params_next, m_next, v_next
+
+    rng = np.random.default_rng(int(seed))
+    step_count = 0
+    for epoch in range(1, epochs + 1):
+        lr_value = _cosine_schedule_with_warmup(epoch, epochs, float(eta_init))
+        if batch < n_samples:
+            indices = rng.permutation(n_samples)
+        else:
+            indices = np.arange(n_samples)
+        for start in range(0, n_samples, batch):
+            batch_idx = indices[start : start + batch]
+            X_batch = jnp.take(X_jax, jnp.asarray(batch_idx), axis=1)
+            Y_batch = jnp.take(Y_jax, jnp.asarray(batch_idx), axis=1)
+            w_batch = jnp.take(weights_jax, jnp.asarray(batch_idx), axis=0)
+            _, grads = value_and_grad(params, X_batch, Y_batch, w_batch)
+            step_count += 1
+            params, opt_m, opt_v = update_step(
+                params,
+                opt_m,
+                opt_v,
+                grads,
+                jnp.asarray(lr_value, dtype=jnp.float64),
+                jnp.asarray(step_count, dtype=jnp.float64),
+            )
+
+    trained_blocks = tuple(
+        ResBlock(W1=block["W1"], b1=block["b1"], W2=block["W2"], b2=block["b2"])
+        for block in params["blocks"]
+    )
+    return FrozenResNet(
+        W_embed=params["W_embed"],
+        b_embed=params["b_embed"],
+        d_theta=theta_dim,
+        W_gamma=params["W_gamma"],
+        b_gamma=params["b_gamma"],
+        W_beta=params["W_beta"],
+        b_beta=params["b_beta"],
+        blocks=trained_blocks,
+        W_out=params["W_out"],
+        b_out=params["b_out"],
+        norm=norm,
+        d_in=d_in,
+        d_out=d_out,
+    )
+
+
 def make_surrogate_residual_predictor(
     frozen: FrozenMLP | FrozenResNet,
 ) -> Callable[[ArrayLike, ArrayLike, ArrayLike], jax.Array]:

@@ -226,6 +226,7 @@ from .surrogate import (
     surrogate_additive_residual_loglik_per_period,
     surrogate_inversion_loglik_per_period,
     train_mlp,
+    train_resnet,
     validate_surrogate,
     weighted_mse,
 )
@@ -528,6 +529,7 @@ __all__ = [
     "theta_within_bounds",
     "theta_within_bounds_jax",
     "train_mlp",
+    "train_resnet",
     "unconstrained_to_bounded",
     "validate_surrogate",
     "weighted_mse",

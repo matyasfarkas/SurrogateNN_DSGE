@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from surrogatenn_dsge import (
     FrozenMLP,
@@ -16,6 +17,7 @@ from surrogatenn_dsge import (
     surrogate_additive_residual_loglik_per_period,
     surrogate_inversion_loglik_per_period,
     train_mlp,
+    train_resnet,
     validate_surrogate,
     weighted_mse,
 )
@@ -193,6 +195,47 @@ def test_train_mlp_learns_simple_map_with_jax_backend() -> None:
     rmse = float(np.sqrt(np.mean((Y_pred - Y) ** 2)))
     baseline_rmse = float(np.sqrt(np.mean((Y - Y.mean(axis=1, keepdims=True)) ** 2)))
     assert rmse < 0.35 * baseline_rmse
+
+
+def test_train_resnet_learns_theta_conditioned_residual_map_with_jax_backend() -> None:
+    rng = np.random.default_rng(321)
+    X = rng.normal(size=(5, 128))
+    state_shock = X[:3, :]
+    theta = X[3:, :]
+    Y = np.vstack(
+        [
+            0.45 * state_shock[0, :] - 0.20 * state_shock[1, :] + 0.75 * theta[0, :]
+            + 0.18 * state_shock[2, :] * theta[1, :],
+            -0.10 * state_shock[0, :] + 0.35 * state_shock[2, :] - 0.55 * theta[1, :]
+            + 0.15 * state_shock[1, :] * theta[0, :],
+        ]
+    )
+
+    frozen = train_resnet(
+        X,
+        Y,
+        d_theta=2,
+        d_hidden=28,
+        n_blocks=1,
+        nepoch=220,
+        eta_init=3e-3,
+        batch_size=32,
+        seed=11,
+        weight_decay=1e-6,
+    )
+    Y_pred = np.asarray(predict_frozen_batch(frozen, X), dtype=np.float64)
+    rmse = float(np.sqrt(np.mean((Y_pred - Y) ** 2)))
+    baseline_rmse = float(np.sqrt(np.mean((Y - Y.mean(axis=1, keepdims=True)) ** 2)))
+    assert rmse < 0.40 * baseline_rmse
+
+
+def test_train_resnet_validates_theta_dimension() -> None:
+    X = np.zeros((3, 8), dtype=np.float64)
+    Y = np.zeros((1, 8), dtype=np.float64)
+    with pytest.raises(ValueError, match="d_theta"):
+        train_resnet(X, Y, d_theta=0, nepoch=1)
+    with pytest.raises(ValueError, match="smaller"):
+        train_resnet(X, Y, d_theta=3, nepoch=1)
 
 
 def test_surrogate_additive_likelihood_matches_existing_callback_path() -> None:

@@ -956,11 +956,11 @@ Julia reference:
 Python/JAX status:
 
 - added a Julia-compatible frozen surrogate layer with `NormStats`, `FrozenMLP`, `FrozenResNet`, `ResBlock`, `predict_frozen`, `predict_frozen_batch`, `predict_frozen_safe`, `compute_ood_flag`, `weighted_mse`, and `validate_surrogate`
-- added a lightweight JAX-native `train_mlp(...)` using AdamW, cosine warmup/decay, gradient clipping, optional sample weights, and the same `(features, samples)` data convention as the Julia training utility
+- added lightweight JAX-native `train_mlp(...)` and `train_resnet(...)` training paths using AdamW, cosine warmup/decay, gradient clipping, optional sample weights, and the same `(features, samples)` data convention as the Julia training utility
 - added convenience wrappers that connect frozen NN residual corrections to the existing additive-residual likelihood and inversion likelihood APIs, including batched residual evaluation for the inversion replay stage
 - added an explicit economic smell test: if a filter state is out of the surrogate training support, the OOD guard suppresses a pathological nonlinear correction and preserves the stable ROM likelihood instead of accepting an absurd observation jump
 - added `benchmarks/validate_surrogate_julia_parity.py`, which constructs the same deterministic frozen MLP and ResNet in Julia and Python and confirms matching predictions to tight numerical tolerance
-- tests cover formula parity, batched-vs-single prediction consistency, OOD guards, validation diagnostics, JAX training on a controlled map, additive likelihood integration, inversion likelihood integration, and optional Julia parity through `SURROGATENN_RUN_JULIA_PARITY=1`
+- tests cover formula parity, batched-vs-single prediction consistency, OOD guards, validation diagnostics, JAX MLP/ResNet training on controlled maps, additive likelihood integration, inversion likelihood integration, and optional Julia parity through `SURROGATENN_RUN_JULIA_PARITY=1`
 
 ### 62. HLT surrogate-estimation parameter configuration
 
@@ -1014,6 +1014,19 @@ Python/JAX status:
 - added `summarize_surrogate_dataset(...)` for quick dataset diagnostics, including dimensions, theta success rate, stable-period range, samples per theta, and ROM-baseline RMSE
 - tests verify exact residual timing, confirm that the next input state follows the FOM rather than ROM path, check raw FOM target/ROM baseline storage, enforce Julia-like sampling-with-replacement period IDs, preserve stable prefixes after synthetic FOM failure, and reject all-failed datasets
 
+### 65. JAX-native ResNet residual surrogate training
+
+Julia reference:
+
+- `scripts/hlt_surrogate/hlt_sep_surrogate_nn_utils.jl`
+
+Python/JAX status:
+
+- added `train_resnet(...)`, a native JAX AdamW trainer for the Julia-style FiLM residual architecture used by `FrozenResNet`
+- the trainer keeps the HLT dataset convention that the final `d_theta` input rows are the parameter vector, with preceding rows interpreted as state/shock features; invalid `d_theta` choices are rejected before compilation
+- initialization keeps the FiLM scale near identity and the residual/output projections small, so early predictions stay close to a stable normalized baseline before training
+- tests verify that the ResNet learns a controlled theta-conditioned residual map and that theta-dimension validation fails safely
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart` Sylvester variant is not ported yet, and `:dqgmres` is currently provided as a compatibility alias to the SciPy GMRES backend rather than as a distinct implementation.
@@ -1035,7 +1048,7 @@ Python/JAX status:
 - The concrete HLT surrogate-estimation model factory is still not fully ported. The Python port now has the exact parameter metadata, bounded NumPyro priors, and frozen NN prediction layer, but the updated Julia `compute_surrogate_loglikelihood` factory is itself still a placeholder in the reference scripts and the full end-to-end HLT nonlinear surrogate estimation wrapper remains a pipeline gap.
 - The HLT parameter-design layer now covers LHS and legacy grid designs, but not Julia's exact `randomLHC` random-number stream or prior-draw design mode.
 - The surrogate dataset layer is now available for callback predictors, but not yet wired directly to parsed `MacroModel` objects, automatic ROM cache construction, or batch SEP simulation on full HLT/SW07 models.
-- Frozen ResNet inference is ported, but JAX-native ResNet training is still missing; current training support is MLP-only.
+- ResNet training is now available, but the full HLT residual-surrogate training harness still needs parsed-model wiring, automatic ROM/FOM cache construction, train/validation splitting, checkpointing, early stopping, and batched SEP dataset generation for full-size models.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed SEP path with both full-tree and sparse fishbone branching.
 - One upstream model source, `models/testqipf.jl`, is still intentionally excluded from source-compatibility parity because it appears to contain a literal typo (`1GAMM`) rather than a parser feature gap.
