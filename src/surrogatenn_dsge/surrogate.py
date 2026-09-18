@@ -492,6 +492,51 @@ def _he_init(key: jax.Array, shape: tuple[int, ...], scale: float) -> jax.Array:
     return scale * jax.random.normal(key, shape, dtype=jnp.float64)
 
 
+def resolve_jax_device(device: Optional[Any] = None) -> Optional[jax.Device]:
+    """Resolve an optional JAX device selector.
+
+    `None` keeps JAX's default placement. Strings such as `"gpu"` or `"cpu"`
+    require that backend to be available; this avoids accidental CPU fallback
+    in GPU training runs.
+    """
+
+    if device is None:
+        return None
+    if isinstance(device, str):
+        selector = device.strip().lower()
+        backend = "gpu" if selector in {"gpu", "cuda"} else selector
+        if backend in {"cpu", "gpu", "tpu"}:
+            try:
+                devices = jax.devices(backend)
+            except RuntimeError as exc:
+                raise ValueError(f"Requested JAX device backend {device!r} is not available.") from exc
+            if not devices:
+                raise ValueError(f"Requested JAX device backend {device!r} is not available.")
+            return devices[0]
+        for available in jax.devices():
+            if selector in {str(available).lower(), f"{available.platform}:{available.id}".lower()}:
+                return available
+        raise ValueError(f"Could not resolve JAX device selector {device!r}.")
+    return device
+
+
+def _device_put(value: Any, device: Optional[jax.Device]) -> Any:
+    if device is None:
+        return value
+    return jax.device_put(value, device)
+
+
+def _norm_on_device(norm: NormStats, device: Optional[jax.Device]) -> NormStats:
+    if device is None:
+        return norm
+    return NormStats(
+        mu_x=_device_put(norm.mu_x, device),
+        sigma_x=_device_put(norm.sigma_x, device),
+        mu_y=_device_put(norm.mu_y, device),
+        sigma_y=_device_put(norm.sigma_y, device),
+    )
+
+
 def train_mlp(
     X: Any,
     Y: Any,
@@ -506,6 +551,7 @@ def train_mlp(
     clip_norm: float = 5.0,
     activation: str = "silu",
     sample_weights: Optional[ArrayLike] = None,
+    device: Optional[Any] = None,
 ) -> FrozenMLP:
     """Train a Julia-compatible frozen MLP with JAX AdamW.
 
@@ -551,7 +597,8 @@ def train_mlp(
         if not np.isfinite(weights_np).all() or np.any(weights_np < 0.0) or not np.sum(weights_np) > 0.0:
             raise ValueError("sample_weights must be finite, nonnegative, and have positive sum.")
 
-    key = jax.random.PRNGKey(int(seed))
+    target_device = resolve_jax_device(device)
+    key = _device_put(jax.random.PRNGKey(int(seed)), target_device)
     keys = jax.random.split(key, 3 if hidden2 is None else 4)
     params: dict[str, jax.Array] = {
         "W1": _he_init(keys[0], (hidden1, d_in), 0.1),
@@ -566,11 +613,12 @@ def train_mlp(
         params["W3"] = _he_init(keys[2], (d_out, hidden2), 0.1)
         params["b3"] = jnp.zeros((d_out,), dtype=jnp.float64)
 
+    params = _device_put(params, target_device)
     opt_m = jax.tree_util.tree_map(jnp.zeros_like, params)
     opt_v = jax.tree_util.tree_map(jnp.zeros_like, params)
-    X_jax = jnp.asarray(X_std, dtype=jnp.float64)
-    Y_jax = jnp.asarray(Y_std, dtype=jnp.float64)
-    weights_jax = jnp.asarray(weights_np, dtype=jnp.float64)
+    X_jax = _device_put(jnp.asarray(X_std, dtype=jnp.float64), target_device)
+    Y_jax = _device_put(jnp.asarray(Y_std, dtype=jnp.float64), target_device)
+    weights_jax = _device_put(jnp.asarray(weights_np, dtype=jnp.float64), target_device)
     act = _activation_fn(activation)
 
     def forward(params_local: Mapping[str, jax.Array], X_batch: jax.Array) -> jax.Array:
@@ -623,9 +671,10 @@ def train_mlp(
             indices = np.arange(n_samples)
         for start in range(0, n_samples, batch):
             batch_idx = indices[start : start + batch]
-            X_batch = jnp.take(X_jax, jnp.asarray(batch_idx), axis=1)
-            Y_batch = jnp.take(Y_jax, jnp.asarray(batch_idx), axis=1)
-            w_batch = jnp.take(weights_jax, jnp.asarray(batch_idx), axis=0)
+            batch_idx_jax = _device_put(jnp.asarray(batch_idx, dtype=jnp.int64), target_device)
+            X_batch = jnp.take(X_jax, batch_idx_jax, axis=1)
+            Y_batch = jnp.take(Y_jax, batch_idx_jax, axis=1)
+            w_batch = jnp.take(weights_jax, batch_idx_jax, axis=0)
             _, grads = value_and_grad(params, X_batch, Y_batch, w_batch)
             step_count += 1
             params, opt_m, opt_v = update_step(
@@ -633,8 +682,8 @@ def train_mlp(
                 opt_m,
                 opt_v,
                 grads,
-                jnp.asarray(lr_value, dtype=jnp.float64),
-                jnp.asarray(step_count, dtype=jnp.float64),
+                _device_put(jnp.asarray(lr_value, dtype=jnp.float64), target_device),
+                _device_put(jnp.asarray(step_count, dtype=jnp.float64), target_device),
             )
 
     W3 = params.get("W3")
@@ -646,7 +695,7 @@ def train_mlp(
         b2=params["b2"],
         W3=W3,
         b3=b3,
-        norm=norm,
+        norm=_norm_on_device(norm, target_device),
         d_in=d_in,
         d_out=d_out,
         activation=activation,
@@ -667,6 +716,7 @@ def train_resnet(
     weight_decay: float = 1e-5,
     clip_norm: float = 5.0,
     sample_weights: Optional[ArrayLike] = None,
+    device: Optional[Any] = None,
 ) -> FrozenResNet:
     """Train the Julia-style FiLM residual surrogate with JAX AdamW.
 
@@ -718,7 +768,8 @@ def train_resnet(
         if not np.isfinite(weights_np).all() or np.any(weights_np < 0.0) or not np.sum(weights_np) > 0.0:
             raise ValueError("sample_weights must be finite, nonnegative, and have positive sum.")
 
-    key = jax.random.PRNGKey(int(seed))
+    target_device = resolve_jax_device(device)
+    key = _device_put(jax.random.PRNGKey(int(seed)), target_device)
     key_iter = iter(jax.random.split(key, 4 + 2 * block_count))
     params: dict[str, Any] = {
         "W_embed": _he_init(next(key_iter), (hidden, d_state_shock), math.sqrt(2.0 / max(1, d_state_shock))),
@@ -743,11 +794,12 @@ def train_resnet(
     params["W_out"] = 0.01 * jax.random.normal(next(key_iter), (d_out, hidden), dtype=jnp.float64)
     params["b_out"] = jnp.zeros((d_out,), dtype=jnp.float64)
 
+    params = _device_put(params, target_device)
     opt_m = jax.tree_util.tree_map(jnp.zeros_like, params)
     opt_v = jax.tree_util.tree_map(jnp.zeros_like, params)
-    X_jax = jnp.asarray(X_std, dtype=jnp.float64)
-    Y_jax = jnp.asarray(Y_std, dtype=jnp.float64)
-    weights_jax = jnp.asarray(weights_np, dtype=jnp.float64)
+    X_jax = _device_put(jnp.asarray(X_std, dtype=jnp.float64), target_device)
+    Y_jax = _device_put(jnp.asarray(Y_std, dtype=jnp.float64), target_device)
+    weights_jax = _device_put(jnp.asarray(weights_np, dtype=jnp.float64), target_device)
 
     def forward(params_local: Mapping[str, Any], X_batch: jax.Array) -> jax.Array:
         x_state_shock = X_batch[:d_state_shock, :]
@@ -803,9 +855,10 @@ def train_resnet(
             indices = np.arange(n_samples)
         for start in range(0, n_samples, batch):
             batch_idx = indices[start : start + batch]
-            X_batch = jnp.take(X_jax, jnp.asarray(batch_idx), axis=1)
-            Y_batch = jnp.take(Y_jax, jnp.asarray(batch_idx), axis=1)
-            w_batch = jnp.take(weights_jax, jnp.asarray(batch_idx), axis=0)
+            batch_idx_jax = _device_put(jnp.asarray(batch_idx, dtype=jnp.int64), target_device)
+            X_batch = jnp.take(X_jax, batch_idx_jax, axis=1)
+            Y_batch = jnp.take(Y_jax, batch_idx_jax, axis=1)
+            w_batch = jnp.take(weights_jax, batch_idx_jax, axis=0)
             _, grads = value_and_grad(params, X_batch, Y_batch, w_batch)
             step_count += 1
             params, opt_m, opt_v = update_step(
@@ -813,8 +866,8 @@ def train_resnet(
                 opt_m,
                 opt_v,
                 grads,
-                jnp.asarray(lr_value, dtype=jnp.float64),
-                jnp.asarray(step_count, dtype=jnp.float64),
+                _device_put(jnp.asarray(lr_value, dtype=jnp.float64), target_device),
+                _device_put(jnp.asarray(step_count, dtype=jnp.float64), target_device),
             )
 
     trained_blocks = tuple(
@@ -832,7 +885,7 @@ def train_resnet(
         blocks=trained_blocks,
         W_out=params["W_out"],
         b_out=params["b_out"],
-        norm=norm,
+        norm=_norm_on_device(norm, target_device),
         d_in=d_in,
         d_out=d_out,
     )

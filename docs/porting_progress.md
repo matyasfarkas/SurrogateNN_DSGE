@@ -1027,6 +1027,23 @@ Python/JAX status:
 - initialization keeps the FiLM scale near identity and the residual/output projections small, so early predictions stay close to a stable normalized baseline before training
 - tests verify that the ResNet learns a controlled theta-conditioned residual map and that theta-dimension validation fails safely
 
+### 66. GPU-compatible residual-surrogate supervised training harness
+
+Julia reference:
+
+- `scripts/hlt_sep_surrogate_train.jl`
+- `scripts/hlt_surrogate/hlt_sep_surrogate_nn_utils.jl`
+
+Python/JAX status:
+
+- added `train_surrogate_from_dataset(...)`, a reusable Python/JAX version of the core Julia training script flow: dataset preprocessing, optional ROM-residual targets, output-row selection, architecture dispatch, train/validation split, and validation RMSE/improvement reporting
+- added `split_surrogate_dataset(...)` with both random sample splits and held-out-theta validation splits, matching the Julia script's `--split-by-theta` design goal
+- added `surrogate_sample_weights_from_residuals(...)` for Julia-style inverse-SEP-residual sample weighting with finite invalid-sample fallback, clipping, and mean-one normalization
+- added explicit JAX device placement to `train_mlp(...)`, `train_resnet(...)`, and the high-level training harness; users can pass a `jax.Device` or `device="gpu"` and a missing requested GPU raises instead of silently falling back to CPU
+- training data, parameters, optimizer states, batch indices, learning-rate scalars, and final frozen weights are placed on the selected JAX device, so the supervised MLP/ResNet matrix kernels run through JAX/XLA on the GPU when the active environment has a GPU backend
+- training-result metadata records the active JAX backend and selected device/platform for auditability in Colab/GPUHUB runs
+- tests cover held-out-theta splitting, inverse-residual weighting, MLP ROM-residual training with explicit device placement, ResNet dispatch with device selection, and the no-silent-fallback behavior for unavailable GPU backends
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart` Sylvester variant is not ported yet, and `:dqgmres` is currently provided as a compatibility alias to the SciPy GMRES backend rather than as a distinct implementation.
@@ -1048,7 +1065,7 @@ Python/JAX status:
 - The concrete HLT surrogate-estimation model factory is still not fully ported. The Python port now has the exact parameter metadata, bounded NumPyro priors, and frozen NN prediction layer, but the updated Julia `compute_surrogate_loglikelihood` factory is itself still a placeholder in the reference scripts and the full end-to-end HLT nonlinear surrogate estimation wrapper remains a pipeline gap.
 - The HLT parameter-design layer now covers LHS and legacy grid designs, but not Julia's exact `randomLHC` random-number stream or prior-draw design mode.
 - The surrogate dataset layer is now available for callback predictors, but not yet wired directly to parsed `MacroModel` objects, automatic ROM cache construction, or batch SEP simulation on full HLT/SW07 models.
-- ResNet training is now available, but the full HLT residual-surrogate training harness still needs parsed-model wiring, automatic ROM/FOM cache construction, train/validation splitting, checkpointing, early stopping, and batched SEP dataset generation for full-size models.
+- ResNet training and the reusable supervised training harness are now available with explicit single-device JAX/GPU placement. Remaining HLT pipeline gaps are parsed-model wiring, automatic ROM/FOM cache construction, checkpointing, early stopping, batched SEP dataset generation for full-size models, and optional multi-GPU/data-parallel sharding.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed SEP path with both full-tree and sparse fishbone branching.
 - One upstream model source, `models/testqipf.jl`, is still intentionally excluded from source-compatibility parity because it appears to contain a literal typo (`1GAMM`) rather than a parser feature gap.
