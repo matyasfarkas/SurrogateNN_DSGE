@@ -7,7 +7,10 @@ import pytest
 from surrogatenn_dsge import (
     FrozenResNet,
     SurrogateDataset,
+    load_surrogate_bundle,
+    predict_frozen_batch,
     resolve_jax_device,
+    save_surrogate_bundle,
     split_surrogate_dataset,
     surrogate_sample_weights_from_residuals,
     train_surrogate_from_dataset,
@@ -136,6 +139,72 @@ def test_train_surrogate_from_dataset_resnet_dispatch_accepts_device_selector() 
     assert result.val_size == 0
     assert result.metadata["jax_device_platform"] == "cpu"
     assert _array_platform(result.frozen.W_embed) == "cpu"
+
+
+def test_save_and_load_surrogate_training_result_bundle_round_trips_predictions(tmp_path) -> None:
+    dataset = _supervised_dataset()
+    result = train_surrogate_from_dataset(
+        dataset,
+        architecture="mlp",
+        rom_residual=True,
+        validation_fraction=0.25,
+        seed=9,
+        d_hidden=16,
+        d_hidden2=None,
+        nepoch=120,
+        eta_init=4e-3,
+        batch_size=16,
+        device="cpu",
+    )
+    path = save_surrogate_bundle(tmp_path / "surrogate_bundle.snn", result, metadata={"experiment": "unit-test"})
+
+    loaded = load_surrogate_bundle(path, device="cpu")
+    X_probe = dataset.X[:, :5]
+    np.testing.assert_allclose(
+        predict_frozen_batch(loaded.frozen, X_probe),
+        predict_frozen_batch(result.frozen, X_probe),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert loaded.metadata["experiment"] == "unit-test"
+    assert loaded.metadata["rom_residual"] is True
+    np.testing.assert_array_equal(loaded.train_idx, result.split.train_idx)
+    np.testing.assert_array_equal(loaded.val_idx, result.split.val_idx)
+    np.testing.assert_allclose(loaded.validation_rmse, result.validation_rmse, rtol=0, atol=0)
+    assert _array_platform(loaded.frozen.W1) == "cpu"
+
+
+def test_save_and_load_raw_resnet_bundle_round_trips_predictions(tmp_path) -> None:
+    dataset = _supervised_dataset()
+    result = train_surrogate_from_dataset(
+        dataset,
+        architecture="resnet",
+        rom_residual=True,
+        validation_fraction=0.0,
+        seed=5,
+        d_hidden=8,
+        n_blocks=1,
+        nepoch=4,
+        batch_size=16,
+        device="cpu",
+    )
+    path = save_surrogate_bundle(
+        tmp_path / "raw_resnet_bundle.snn",
+        result.frozen,
+        metadata={"architecture": "resnet", "raw": True},
+    )
+
+    loaded = load_surrogate_bundle(path, device="cpu")
+    assert isinstance(loaded.frozen, FrozenResNet)
+    X_probe = dataset.X[:, :4]
+    np.testing.assert_allclose(
+        predict_frozen_batch(loaded.frozen, X_probe),
+        predict_frozen_batch(result.frozen, X_probe),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert loaded.metadata["raw"] is True
+    assert loaded.validation_rmse is None
 
 
 def test_resolve_jax_device_requires_requested_gpu_backend() -> None:

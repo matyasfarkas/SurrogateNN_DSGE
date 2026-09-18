@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import numpy as np
 import jax
+import jax.numpy as jnp
 
 from .surrogate import (
     FrozenMLP,
     FrozenResNet,
+    NormStats,
+    ResBlock,
     SurrogateValidationResult,
     predict_frozen_batch,
     resolve_jax_device,
@@ -17,6 +22,9 @@ from .surrogate import (
     validate_surrogate,
 )
 from .surrogate_dataset import SurrogateDataset
+
+
+SURROGATE_BUNDLE_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -88,6 +96,39 @@ class SurrogateTrainingResult:
     @property
     def val_size(self) -> int:
         return self.split.val_size
+
+
+@dataclass(frozen=True)
+class SurrogateBundle:
+    path: Optional[str]
+    frozen: FrozenMLP | FrozenResNet
+    metadata: dict[str, object]
+    validation_rmse: Optional[np.ndarray] = None
+    validation_rmse_residual: Optional[np.ndarray] = None
+    validation_rmse_rom: Optional[np.ndarray] = None
+    validation_improvement: Optional[np.ndarray] = None
+    train_idx: Optional[np.ndarray] = None
+    val_idx: Optional[np.ndarray] = None
+    train_theta_ids: Optional[np.ndarray] = None
+    val_theta_ids: Optional[np.ndarray] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", dict(self.metadata))
+        for field in (
+            "validation_rmse",
+            "validation_rmse_residual",
+            "validation_rmse_rom",
+            "validation_improvement",
+            "train_idx",
+            "val_idx",
+            "train_theta_ids",
+            "val_theta_ids",
+        ):
+            values = getattr(self, field)
+            if values is None:
+                continue
+            dtype = np.int64 if field in {"train_idx", "val_idx", "train_theta_ids", "val_theta_ids"} else np.float64
+            object.__setattr__(self, field, np.asarray(values, dtype=dtype).reshape(-1))
 
 
 def split_surrogate_dataset(
@@ -200,6 +241,252 @@ def surrogate_sample_weights_from_residuals(
     raw = np.clip(raw, float(clip_min), float(clip_max))
     raw /= float(np.mean(raw))
     return raw
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _array_or_none(value: Optional[Any], *, dtype: Any) -> Optional[np.ndarray]:
+    if value is None:
+        return None
+    return np.asarray(value, dtype=dtype).reshape(-1)
+
+
+def _put_loaded_array(npz: Any, key: str, device: Optional[jax.Device]) -> jax.Array:
+    value = jnp.asarray(np.asarray(npz[key]), dtype=jnp.float64)
+    return value if device is None else jax.device_put(value, device)
+
+
+def _norm_from_npz(npz: Any, device: Optional[jax.Device]) -> NormStats:
+    return NormStats(
+        mu_x=_put_loaded_array(npz, "norm_mu_x", device),
+        sigma_x=_put_loaded_array(npz, "norm_sigma_x", device),
+        mu_y=_put_loaded_array(npz, "norm_mu_y", device),
+        sigma_y=_put_loaded_array(npz, "norm_sigma_y", device),
+    )
+
+
+def _frozen_arrays_and_meta(frozen: FrozenMLP | FrozenResNet) -> tuple[dict[str, np.ndarray], dict[str, object]]:
+    arrays: dict[str, np.ndarray] = {
+        "norm_mu_x": np.asarray(frozen.norm.mu_x, dtype=np.float64),
+        "norm_sigma_x": np.asarray(frozen.norm.sigma_x, dtype=np.float64),
+        "norm_mu_y": np.asarray(frozen.norm.mu_y, dtype=np.float64),
+        "norm_sigma_y": np.asarray(frozen.norm.sigma_y, dtype=np.float64),
+    }
+    if isinstance(frozen, FrozenMLP):
+        arrays.update(
+            {
+                "mlp_W1": np.asarray(frozen.W1, dtype=np.float64),
+                "mlp_b1": np.asarray(frozen.b1, dtype=np.float64),
+                "mlp_W2": np.asarray(frozen.W2, dtype=np.float64),
+                "mlp_b2": np.asarray(frozen.b2, dtype=np.float64),
+            }
+        )
+        has_second_hidden = frozen.W3 is not None
+        if has_second_hidden:
+            assert frozen.W3 is not None and frozen.b3 is not None
+            arrays["mlp_W3"] = np.asarray(frozen.W3, dtype=np.float64)
+            arrays["mlp_b3"] = np.asarray(frozen.b3, dtype=np.float64)
+        return arrays, {
+            "frozen_type": "mlp",
+            "d_in": frozen.d_in,
+            "d_out": frozen.d_out,
+            "activation": frozen.activation,
+            "has_second_hidden": has_second_hidden,
+        }
+
+    arrays.update(
+        {
+            "resnet_W_embed": np.asarray(frozen.W_embed, dtype=np.float64),
+            "resnet_b_embed": np.asarray(frozen.b_embed, dtype=np.float64),
+            "resnet_W_gamma": np.asarray(frozen.W_gamma, dtype=np.float64),
+            "resnet_b_gamma": np.asarray(frozen.b_gamma, dtype=np.float64),
+            "resnet_W_beta": np.asarray(frozen.W_beta, dtype=np.float64),
+            "resnet_b_beta": np.asarray(frozen.b_beta, dtype=np.float64),
+            "resnet_W_out": np.asarray(frozen.W_out, dtype=np.float64),
+            "resnet_b_out": np.asarray(frozen.b_out, dtype=np.float64),
+        }
+    )
+    for idx, block in enumerate(frozen.blocks):
+        arrays[f"resnet_block_{idx}_W1"] = np.asarray(block.W1, dtype=np.float64)
+        arrays[f"resnet_block_{idx}_b1"] = np.asarray(block.b1, dtype=np.float64)
+        arrays[f"resnet_block_{idx}_W2"] = np.asarray(block.W2, dtype=np.float64)
+        arrays[f"resnet_block_{idx}_b2"] = np.asarray(block.b2, dtype=np.float64)
+    return arrays, {
+        "frozen_type": "resnet",
+        "d_in": frozen.d_in,
+        "d_out": frozen.d_out,
+        "d_theta": frozen.d_theta,
+        "n_blocks": len(frozen.blocks),
+    }
+
+
+def _frozen_from_npz(npz: Any, metadata: dict[str, object], device: Optional[jax.Device]) -> FrozenMLP | FrozenResNet:
+    frozen_meta = metadata.get("frozen", {})
+    if not isinstance(frozen_meta, dict):
+        raise ValueError("Surrogate bundle metadata field 'frozen' must be a mapping.")
+    frozen_type = str(frozen_meta.get("frozen_type", "")).lower()
+    norm = _norm_from_npz(npz, device)
+    if frozen_type == "mlp":
+        has_second_hidden = bool(frozen_meta.get("has_second_hidden", False))
+        return FrozenMLP(
+            W1=_put_loaded_array(npz, "mlp_W1", device),
+            b1=_put_loaded_array(npz, "mlp_b1", device),
+            W2=_put_loaded_array(npz, "mlp_W2", device),
+            b2=_put_loaded_array(npz, "mlp_b2", device),
+            W3=_put_loaded_array(npz, "mlp_W3", device) if has_second_hidden else None,
+            b3=_put_loaded_array(npz, "mlp_b3", device) if has_second_hidden else None,
+            norm=norm,
+            d_in=int(frozen_meta["d_in"]),
+            d_out=int(frozen_meta["d_out"]),
+            activation=str(frozen_meta.get("activation", "tanh")),
+        )
+    if frozen_type == "resnet":
+        n_blocks = int(frozen_meta["n_blocks"])
+        blocks = tuple(
+            ResBlock(
+                W1=_put_loaded_array(npz, f"resnet_block_{idx}_W1", device),
+                b1=_put_loaded_array(npz, f"resnet_block_{idx}_b1", device),
+                W2=_put_loaded_array(npz, f"resnet_block_{idx}_W2", device),
+                b2=_put_loaded_array(npz, f"resnet_block_{idx}_b2", device),
+            )
+            for idx in range(n_blocks)
+        )
+        return FrozenResNet(
+            W_embed=_put_loaded_array(npz, "resnet_W_embed", device),
+            b_embed=_put_loaded_array(npz, "resnet_b_embed", device),
+            d_theta=int(frozen_meta["d_theta"]),
+            W_gamma=_put_loaded_array(npz, "resnet_W_gamma", device),
+            b_gamma=_put_loaded_array(npz, "resnet_b_gamma", device),
+            W_beta=_put_loaded_array(npz, "resnet_W_beta", device),
+            b_beta=_put_loaded_array(npz, "resnet_b_beta", device),
+            blocks=blocks,
+            W_out=_put_loaded_array(npz, "resnet_W_out", device),
+            b_out=_put_loaded_array(npz, "resnet_b_out", device),
+            norm=norm,
+            d_in=int(frozen_meta["d_in"]),
+            d_out=int(frozen_meta["d_out"]),
+        )
+    raise ValueError(f"Unsupported frozen surrogate type in bundle: {frozen_type!r}.")
+
+
+def save_surrogate_bundle(
+    path: str | Path,
+    result_or_frozen: SurrogateTrainingResult | FrozenMLP | FrozenResNet,
+    *,
+    metadata: Optional[dict[str, object]] = None,
+    validation_rmse: Optional[Any] = None,
+    validation_rmse_residual: Optional[Any] = None,
+    validation_rmse_rom: Optional[Any] = None,
+    validation_improvement: Optional[Any] = None,
+    train_idx: Optional[Any] = None,
+    val_idx: Optional[Any] = None,
+    train_theta_ids: Optional[Any] = None,
+    val_theta_ids: Optional[Any] = None,
+) -> Path:
+    """Save a frozen surrogate bundle in a portable Python-native NPZ format."""
+
+    if isinstance(result_or_frozen, SurrogateTrainingResult):
+        result = result_or_frozen
+        frozen = result.frozen
+        bundle_metadata = dict(result.metadata)
+        if metadata is not None:
+            bundle_metadata.update(metadata)
+        validation_rmse = result.validation_rmse if validation_rmse is None else validation_rmse
+        validation_rmse_residual = (
+            result.validation_rmse_residual if validation_rmse_residual is None else validation_rmse_residual
+        )
+        validation_rmse_rom = result.validation_rmse_rom if validation_rmse_rom is None else validation_rmse_rom
+        validation_improvement = result.validation_improvement if validation_improvement is None else validation_improvement
+        train_idx = result.split.train_idx if train_idx is None else train_idx
+        val_idx = result.split.val_idx if val_idx is None else val_idx
+        train_theta_ids = result.split.train_theta_ids if train_theta_ids is None else train_theta_ids
+        val_theta_ids = result.split.val_theta_ids if val_theta_ids is None else val_theta_ids
+    else:
+        frozen = result_or_frozen
+        if not isinstance(frozen, (FrozenMLP, FrozenResNet)):
+            raise TypeError("result_or_frozen must be a SurrogateTrainingResult, FrozenMLP, or FrozenResNet.")
+        bundle_metadata = {} if metadata is None else dict(metadata)
+
+    arrays, frozen_meta = _frozen_arrays_and_meta(frozen)
+    optional_arrays = {
+        "validation_rmse": _array_or_none(validation_rmse, dtype=np.float64),
+        "validation_rmse_residual": _array_or_none(validation_rmse_residual, dtype=np.float64),
+        "validation_rmse_rom": _array_or_none(validation_rmse_rom, dtype=np.float64),
+        "validation_improvement": _array_or_none(validation_improvement, dtype=np.float64),
+        "train_idx": _array_or_none(train_idx, dtype=np.int64),
+        "val_idx": _array_or_none(val_idx, dtype=np.int64),
+        "train_theta_ids": _array_or_none(train_theta_ids, dtype=np.int64),
+        "val_theta_ids": _array_or_none(val_theta_ids, dtype=np.int64),
+    }
+    present_optional = [name for name, values in optional_arrays.items() if values is not None]
+    arrays.update({name: values for name, values in optional_arrays.items() if values is not None})
+    metadata_payload = {
+        "bundle_version": SURROGATE_BUNDLE_VERSION,
+        "format": "surrogatenn_dsge_surrogate_bundle_npz",
+        "frozen": frozen_meta,
+        "metadata": _json_safe(bundle_metadata),
+        "optional_arrays": present_optional,
+    }
+    arrays["metadata_json"] = np.asarray(json.dumps(metadata_payload, sort_keys=True))
+
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_name(out_path.name + ".tmp")
+    with tmp_path.open("wb") as handle:
+        np.savez_compressed(handle, **arrays)
+    tmp_path.replace(out_path)
+    return out_path
+
+
+def load_surrogate_bundle(path: str | Path, *, device: Optional[Any] = None) -> SurrogateBundle:
+    """Load a Python-native surrogate bundle saved by `save_surrogate_bundle`."""
+
+    bundle_path = Path(path)
+    if not bundle_path.is_file():
+        raise FileNotFoundError(f"Surrogate bundle not found: {bundle_path}")
+    target_device = resolve_jax_device(device)
+    with np.load(bundle_path, allow_pickle=False) as npz:
+        if "metadata_json" not in npz:
+            raise ValueError("Surrogate bundle is missing metadata_json.")
+        metadata_payload = json.loads(str(np.asarray(npz["metadata_json"]).item()))
+        if int(metadata_payload.get("bundle_version", 0)) > SURROGATE_BUNDLE_VERSION:
+            raise ValueError(
+                "Surrogate bundle was saved by a newer format version "
+                f"{metadata_payload.get('bundle_version')}."
+            )
+        optional_names = set(metadata_payload.get("optional_arrays", []))
+        frozen = _frozen_from_npz(npz, metadata_payload, target_device)
+
+        def optional_array(name: str, dtype: Any) -> Optional[np.ndarray]:
+            if name not in optional_names:
+                return None
+            return np.asarray(npz[name], dtype=dtype).reshape(-1)
+
+        return SurrogateBundle(
+            path=str(bundle_path),
+            frozen=frozen,
+            metadata=dict(metadata_payload.get("metadata", {})),
+            validation_rmse=optional_array("validation_rmse", np.float64),
+            validation_rmse_residual=optional_array("validation_rmse_residual", np.float64),
+            validation_rmse_rom=optional_array("validation_rmse_rom", np.float64),
+            validation_improvement=optional_array("validation_improvement", np.float64),
+            train_idx=optional_array("train_idx", np.int64),
+            val_idx=optional_array("val_idx", np.int64),
+            train_theta_ids=optional_array("train_theta_ids", np.int64),
+            val_theta_ids=optional_array("val_theta_ids", np.int64),
+        )
 
 
 def _output_index_array(output_indices: Optional[Sequence[int] | np.ndarray], d_out: int) -> Optional[np.ndarray]:

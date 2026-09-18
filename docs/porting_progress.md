@@ -1044,6 +1044,21 @@ Python/JAX status:
 - training-result metadata records the active JAX backend and selected device/platform for auditability in Colab/GPUHUB runs
 - tests cover held-out-theta splitting, inverse-residual weighting, MLP ROM-residual training with explicit device placement, ResNet dispatch with device selection, and the no-silent-fallback behavior for unavailable GPU backends
 
+### 67. Portable Python surrogate bundle checkpoints
+
+Julia reference:
+
+- `src/regime_switching/io.jl`
+- `scripts/hlt_sep_surrogate_train.jl`
+
+Python/JAX status:
+
+- added `save_surrogate_bundle(...)` / `load_surrogate_bundle(...)`, a Python-native equivalent of the Julia surrogate-training output payload with frozen NN weights, metadata, validation RMSE fields, split indices, and held-out theta IDs
+- the bundle format is an atomic compressed NPZ with JSON metadata and plain numeric arrays rather than Python pickle, so checkpoints can move cleanly between the Mac, Colab, and GPUHUB
+- loaders can place the reconstructed frozen MLP/ResNet directly on a selected JAX device through `device="cpu"` / `device="gpu"` or an explicit `jax.Device`
+- tests verify full `SurrogateTrainingResult` and raw `FrozenResNet` round trips, prediction equality after reload, metadata preservation, split-index preservation, validation-metric preservation, and CPU device placement after load
+- this is intentionally not a reader for Julia's internal `Serialization.serialize` `.jls` files; cross-language exchange should use an explicit numeric export format rather than relying on Julia's private serialization format
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart` Sylvester variant is not ported yet, and `:dqgmres` is currently provided as a compatibility alias to the SciPy GMRES backend rather than as a distinct implementation.
@@ -1065,7 +1080,7 @@ Python/JAX status:
 - The concrete HLT surrogate-estimation model factory is still not fully ported. The Python port now has the exact parameter metadata, bounded NumPyro priors, and frozen NN prediction layer, but the updated Julia `compute_surrogate_loglikelihood` factory is itself still a placeholder in the reference scripts and the full end-to-end HLT nonlinear surrogate estimation wrapper remains a pipeline gap.
 - The HLT parameter-design layer now covers LHS and legacy grid designs, but not Julia's exact `randomLHC` random-number stream or prior-draw design mode.
 - The surrogate dataset layer is now available for callback predictors, but not yet wired directly to parsed `MacroModel` objects, automatic ROM cache construction, or batch SEP simulation on full HLT/SW07 models.
-- ResNet training and the reusable supervised training harness are now available with explicit single-device JAX/GPU placement. Remaining HLT pipeline gaps are parsed-model wiring, automatic ROM/FOM cache construction, checkpointing, early stopping, batched SEP dataset generation for full-size models, and optional multi-GPU/data-parallel sharding.
+- ResNet training, the reusable supervised training harness, and Python-native checkpoint bundles are now available with explicit single-device JAX/GPU placement. Remaining HLT pipeline gaps are parsed-model wiring, automatic ROM/FOM cache construction, early stopping, batched SEP dataset generation for full-size models, Julia-to-Python explicit numeric exchange for old `.jls` artifacts, and optional multi-GPU/data-parallel sharding.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed SEP path with both full-tree and sparse fishbone branching.
 - One upstream model source, `models/testqipf.jl`, is still intentionally excluded from source-compatibility parity because it appears to contain a literal typo (`1GAMM`) rather than a parser feature gap.
