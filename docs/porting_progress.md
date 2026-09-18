@@ -997,6 +997,23 @@ Python/JAX status:
 - tests cover LHS stratification, parameter bounds, coverage/correlation diagnostics, grid ordering, high-dimensional grid refusal, dispatch validation, and optional Julia parity through `SURROGATENN_RUN_JULIA_PARITY=1`
 - no claim is made that Python reproduces the exact random stream of Julia's `LatinHypercubeSampling.randomLHC`; the tested parity target is the deterministic transformation and grid behavior the dataset pipeline depends on
 
+### 64. Generic ROM/FOM residual surrogate dataset builder
+
+Julia reference:
+
+- `scripts/hlt_surrogate/hlt_sep_surrogate_dataset_parallel.jl`
+- `scripts/hlt_surrogate/hlt_sep_surrogate_rom_utils.jl`
+
+Python/JAX status:
+
+- added `SurrogateDataset`, a finite `(features, samples)` / `(targets, samples)` dataset container with theta IDs, selected period IDs, per-theta success flags, stable-prefix lengths, theta metadata, and optional ROM baseline targets
+- added `build_surrogate_residual_dataset(...)`, a generic callback-based dataset builder that rolls the FOM state forward, evaluates a ROM predictor from the same current FOM state, and emits `X = [state_t; shock_t; theta]`
+- the target builder supports the key HLT-style modes: `residual_obs`, `residual_full`, `fom_obs`, and `fom_full`; residual modes store a zero ROM baseline while raw FOM modes store the corresponding ROM target in `Y_rom`
+- the sampler follows the Julia dataset script convention: when `samples_per_theta` is smaller than the stable prefix length, selected periods are drawn with replacement by default; otherwise all stable periods are retained
+- incomplete FOM/SEP paths now keep their stable prefix when it satisfies `min_stable_periods`, while `theta_success` remains false for the incomplete draw; this mirrors the stable-prefix data-generation logic used to salvage useful nonlinear samples after mid-path failures
+- added `summarize_surrogate_dataset(...)` for quick dataset diagnostics, including dimensions, theta success rate, stable-period range, samples per theta, and ROM-baseline RMSE
+- tests verify exact residual timing, confirm that the next input state follows the FOM rather than ROM path, check raw FOM target/ROM baseline storage, enforce Julia-like sampling-with-replacement period IDs, preserve stable prefixes after synthetic FOM failure, and reject all-failed datasets
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart` Sylvester variant is not ported yet, and `:dqgmres` is currently provided as a compatibility alias to the SciPy GMRES backend rather than as a distinct implementation.
@@ -1017,6 +1034,8 @@ Python/JAX status:
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
 - The concrete HLT surrogate-estimation model factory is still not fully ported. The Python port now has the exact parameter metadata, bounded NumPyro priors, and frozen NN prediction layer, but the updated Julia `compute_surrogate_loglikelihood` factory is itself still a placeholder in the reference scripts and the full end-to-end HLT nonlinear surrogate estimation wrapper remains a pipeline gap.
 - The HLT parameter-design layer now covers LHS and legacy grid designs, but not Julia's exact `randomLHC` random-number stream or prior-draw design mode.
+- The surrogate dataset layer is now available for callback predictors, but not yet wired directly to parsed `MacroModel` objects, automatic ROM cache construction, or batch SEP simulation on full HLT/SW07 models.
+- Frozen ResNet inference is ported, but JAX-native ResNet training is still missing; current training support is MLP-only.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed SEP path with both full-tree and sparse fishbone branching.
 - One upstream model source, `models/testqipf.jl`, is still intentionally excluded from source-compatibility parity because it appears to contain a literal typo (`1GAMM`) rather than a parser feature gap.

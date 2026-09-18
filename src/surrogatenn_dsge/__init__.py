@@ -229,6 +229,11 @@ from .surrogate import (
     validate_surrogate,
     weighted_mse,
 )
+from .surrogate_dataset import (
+    SurrogateDataset,
+    build_surrogate_residual_dataset,
+    summarize_surrogate_dataset,
+)
 from .static_hmc import (
     StaticHMCResult,
     StaticHMCState,
@@ -319,6 +324,7 @@ __all__ = [
     "StateSpaceSimulation",
     "StaticHMCResult",
     "StaticHMCState",
+    "SurrogateDataset",
     "SurrogateValidationResult",
     "SwitchingLikelihoodConfig",
     "SwitchingLikelihoodResult",
@@ -344,6 +350,7 @@ __all__ = [
     "build_numpyro_kalman_model_jax",
     "build_numpyro_switching_filter_model_jax",
     "build_numpyro_switching_model_jax",
+    "build_surrogate_residual_dataset",
     "baseline_parameter_vector",
     "bounded_log_abs_det_jacobian",
     "bounded_to_unconstrained",
@@ -462,6 +469,7 @@ __all__ = [
     "silu",
     "standardize_xy",
     "static_hmc_sample",
+    "summarize_surrogate_dataset",
     "summarize_parameter_design",
     "surrogate_additive_residual_loglik_per_period",
     "surrogate_inversion_loglik_per_period",
