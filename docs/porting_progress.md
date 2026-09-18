@@ -962,6 +962,23 @@ Python/JAX status:
 - added `benchmarks/validate_surrogate_julia_parity.py`, which constructs the same deterministic frozen MLP and ResNet in Julia and Python and confirms matching predictions to tight numerical tolerance
 - tests cover formula parity, batched-vs-single prediction consistency, OOD guards, validation diagnostics, JAX training on a controlled map, additive likelihood integration, inversion likelihood integration, and optional Julia parity through `SURROGATENN_RUN_JULIA_PARITY=1`
 
+### 62. HLT surrogate-estimation parameter configuration
+
+Julia reference:
+
+- `scripts/hlt_surrogate/parameter_config.jl`
+- `scripts/hlt_surrogate/hlt_turing_model_factory.jl`
+
+Python/JAX status:
+
+- added a Julia-compatible `ParameterSpec` layer and the six HLT surrogate parameter sets used by the updated Julia source: `legacy_3params`, `phase1_18params`, `phase1_18params_narrow`, `investment_4p`, `investment_4p_supported`, and `investment_curvature_5p`
+- ported the corrected HLT baseline calibration values, including the updated shock persistence and volatility entries used by the Julia SEP/surrogate scripts
+- added bound utilities (`get_parameter_names`, `get_parameter_bounds`, `parameter_bounds_array`, `baseline_parameter_vector`, `theta_within_bounds`, and `theta_within_bounds_jax`) so the parameter layer can be used from NumPy, JAX, and JIT-compiled checks
+- added NumPyro-prior construction through `make_numpyro_priors` / `get_parameter_priors`, following the Julia Turing factory's bounded/truncated sampling behavior rather than the unbounded base-distribution helper; because the installed NumPyro truncated distributions expose finite log probabilities outside support, the Python wrapper adds an explicit `-inf` support mask for bounded normal and inverse-gamma priors
+- added `format_parameter_summary` / `print_parameter_summary` convenience utilities matching the Julia metadata surface
+- added `benchmarks/validate_parameter_config_julia_parity.py`, which includes the Julia source file and checks every parameter name, prior type, prior parameter, bound, description, and baseline value against the Python port
+- tests cover parameter-set names/counts, baseline-vector ordering, the intentionally trimmed mapped SEP support of `investment_4p_supported`, NumPyro log-probability support masking, JIT-safe JAX bounds checks, spec validation, and optional Julia parity through `SURROGATENN_RUN_JULIA_PARITY=1`
+
 ## Explicit gaps
 
 - The Julia `:bartels_stewart` Sylvester variant is not ported yet, and `:dqgmres` is currently provided as a compatibility alias to the SciPy GMRES backend rather than as a distinct implementation.
@@ -980,6 +997,7 @@ Python/JAX status:
 - The switching layer is now much easier to evaluate honestly because the high-level report exposes oracle regret, budget-matched oracle regret, captured nonlinear gain share, wasted nonlinear cost, and probability-quality diagnostics. The remaining methodological gap is not observability anymore; it is demonstrating on harder models that the gate keeps those regret measures small while still delivering useful runtime savings.
 - The parsed SEP path now covers the full-tree Gauss-Hermite solver, the sparse fishbone tree, the HMC backend across both low-level callback APIs plus parsed-model solves, branch-frozen subgradient Jacobians for parsed OBC models on the Gauss-Hermite path, Julia-style nonlinear-solver controls for `linear_solver`, `fallback_solver`, stall detection, bounded backtracking line search, the updated low-level `accept_tol` semantics, parsed-model homotopy sigma continuation, and the Julia-style chained homotopy trajectory helper. The remaining SEP gap is now narrower: sparse-tree-specific Jacobian/runtime optimizations and broader OBC-specific subdifferential SEP machinery are still unported.
 - Regime-switching likelihood mixing, gate-stat computation, gate calibration, probability mapping, automatic hard-regime assignment, and the first-order observed-shock / observed-variable helper surface are now ported, but the broader switching-estimation harness is not ported yet.
+- The concrete HLT surrogate-estimation model factory is still not fully ported. The Python port now has the exact parameter metadata, bounded NumPyro priors, and frozen NN prediction layer, but the updated Julia `compute_surrogate_loglikelihood` factory is itself still a placeholder in the reference scripts and the full end-to-end HLT nonlinear surrogate estimation wrapper remains a pipeline gap.
 - Perturbation orders above third and the broader Julia higher-order moment/statistics machinery remain unported.
 - No claim is made yet about full MacroModelling feature parity beyond the tested kernels, Kalman/state-space layer, parsed-model perturbation path through third order, parsed inversion filters, switching-likelihood mixer, and the parsed SEP path with both full-tree and sparse fishbone branching.
 - One upstream model source, `models/testqipf.jl`, is still intentionally excluded from source-compatibility parity because it appears to contain a literal typo (`1GAMM`) rather than a parser feature gap.
