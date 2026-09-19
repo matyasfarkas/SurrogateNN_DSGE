@@ -40,6 +40,14 @@ class _SEPTreeMetadata(NamedTuple):
     child_shocks: tuple[Optional[tuple[jax.Array, ...]], ...]
 
 
+class _SEPTreeArrayMetadata(NamedTuple):
+    parent_indices: tuple[jax.Array, ...]
+    current_shocks: tuple[jax.Array, ...]
+    child_indices: tuple[Optional[jax.Array], ...]
+    child_weights: tuple[Optional[jax.Array], ...]
+    child_shocks: tuple[Optional[jax.Array], ...]
+
+
 @dataclass(frozen=True)
 class SEPConfig:
     periods: int = 20
@@ -73,6 +81,8 @@ class SEPConfig:
     lm_lambda_scale: float = 10.0
     lm_lambda_min: float = 1e-12
     lm_lambda_max: float = 1e4
+    jit: bool = True
+    vectorize_residual: bool = True
 
 
 def _validate_sep_config(config: SEPConfig, *, shock_dim: int) -> None:
@@ -522,6 +532,75 @@ def _precompute_sep_tree_metadata(
     )
 
 
+def _precompute_sep_tree_array_metadata(
+    *,
+    rule: GaussHermiteRule,
+    metadata: _SEPTreeMetadata,
+    counts: tuple[int, ...],
+    periods: int,
+    shock_dim: int,
+) -> _SEPTreeArrayMetadata:
+    parent_indices: list[jax.Array] = []
+    child_indices_by_time: list[Optional[jax.Array]] = []
+    child_weights_by_time: list[Optional[jax.Array]] = []
+    child_shocks_by_time: list[Optional[jax.Array]] = []
+    rule_weights = np.asarray(rule.weights, dtype=np.float64)
+
+    for t in range(1, periods + 1):
+        period_parent = metadata.parent_indices[t - 1]
+        if period_parent is None:
+            parent_indices.append(jnp.zeros((counts[t],), dtype=jnp.int64))
+        else:
+            parent_indices.append(jnp.asarray(period_parent, dtype=jnp.int64))
+
+        period_child_groups = metadata.child_groups[t - 1]
+        period_child_shocks = metadata.child_shocks[t - 1]
+        if period_child_groups is None or period_child_shocks is None:
+            child_indices_by_time.append(None)
+            child_weights_by_time.append(None)
+            child_shocks_by_time.append(None)
+            continue
+
+        max_children = max(len(groups) for groups in period_child_groups)
+        child_indices = np.zeros((counts[t], max_children), dtype=np.int64)
+        child_weights = np.zeros((counts[t], max_children), dtype=np.float64)
+        child_shocks = np.zeros((counts[t], max_children, shock_dim), dtype=np.float64)
+        for group_index, groups in enumerate(period_child_groups):
+            shocks = period_child_shocks[group_index]
+            if not groups:
+                raise ValueError("SEP tree metadata contains a group without children.")
+            for child_position, child in enumerate(groups):
+                child_indices[group_index, child_position] = child
+                child_weights[group_index, child_position] = (
+                    1.0
+                    if len(groups) == 1
+                    else float(rule_weights[child_position])
+                )
+                child_shocks[group_index, child_position, :] = np.asarray(
+                    shocks[child_position],
+                    dtype=np.float64,
+                )
+            if len(groups) < max_children:
+                # Keep padded entries valid even though their weights are zero.
+                child_indices[group_index, len(groups):] = groups[0]
+                child_shocks[group_index, len(groups):, :] = np.asarray(
+                    shocks[0],
+                    dtype=np.float64,
+                )
+
+        child_indices_by_time.append(jnp.asarray(child_indices, dtype=jnp.int64))
+        child_weights_by_time.append(jnp.asarray(child_weights, dtype=jnp.float64))
+        child_shocks_by_time.append(jnp.asarray(child_shocks, dtype=jnp.float64))
+
+    return _SEPTreeArrayMetadata(
+        parent_indices=tuple(parent_indices),
+        current_shocks=metadata.current_shocks,
+        child_indices=tuple(child_indices_by_time),
+        child_weights=tuple(child_weights_by_time),
+        child_shocks=tuple(child_shocks_by_time),
+    )
+
+
 def _hmc_step(
     epsilon: jax.Array,
     *,
@@ -829,6 +908,13 @@ def _solve_stochastic_extended_path_impl(
         sparse_tree=runtime_sparse_tree,
         use_hmc=use_hmc,
     )
+    tree_array_metadata = _precompute_sep_tree_array_metadata(
+        rule=rule,
+        metadata=tree_metadata,
+        counts=counts,
+        periods=config.periods,
+        shock_dim=shock_dim,
+    )
 
     if expectation_fn is None and conditional_residual_fn is None:
         def expectation_fn(next_state: jax.Array, next_shock: jax.Array, _params: object) -> jax.Array:
@@ -864,7 +950,7 @@ def _solve_stochastic_extended_path_impl(
                 f"({expected_stacked_size},), got {guess.shape}."
             )
 
-    def residual_vector(stacked: jax.Array) -> jax.Array:
+    def residual_vector_loop(stacked: jax.Array) -> jax.Array:
         states_by_time = unflatten(stacked)
         residuals = []
         zero_shock = jnp.zeros((shock_dim,), dtype=jnp.float64)
@@ -1032,7 +1118,178 @@ def _solve_stochastic_extended_path_impl(
                 residuals.append(jnp.sum(jnp.stack(child_terms, axis=0), axis=0))
         return jnp.concatenate(residuals, axis=0)
 
-    residual_norm = float(np.asarray(jnp.linalg.norm(residual_vector(guess), ord=jnp.inf)))
+    def residual_vector_vectorized(stacked: jax.Array) -> jax.Array:
+        states_by_time = unflatten(stacked)
+        residuals = []
+        zero_shock = jnp.zeros((shock_dim,), dtype=jnp.float64)
+        terminal_expectation = None
+        if conditional_residual_fn is None:
+            assert expectation_fn is not None
+            terminal_expectation = expectation_fn(terminal_state_arr, zero_shock, params)
+
+        def weighted_child_sum(terms: jax.Array, weights: jax.Array) -> jax.Array:
+            weight_shape = (weights.shape[0],) + (1,) * (terms.ndim - 1)
+            return jnp.sum(jnp.reshape(weights, weight_shape) * terms, axis=0)
+
+        for t in range(1, config.periods + 1):
+            current_states = states_by_time[t - 1]
+            if t == 1:
+                prev_states = jnp.broadcast_to(
+                    initial_state_arr,
+                    (counts[t], state_dim),
+                )
+            else:
+                parent_indices = tree_array_metadata.parent_indices[t - 1]
+                prev_states = states_by_time[t - 2][parent_indices]
+            current_shocks = tree_array_metadata.current_shocks[t - 1]
+
+            if conditional_residual_fn is None:
+                assert residual_fn is not None
+                assert expectation_fn is not None
+                if t == config.periods:
+                    assert terminal_expectation is not None
+                    expected_terms = jnp.broadcast_to(
+                        terminal_expectation,
+                        (counts[t],) + terminal_expectation.shape,
+                    )
+                else:
+                    child_indices = tree_array_metadata.child_indices[t - 1]
+                    child_weights = tree_array_metadata.child_weights[t - 1]
+                    child_shocks = tree_array_metadata.child_shocks[t - 1]
+                    assert child_indices is not None
+                    assert child_weights is not None
+                    assert child_shocks is not None
+                    next_states = states_by_time[t]
+                    child_states = next_states[child_indices]
+
+                    def group_expectation(
+                        group_child_states: jax.Array,
+                        group_child_shocks: jax.Array,
+                        group_weights: jax.Array,
+                    ) -> jax.Array:
+                        terms = jax.vmap(
+                            lambda next_state, next_shock: expectation_fn(
+                                next_state,
+                                next_shock,
+                                params,
+                            )
+                        )(group_child_states, group_child_shocks)
+                        return weighted_child_sum(terms, group_weights)
+
+                    expected_terms = jax.vmap(group_expectation)(
+                        child_states,
+                        child_shocks,
+                        child_weights,
+                    )
+
+                residuals.append(
+                    jax.vmap(
+                        lambda prev, current, expected, shock: residual_fn(
+                            prev,
+                            current,
+                            expected,
+                            shock,
+                            params,
+                        )
+                    )(prev_states, current_states, expected_terms, current_shocks)
+                )
+                continue
+
+            assert conditional_residual_fn is not None
+            if t == config.periods:
+                terminal_states = jnp.broadcast_to(
+                    terminal_state_arr,
+                    (counts[t], state_dim),
+                )
+                residuals.append(
+                    jax.vmap(
+                        lambda prev, current, next_state, shock: conditional_residual_fn(
+                            prev,
+                            current,
+                            next_state,
+                            shock,
+                            params,
+                        )
+                    )(prev_states, current_states, terminal_states, current_shocks)
+                )
+                continue
+
+            child_indices = tree_array_metadata.child_indices[t - 1]
+            child_weights = tree_array_metadata.child_weights[t - 1]
+            assert child_indices is not None
+            assert child_weights is not None
+            next_states = states_by_time[t]
+            child_states = next_states[child_indices]
+
+            def group_conditional_residual(
+                prev_state: jax.Array,
+                current_state: jax.Array,
+                current_shock: jax.Array,
+                group_child_states: jax.Array,
+                group_weights: jax.Array,
+            ) -> jax.Array:
+                terms = jax.vmap(
+                    lambda next_state: conditional_residual_fn(
+                        prev_state,
+                        current_state,
+                        next_state,
+                        current_shock,
+                        params,
+                    )
+                )(group_child_states)
+                return weighted_child_sum(terms, group_weights)
+
+            residuals.append(
+                jax.vmap(group_conditional_residual)(
+                    prev_states,
+                    current_states,
+                    current_shocks,
+                    child_states,
+                    child_weights,
+                )
+            )
+
+        return jnp.concatenate([period.reshape(-1) for period in residuals], axis=0)
+
+    def make_residual_tools(
+        *,
+        vectorized: bool,
+    ) -> tuple[
+        Callable[[jax.Array], jax.Array],
+        Callable[[jax.Array], jax.Array],
+        Optional[Callable[[jax.Array], jax.Array]],
+    ]:
+        residual = (
+            residual_vector_vectorized
+            if vectorized and not use_hmc
+            else residual_vector_loop
+        )
+        residual_evaluator = (
+            jax.jit(residual) if bool(config.jit) and not use_hmc else residual
+        )
+        jacobian_evaluator = (
+            jax.jit(jax.jacobian(residual))
+            if bool(config.jit) and not use_hmc and jacobian_method_used == "autodiff"
+            else None
+        )
+        return residual, residual_evaluator, jacobian_evaluator
+
+    residual_vector, residual_eval, jacobian_eval = make_residual_tools(
+        vectorized=bool(config.vectorize_residual),
+    )
+    try:
+        residual_norm = float(
+            np.asarray(jnp.linalg.norm(residual_eval(guess), ord=jnp.inf))
+        )
+    except Exception:
+        if not bool(config.vectorize_residual) or use_hmc:
+            raise
+        residual_vector, residual_eval, jacobian_eval = make_residual_tools(
+            vectorized=False,
+        )
+        residual_norm = float(
+            np.asarray(jnp.linalg.norm(residual_eval(guess), ord=jnp.inf))
+        )
     accept_threshold = (
         config.tol if config.accept_tol is None else float(config.accept_tol)
     )
@@ -1041,11 +1298,16 @@ def _solve_stochastic_extended_path_impl(
     current = guess
     current_lambda = float(config.newton_regularization)
     active_solver = config.linear_solver
+    direction_eval = (
+        _solve_sep_newton_direction_jit
+        if bool(config.jit) and not use_hmc and config.fallback_solver is None
+        else _solve_sep_newton_direction
+    )
     best_err = np.inf
     stall_count = 0
 
     for iteration in range(1, config.max_iter + 1):
-        residual = residual_vector(current)
+        residual = residual_eval(current)
         residual_norm = float(np.asarray(jnp.linalg.norm(residual, ord=jnp.inf)))
         if residual_norm < config.tol:
             converged = True
@@ -1053,9 +1315,11 @@ def _solve_stochastic_extended_path_impl(
             break
 
         if jacobian_method_used == "finite_difference":
-            jacobian = _finite_difference_jacobian(residual_vector, current)
+            jacobian = _finite_difference_jacobian(residual_eval, current)
         elif jacobian_method_used == "subgradient":
             jacobian = jnp.asarray(jacobian_fn(current), dtype=jnp.float64)
+        elif jacobian_eval is not None:
+            jacobian = jacobian_eval(current)
         else:
             jacobian = jax.jacobian(residual_vector)(current)
 
@@ -1064,7 +1328,7 @@ def _solve_stochastic_extended_path_impl(
         err_after = residual_norm
         lambda_value = current_lambda
         while lambda_value <= config.lm_lambda_max:
-            step = _solve_sep_newton_direction(
+            step = direction_eval(
                 jacobian,
                 residual,
                 lambda_value=lambda_value,
@@ -1079,7 +1343,7 @@ def _solve_stochastic_extended_path_impl(
                 line_iterations = 0
                 while True:
                     trial = current + alpha * step
-                    trial_residual = residual_vector(trial)
+                    trial_residual = residual_eval(trial)
                     trial_norm = float(np.asarray(jnp.linalg.norm(trial_residual, ord=jnp.inf)))
                     if np.isfinite(trial_norm) and trial_norm < residual_norm:
                         candidate = trial
@@ -1101,7 +1365,7 @@ def _solve_stochastic_extended_path_impl(
             else:
                 alpha = 1.0
                 trial = current + alpha * step
-                trial_residual = residual_vector(trial)
+                trial_residual = residual_eval(trial)
                 trial_norm = float(np.asarray(jnp.linalg.norm(trial_residual, ord=jnp.inf)))
                 if np.isfinite(trial_norm):
                     candidate = trial
@@ -1153,7 +1417,7 @@ def _solve_stochastic_extended_path_impl(
             active_solver = config.fallback_solver
             stall_count = 0
 
-    final_residual = residual_vector(current)
+    final_residual = residual_eval(current)
     residual_norm = float(np.asarray(jnp.linalg.norm(final_residual, ord=jnp.inf)))
     converged = residual_norm < config.tol
     accepted = bool(np.isfinite(residual_norm) and residual_norm <= accept_threshold)
@@ -1186,14 +1450,15 @@ def _solve_sep_newton_direction(
     jacobian_arr = jnp.asarray(jacobian, dtype=jnp.float64)
     residual_arr = jnp.asarray(residual, dtype=jnp.float64).reshape(-1)
     ncols = int(jacobian_arr.shape[1])
+    lambda_arr = jnp.asarray(lambda_value, dtype=jacobian_arr.dtype)
     if solver == "normal_equations":
         normal_matrix = jacobian_arr.T @ jacobian_arr
         gradient = jacobian_arr.T @ residual_arr
         eye = jnp.eye(normal_matrix.shape[0], dtype=normal_matrix.dtype)
-        return jnp.linalg.solve(normal_matrix + float(lambda_value) * eye, -gradient)
+        return jnp.linalg.solve(normal_matrix + lambda_arr * eye, -gradient)
     if solver == "qr":
         eye = jnp.eye(ncols, dtype=jacobian_arr.dtype)
-        sqrt_lambda = jnp.sqrt(jnp.asarray(lambda_value, dtype=jacobian_arr.dtype))
+        sqrt_lambda = jnp.sqrt(lambda_arr)
         augmented_matrix = jnp.concatenate([jacobian_arr, sqrt_lambda * eye], axis=0)
         augmented_rhs = jnp.concatenate(
             [-residual_arr, jnp.zeros((ncols,), dtype=residual_arr.dtype)],
@@ -1204,3 +1469,9 @@ def _solve_sep_newton_direction(
     raise ValueError(
         f"Unknown SEP linear_solver={solver!r}. Use 'normal_equations' or 'qr'."
     )
+
+
+_solve_sep_newton_direction_jit = jax.jit(
+    _solve_sep_newton_direction,
+    static_argnames=("solver",),
+)

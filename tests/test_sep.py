@@ -292,6 +292,173 @@ def test_sep_sparse_tree_matches_full_tree_mean_path_for_linear_zero_mean_shocks
     )
 
 
+def test_sep_vectorized_jit_matches_loop_expectation_api_on_sparse_tree() -> None:
+    deterministic_shocks = jnp.asarray(
+        [[0.10, -0.05], [0.02, 0.00], [0.00, 0.03], [0.00, 0.00]],
+        dtype=jnp.float64,
+    )
+
+    def expectation(next_state, next_shock, params):
+        del params
+        return jnp.asarray(
+            [
+                next_state[0] + 0.1 * jnp.sin(next_shock[0]),
+                next_state[1] + 0.05 * next_shock[1],
+            ],
+            dtype=jnp.float64,
+        )
+
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        del params
+        target = jnp.asarray(
+            [
+                0.30 * y_prev[0]
+                + 0.08 * y_prev[1]
+                + 0.18 * expected_next[0]
+                + 0.04 * expected_next[1]
+                + 0.20 * shock[0],
+                -0.05 * y_prev[0]
+                + 0.25 * y_prev[1]
+                + 0.06 * expected_next[0]
+                + 0.12 * expected_next[1]
+                - 0.10 * shock[1],
+            ],
+            dtype=jnp.float64,
+        )
+        return y_curr - target
+
+    loop_solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.05, -0.02],
+        terminal_state=[0.0, 0.0],
+        shock_dim=2,
+        config=SEPConfig(
+            periods=4,
+            branching_order=2,
+            nnodes=3,
+            sparse_tree=True,
+            tol=1e-10,
+            jit=False,
+            vectorize_residual=False,
+        ),
+        deterministic_shocks=deterministic_shocks,
+        expectation_fn=expectation,
+    )
+    vectorized_solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.05, -0.02],
+        terminal_state=[0.0, 0.0],
+        shock_dim=2,
+        config=SEPConfig(
+            periods=4,
+            branching_order=2,
+            nnodes=3,
+            sparse_tree=True,
+            tol=1e-10,
+            jit=True,
+            vectorize_residual=True,
+        ),
+        deterministic_shocks=deterministic_shocks,
+        expectation_fn=expectation,
+    )
+
+    assert loop_solution.converged
+    assert vectorized_solution.converged
+    assert vectorized_solution.group_counts == loop_solution.group_counts
+    np.testing.assert_allclose(
+        vectorized_solution.stacked_states,
+        loop_solution.stacked_states,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        vectorized_solution.mean_path,
+        loop_solution.mean_path,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_sep_vectorized_jit_matches_loop_conditional_api_on_sparse_tree() -> None:
+    deterministic_shocks = jnp.asarray(
+        [[0.08, 0.01], [0.03, -0.02], [0.00, 0.02], [0.00, 0.00]],
+        dtype=jnp.float64,
+    )
+
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        del params
+        next_effect = jnp.asarray(
+            [
+                0.10 * jnp.tanh(y_next[0]) + 0.04 * y_next[1],
+                0.05 * y_next[0] + 0.08 * jnp.tanh(y_next[1]),
+            ],
+            dtype=jnp.float64,
+        )
+        target = jnp.asarray(
+            [
+                0.22 * y_prev[0]
+                + 0.06 * y_prev[1]
+                + next_effect[0]
+                + 0.15 * shock[0],
+                -0.03 * y_prev[0]
+                + 0.20 * y_prev[1]
+                + next_effect[1]
+                - 0.12 * shock[1],
+            ],
+            dtype=jnp.float64,
+        )
+        return y_curr - target
+
+    loop_solution = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.04, -0.03],
+        terminal_state=[0.0, 0.0],
+        shock_dim=2,
+        config=SEPConfig(
+            periods=4,
+            branching_order=2,
+            nnodes=3,
+            sparse_tree=True,
+            tol=1e-10,
+            jit=False,
+            vectorize_residual=False,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+    vectorized_solution = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.04, -0.03],
+        terminal_state=[0.0, 0.0],
+        shock_dim=2,
+        config=SEPConfig(
+            periods=4,
+            branching_order=2,
+            nnodes=3,
+            sparse_tree=True,
+            tol=1e-10,
+            jit=True,
+            vectorize_residual=True,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+
+    assert loop_solution.converged
+    assert vectorized_solution.converged
+    assert vectorized_solution.group_counts == loop_solution.group_counts
+    np.testing.assert_allclose(
+        vectorized_solution.stacked_states,
+        loop_solution.stacked_states,
+        rtol=1e-9,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        vectorized_solution.mean_path,
+        loop_solution.mean_path,
+        rtol=1e-9,
+        atol=1e-10,
+    )
+
+
 def test_sep_warm_start_accepts_previous_solution_and_finishes_immediately() -> None:
     deterministic_shocks = jnp.asarray([[0.2], [0.0], [0.0]], dtype=jnp.float64)
 
