@@ -77,6 +77,7 @@ class SEPConfig:
     line_search_maxit: int = 6
     line_search_factor: float = 0.5
     line_search_min_alpha: float = 1e-4
+    line_search_batch: bool = True
     newton_regularization: float = 1e-8
     lm_lambda_scale: float = 10.0
     lm_lambda_min: float = 1e-12
@@ -215,6 +216,17 @@ def _validate_sep_config(config: SEPConfig, *, shock_dim: int) -> None:
             "Sparse-tree SEP requires an odd nnodes value so the trunk can use the "
             f"zero Gauss-Hermite node, got nnodes={config.nnodes}."
         )
+
+
+def _sep_line_search_alphas(config: SEPConfig) -> jax.Array:
+    alphas = []
+    alpha = 1.0
+    for _ in range(config.line_search_maxit):
+        alphas.append(alpha)
+        if alpha <= config.line_search_min_alpha:
+            break
+        alpha *= config.line_search_factor
+    return jnp.asarray(alphas, dtype=jnp.float64)
 
 
 def gauss_hermite_rule(nnodes: int, shock_dim: int, shock_scale: float = 1.0) -> GaussHermiteRule:
@@ -1258,6 +1270,7 @@ def _solve_stochastic_extended_path_impl(
         Callable[[jax.Array], jax.Array],
         Callable[[jax.Array], jax.Array],
         Optional[Callable[[jax.Array], jax.Array]],
+        Optional[Callable[[jax.Array], jax.Array]],
     ]:
         residual = (
             residual_vector_vectorized
@@ -1272,9 +1285,24 @@ def _solve_stochastic_extended_path_impl(
             if bool(config.jit) and not use_hmc and jacobian_method_used == "autodiff"
             else None
         )
-        return residual, residual_evaluator, jacobian_evaluator
+        batched_residual_evaluator = (
+            jax.jit(jax.vmap(residual))
+            if (
+                bool(config.jit)
+                and not use_hmc
+                and bool(config.line_search)
+                and bool(config.line_search_batch)
+            )
+            else None
+        )
+        return (
+            residual,
+            residual_evaluator,
+            jacobian_evaluator,
+            batched_residual_evaluator,
+        )
 
-    residual_vector, residual_eval, jacobian_eval = make_residual_tools(
+    residual_vector, residual_eval, jacobian_eval, batched_residual_eval = make_residual_tools(
         vectorized=bool(config.vectorize_residual),
     )
     try:
@@ -1284,7 +1312,7 @@ def _solve_stochastic_extended_path_impl(
     except Exception:
         if not bool(config.vectorize_residual) or use_hmc:
             raise
-        residual_vector, residual_eval, jacobian_eval = make_residual_tools(
+        residual_vector, residual_eval, jacobian_eval, batched_residual_eval = make_residual_tools(
             vectorized=False,
         )
         residual_norm = float(
@@ -1298,6 +1326,11 @@ def _solve_stochastic_extended_path_impl(
     current = guess
     current_lambda = float(config.newton_regularization)
     active_solver = config.linear_solver
+    line_search_alphas = _sep_line_search_alphas(config)
+    line_search_alpha_tail = line_search_alphas[1:]
+    line_search_alpha_values = tuple(
+        float(alpha) for alpha in np.asarray(line_search_alphas)
+    )
     direction_eval = (
         _solve_sep_newton_direction_jit
         if bool(config.jit) and not use_hmc and config.fallback_solver is None
@@ -1339,29 +1372,64 @@ def _solve_stochastic_extended_path_impl(
                 continue
 
             if config.line_search:
-                alpha = 1.0
-                line_iterations = 0
-                while True:
-                    trial = current + alpha * step
-                    trial_residual = residual_eval(trial)
-                    trial_norm = float(np.asarray(jnp.linalg.norm(trial_residual, ord=jnp.inf)))
-                    if np.isfinite(trial_norm) and trial_norm < residual_norm:
-                        candidate = trial
-                        err_after = trial_norm
-                        if active_solver == "normal_equations":
-                            current_lambda = max(
-                                lambda_value / config.lm_lambda_scale,
-                                config.lm_lambda_min,
+                batch_search_finished = False
+                trial = current + step
+                trial_residual = residual_eval(trial)
+                trial_norm = float(np.asarray(jnp.linalg.norm(trial_residual, ord=jnp.inf)))
+                if np.isfinite(trial_norm) and trial_norm < residual_norm:
+                    candidate = trial
+                    err_after = trial_norm
+                    if active_solver == "normal_equations":
+                        current_lambda = max(
+                            lambda_value / config.lm_lambda_scale,
+                            config.lm_lambda_min,
+                        )
+                    accepted = True
+
+                if (
+                    not accepted
+                    and batched_residual_eval is not None
+                    and int(line_search_alpha_tail.shape[0]) > 0
+                ):
+                    try:
+                        trials = current[None, :] + line_search_alpha_tail[:, None] * step[None, :]
+                        trial_residuals = batched_residual_eval(trials)
+                        trial_norms = jnp.max(jnp.abs(trial_residuals), axis=1)
+                        improving = jnp.isfinite(trial_norms) & (
+                            trial_norms < residual_norm
+                        )
+                        improving_np = np.asarray(improving)
+                        batch_search_finished = True
+                        if bool(np.any(improving_np)):
+                            accepted_index = int(np.flatnonzero(improving_np)[0])
+                            candidate = trials[accepted_index]
+                            err_after = float(
+                                np.asarray(trial_norms[accepted_index])
                             )
-                        accepted = True
-                        break
-                    line_iterations += 1
-                    if (
-                        line_iterations >= config.line_search_maxit
-                        or alpha <= config.line_search_min_alpha
-                    ):
-                        break
-                    alpha *= config.line_search_factor
+                            if active_solver == "normal_equations":
+                                current_lambda = max(
+                                    lambda_value / config.lm_lambda_scale,
+                                    config.lm_lambda_min,
+                                )
+                            accepted = True
+                    except Exception:
+                        batched_residual_eval = None
+
+                if not accepted and not batch_search_finished:
+                    for alpha in line_search_alpha_values[1:]:
+                        trial = current + alpha * step
+                        trial_residual = residual_eval(trial)
+                        trial_norm = float(np.asarray(jnp.linalg.norm(trial_residual, ord=jnp.inf)))
+                        if np.isfinite(trial_norm) and trial_norm < residual_norm:
+                            candidate = trial
+                            err_after = trial_norm
+                            if active_solver == "normal_equations":
+                                current_lambda = max(
+                                    lambda_value / config.lm_lambda_scale,
+                                    config.lm_lambda_min,
+                                )
+                            accepted = True
+                            break
             else:
                 alpha = 1.0
                 trial = current + alpha * step

@@ -459,6 +459,85 @@ def test_sep_vectorized_jit_matches_loop_conditional_api_on_sparse_tree() -> Non
     )
 
 
+def test_sep_batched_line_search_matches_sequential_line_search() -> None:
+    deterministic_shocks = jnp.asarray(
+        [[0.12, -0.03], [0.04, 0.01], [0.00, 0.02], [0.00, 0.00]],
+        dtype=jnp.float64,
+    )
+
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        del params
+        target = jnp.asarray(
+            [
+                0.18 * y_prev[0]
+                + 0.06 * y_prev[1]
+                + 0.18 * jnp.tanh(y_next[0])
+                + 0.05 * y_next[1]
+                - 0.04 * y_curr[0] ** 2
+                + 0.14 * shock[0],
+                -0.02 * y_prev[0]
+                + 0.16 * y_prev[1]
+                + 0.03 * y_next[0]
+                + 0.14 * jnp.tanh(y_next[1])
+                - 0.03 * y_curr[1] ** 2
+                - 0.10 * shock[1],
+            ],
+            dtype=jnp.float64,
+        )
+        return y_curr - target
+
+    sequential_solution = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.03, -0.02],
+        terminal_state=[0.0, 0.0],
+        shock_dim=2,
+        config=SEPConfig(
+            periods=4,
+            branching_order=2,
+            nnodes=3,
+            sparse_tree=True,
+            tol=1e-10,
+            jit=True,
+            vectorize_residual=True,
+            line_search_batch=False,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+    batched_solution = solve_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[0.03, -0.02],
+        terminal_state=[0.0, 0.0],
+        shock_dim=2,
+        config=SEPConfig(
+            periods=4,
+            branching_order=2,
+            nnodes=3,
+            sparse_tree=True,
+            tol=1e-10,
+            jit=True,
+            vectorize_residual=True,
+            line_search_batch=True,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+
+    assert sequential_solution.converged
+    assert batched_solution.converged
+    assert batched_solution.iterations == sequential_solution.iterations
+    np.testing.assert_allclose(
+        batched_solution.stacked_states,
+        sequential_solution.stacked_states,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        batched_solution.mean_path,
+        sequential_solution.mean_path,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
 def test_sep_warm_start_accepts_previous_solution_and_finishes_immediately() -> None:
     deterministic_shocks = jnp.asarray([[0.2], [0.0], [0.0]], dtype=jnp.float64)
 
