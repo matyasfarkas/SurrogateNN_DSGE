@@ -820,6 +820,8 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         shock_sigmas,
                         maxit=int(args.hlt_surrogate_inversion_maxit),
                         lambda_=float(args.hlt_surrogate_inversion_lambda),
+                        shock_solver=str(args.hlt_jax_shock_solver),
+                        batch_replay=bool(args.hlt_jax_batch_replay),
                     )
 
                 value_and_grad = jax.jit(jax.value_and_grad(log_density))
@@ -840,6 +842,8 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     "gradient_norm": float(np.linalg.norm(grad_np)),
                     "backend": jax.default_backend(),
                     "target_device": None if target_device is None else str(target_device),
+                    "shock_solver": str(args.hlt_jax_shock_solver),
+                    "batch_replay": bool(args.hlt_jax_batch_replay),
                     "caveat": (
                         "Differentiates the fixed-ROM surrogate likelihood through theta; "
                         "steady-state and first-order matrices are held fixed in this smoke check."
@@ -1081,6 +1085,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-surrogate-inversion-tol", type=float, default=1e-5)
     parser.add_argument("--hlt-surrogate-inversion-lambda", type=float, default=1e-4)
     parser.add_argument("--hlt-jax-log-density-smoke", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--hlt-jax-shock-solver", choices=("rom", "surrogate"), default="rom")
+    parser.add_argument("--hlt-jax-batch-replay", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output", type=Path)
     return _apply_scenario_defaults(parser.parse_args(argv))
 

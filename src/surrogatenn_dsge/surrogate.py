@@ -1089,16 +1089,19 @@ def surrogate_inversion_loglik_per_period_jax(
     lambda_: float = 1e-4,
     allow_full_residual: bool = True,
     active_shock_indices: Optional[Sequence[int]] = None,
+    shock_solver: str = "rom",
+    batch_replay: bool = True,
 ) -> tuple[jax.Array, jax.Array]:
     """JAX-native surrogate inversion likelihood.
 
-    This mirrors ``surrogate_inversion_loglik_per_period`` but uses an unrolled
-    Gauss-Newton shock inversion with fixed loop count. The fixed loop is
-    intentionally HMC-friendly: it JIT-compiles, differentiates through the
-    unrolled solver, and avoids data-dependent shapes. The ROM matrices and
-    frozen surrogate are treated as fixed objects; parameter dependence enters
-    through the supplied ``theta`` vector and through ``rom_predict`` if that
-    closure uses it with JAX operations.
+    With the default ``shock_solver="rom", batch_replay=True`` this mirrors the
+    existing Python ``surrogate_inversion_loglik_per_period`` helper: shocks are
+    inverted on the ROM and the trained residual is then evaluated on the ROM
+    replay path. Set ``shock_solver="surrogate"`` and ``batch_replay=False`` to
+    solve shocks directly against the surrogate-corrected model.
+
+    The Gauss-Newton loop has fixed iteration count so the function JIT-compiles
+    and differentiates through the unrolled solver.
     """
 
     maxit_int = int(maxit)
@@ -1107,6 +1110,9 @@ def surrogate_inversion_loglik_per_period_jax(
     lambda_float = float(lambda_)
     if lambda_float < 0.0:
         raise ValueError(f"lambda_ must be nonnegative, got {lambda_}.")
+    shock_solver_norm = str(shock_solver).strip().lower()
+    if shock_solver_norm not in {"rom", "surrogate"}:
+        raise ValueError(f"shock_solver must be 'rom' or 'surrogate', got {shock_solver!r}.")
 
     observations = jnp.asarray(obs_data, dtype=jnp.float64)
     if observations.ndim != 2:
@@ -1158,16 +1164,24 @@ def surrogate_inversion_loglik_per_period_jax(
         )
         return eps_full, obs_pred, state_next
 
+    def predict_solver(state: jax.Array, eps_struct: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+        if shock_solver_norm == "rom":
+            eps_full = full_shock(eps_struct)
+            obs_rom, state_rom = rom_predict(state, eps_full, theta_vec)
+            return eps_full, jnp.asarray(obs_rom, dtype=jnp.float64).reshape(-1), jnp.asarray(state_rom, dtype=jnp.float64).reshape(-1)
+        return predict_period(state, eps_struct)
+
     def one_period(state: jax.Array, y_obs: jax.Array) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         if not n_active:
             eps_empty = jnp.zeros((0,), dtype=jnp.float64)
-            eps_full, obs_pred, state_next = predict_period(state, eps_empty)
+            eps_full, obs_pred, _ = predict_solver(state, eps_empty)
             resid_obs = (y_obs - obs_pred) / obs_sigma_vec
             ll_t = -0.5 * (jnp.sum(resid_obs**2) + obs_log_norm_const)
-            return state_next, (ll_t, eps_full)
+            _, _, state_eval = predict_period(state, eps_empty)
+            return state_eval, (ll_t, eps_full)
 
         def residual_aug(eps_struct: jax.Array) -> jax.Array:
-            _, obs_pred, _ = predict_period(state, eps_struct)
+            _, obs_pred, _ = predict_solver(state, eps_struct)
             resid_obs = (y_obs - obs_pred) / obs_sigma_vec
             resid_prior = eps_struct / shock_std
             return jnp.concatenate([resid_obs, resid_prior], axis=0)
@@ -1182,7 +1196,7 @@ def surrogate_inversion_loglik_per_period_jax(
 
         eps0 = jnp.zeros((n_active,), dtype=jnp.float64)
         eps_hat = jax.lax.fori_loop(0, maxit_int, gn_body, eps0)
-        eps_full, obs_pred, state_next = predict_period(state, eps_hat)
+        eps_full, obs_pred, _ = predict_solver(state, eps_hat)
         resid_obs = (y_obs - obs_pred) / obs_sigma_vec
         resid_prior = eps_hat / shock_std
         ll_t = -0.5 * (
@@ -1191,10 +1205,38 @@ def surrogate_inversion_loglik_per_period_jax(
             + obs_log_norm_const
             + shock_log_norm_const
         )
-        return state_next, (ll_t, eps_full)
+        _, _, state_eval = predict_period(state, eps_hat)
+        return state_eval, (ll_t, eps_full)
 
     _, (ll, shocks_t) = jax.lax.scan(one_period, state0, observations.T)
-    return ll, shocks_t.T
+    shocks = shocks_t.T
+    if not bool(batch_replay):
+        return ll, shocks
+
+    def replay_period(state_rom: jax.Array, eps_full: jax.Array) -> tuple[jax.Array, jax.Array]:
+        obs_rom, state_next_rom = rom_predict(state_rom, eps_full, theta_vec)
+        obs_rom_arr = jnp.asarray(obs_rom, dtype=jnp.float64).reshape(-1)
+        state_next_rom_arr = jnp.asarray(state_next_rom, dtype=jnp.float64).reshape(-1)
+        x = jnp.concatenate([state_rom, eps_full, theta_vec], axis=0)
+        residual = predict_frozen(frozen, x).reshape(-1)
+        obs_pred = obs_rom_arr + residual[:d_obs]
+        return state_next_rom_arr, obs_pred
+
+    def replay_with_observation(
+        state_rom: jax.Array,
+        payload: tuple[jax.Array, jax.Array],
+    ) -> tuple[jax.Array, jax.Array]:
+        eps_full, y_obs = payload
+        state_next_rom, obs_pred = replay_period(state_rom, eps_full)
+        resid_obs = (y_obs - obs_pred) / obs_sigma_vec
+        ll_t = -0.5 * (jnp.sum(resid_obs**2) + obs_log_norm_const)
+        if n_active:
+            eps_struct = eps_full[active_idx]
+            ll_t = ll_t - 0.5 * (jnp.sum((eps_struct / shock_std) ** 2) + shock_log_norm_const)
+        return state_next_rom, ll_t
+
+    _, replay_ll = jax.lax.scan(replay_with_observation, state0, (shocks_t, observations.T))
+    return replay_ll, shocks
 
 
 def surrogate_inversion_loglikelihood_jax(
@@ -1210,6 +1252,8 @@ def surrogate_inversion_loglikelihood_jax(
     lambda_: float = 1e-4,
     allow_full_residual: bool = True,
     active_shock_indices: Optional[Sequence[int]] = None,
+    shock_solver: str = "rom",
+    batch_replay: bool = True,
 ) -> jax.Array:
     ll, _ = surrogate_inversion_loglik_per_period_jax(
         rom_predict,
@@ -1223,6 +1267,8 @@ def surrogate_inversion_loglikelihood_jax(
         lambda_=lambda_,
         allow_full_residual=allow_full_residual,
         active_shock_indices=active_shock_indices,
+        shock_solver=shock_solver,
+        batch_replay=batch_replay,
     )
     return jnp.sum(ll)
 
@@ -1253,6 +1299,8 @@ def build_numpyro_surrogate_inversion_model_jax(
     lambda_: float = 1e-4,
     allow_full_residual: bool = True,
     active_shock_indices: Optional[Sequence[int]] = None,
+    shock_solver: str = "rom",
+    batch_replay: bool = True,
 ):
     """Build a NumPyro model using the JAX surrogate inversion likelihood.
 
@@ -1294,6 +1342,8 @@ def build_numpyro_surrogate_inversion_model_jax(
             lambda_=lambda_,
             allow_full_residual=allow_full_residual,
             active_shock_indices=active_shock_indices,
+            shock_solver=shock_solver,
+            batch_replay=batch_replay,
         )
         numpyro.deterministic("theta_vector", theta)
         numpyro.deterministic("loglikelihood", loglikelihood)
@@ -1318,6 +1368,8 @@ def evaluate_numpyro_surrogate_log_density_jax(
     lambda_: float = 1e-4,
     allow_full_residual: bool = True,
     active_shock_indices: Optional[Sequence[int]] = None,
+    shock_solver: str = "rom",
+    batch_replay: bool = True,
 ) -> jax.Array:
     _, log_density = _require_numpyro_surrogate()
     numpyro_model = build_numpyro_surrogate_inversion_model_jax(
@@ -1334,6 +1386,8 @@ def evaluate_numpyro_surrogate_log_density_jax(
         lambda_=lambda_,
         allow_full_residual=allow_full_residual,
         active_shock_indices=active_shock_indices,
+        shock_solver=shock_solver,
+        batch_replay=batch_replay,
     )
     log_joint, _ = log_density(numpyro_model, (), {}, parameter_samples)
     return jnp.asarray(log_joint, dtype=jnp.float64)

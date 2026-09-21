@@ -423,6 +423,43 @@ def test_surrogate_inversion_likelihood_jax_matches_numpy_and_differentiates() -
     assert bool(jnp.isfinite(grad))
 
 
+def test_surrogate_inversion_likelihood_jax_matches_python_residual_replay() -> None:
+    frozen_residual = _constant_residual_mlp(d_in=4, d_out=1, value=0.2)
+    obs = np.asarray([[1.0, 0.5]], dtype=np.float64)
+    obs_sigma = np.asarray([0.1], dtype=np.float64)
+    shock_sigmas = np.asarray([0.5, 0.0], dtype=np.float64)
+    theta = np.asarray([0.1], dtype=np.float64)
+
+    ll_py, shocks_py = surrogate_inversion_loglik_per_period(
+        _toy_split_predict,
+        frozen_residual,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=12,
+        tol=1e-8,
+        lambda_=1e-6,
+    )
+    ll_jax, shocks_jax = surrogate_inversion_loglik_per_period_jax(
+        _toy_split_predict_jax,
+        frozen_residual,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=12,
+        lambda_=1e-6,
+        shock_solver="rom",
+        batch_replay=True,
+    )
+
+    np.testing.assert_allclose(np.asarray(shocks_jax), shocks_py, rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(ll_jax), ll_py, rtol=1e-9, atol=1e-9)
+
+
 def test_numpyro_surrogate_log_density_wraps_jax_likelihood() -> None:
     numpyro = pytest.importorskip("numpyro")
     dist = pytest.importorskip("numpyro.distributions")
