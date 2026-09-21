@@ -422,6 +422,23 @@ def test_surrogate_inversion_likelihood_jax_matches_numpy_and_differentiates() -
     assert bool(jnp.isfinite(value))
     assert bool(jnp.isfinite(grad))
 
+    full_unrolled = jax.jit(
+        lambda theta_local: surrogate_inversion_loglikelihood_jax(
+            _toy_split_predict_jax,
+            frozen_zero,
+            jnp.asarray([0.0], dtype=jnp.float64),
+            theta_local,
+            jnp.asarray(obs, dtype=jnp.float64),
+            jnp.asarray(obs_sigma, dtype=jnp.float64),
+            shock_sigmas,
+            maxit=8,
+            lambda_=1e-6,
+            differentiate_shocks=True,
+        )
+    )
+    full_grad = jax.grad(lambda x: full_unrolled(jnp.asarray([x], dtype=jnp.float64)))(jnp.asarray(0.1, dtype=jnp.float64))
+    assert bool(jnp.isfinite(full_grad))
+
 
 def test_surrogate_inversion_likelihood_jax_matches_python_residual_replay() -> None:
     frozen_residual = _constant_residual_mlp(d_in=4, d_out=1, value=0.2)
@@ -445,6 +462,43 @@ def test_surrogate_inversion_likelihood_jax_matches_python_residual_replay() -> 
     ll_jax, shocks_jax = surrogate_inversion_loglik_per_period_jax(
         _toy_split_predict_jax,
         frozen_residual,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=12,
+        lambda_=1e-6,
+        shock_solver="rom",
+        batch_replay=True,
+    )
+
+    np.testing.assert_allclose(np.asarray(shocks_jax), shocks_py, rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(ll_jax), ll_py, rtol=1e-9, atol=1e-9)
+
+
+def test_surrogate_inversion_jax_matches_python_with_state_residual_carry() -> None:
+    frozen_full_residual = _constant_residual_mlp(d_in=4, d_out=2, value=0.15)
+    obs = np.asarray([[1.0, 0.65, 0.25]], dtype=np.float64)
+    obs_sigma = np.asarray([0.1], dtype=np.float64)
+    shock_sigmas = np.asarray([0.5, 0.0], dtype=np.float64)
+    theta = np.asarray([0.1], dtype=np.float64)
+
+    ll_py, shocks_py = surrogate_inversion_loglik_per_period(
+        _toy_split_predict,
+        frozen_full_residual,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=12,
+        tol=1e-8,
+        lambda_=1e-6,
+    )
+    ll_jax, shocks_jax = surrogate_inversion_loglik_per_period_jax(
+        _toy_split_predict_jax,
+        frozen_full_residual,
         [0.0],
         theta,
         obs,

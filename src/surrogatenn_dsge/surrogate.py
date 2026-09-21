@@ -53,7 +53,7 @@ def _linear(weight: jax.Array, bias: jax.Array, x: jax.Array) -> jax.Array:
 
 def silu(x: Any) -> jax.Array:
     values = jnp.asarray(x, dtype=jnp.float64)
-    return values / (1.0 + jnp.exp(-values))
+    return jax.nn.silu(values)
 
 
 def _activation_fn(name: str) -> Callable[[jax.Array], jax.Array]:
@@ -1086,11 +1086,13 @@ def surrogate_inversion_loglik_per_period_jax(
     shock_sigmas: ArrayLike,
     *,
     maxit: int = 8,
+    tol: float = 1e-6,
     lambda_: float = 1e-4,
     allow_full_residual: bool = True,
     active_shock_indices: Optional[Sequence[int]] = None,
     shock_solver: str = "rom",
     batch_replay: bool = True,
+    differentiate_shocks: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """JAX-native surrogate inversion likelihood.
 
@@ -1100,13 +1102,18 @@ def surrogate_inversion_loglik_per_period_jax(
     replay path. Set ``shock_solver="surrogate"`` and ``batch_replay=False`` to
     solve shocks directly against the surrogate-corrected model.
 
-    The Gauss-Newton loop has fixed iteration count so the function JIT-compiles
-    and differentiates through the unrolled solver.
+    The Gauss-Newton loop has fixed iteration count so the function JIT-compiles.
+    By default, gradients are stopped through the inferred shocks during replay;
+    set ``differentiate_shocks=True`` to differentiate through the unrolled
+    shock solver when the inversion is well-conditioned.
     """
 
     maxit_int = int(maxit)
     if maxit_int <= 0:
         raise ValueError(f"maxit must be positive, got {maxit}.")
+    tol_float = float(tol)
+    if tol_float <= 0.0:
+        raise ValueError(f"tol must be positive, got {tol}.")
     lambda_float = float(lambda_)
     if lambda_float < 0.0:
         raise ValueError(f"lambda_ must be nonnegative, got {lambda_}.")
@@ -1135,6 +1142,7 @@ def surrogate_inversion_loglik_per_period_jax(
     shock_std = shock_sigma_vec[active_idx] if n_active else jnp.zeros((0,), dtype=jnp.float64)
     state0 = jnp.asarray(s0, dtype=jnp.float64).reshape(-1)
     theta_vec = jnp.asarray(theta, dtype=jnp.float64).reshape(-1)
+    theta_solver = theta_vec if bool(differentiate_shocks) else jax.lax.stop_gradient(theta_vec)
     d_obs = int(observations.shape[0])
     d_shock = int(shock_sigma_vec.shape[0])
     eye_active = jnp.eye(n_active, dtype=jnp.float64)
@@ -1158,7 +1166,7 @@ def surrogate_inversion_loglik_per_period_jax(
             frozen,
             state,
             eps_full,
-            theta_vec,
+            theta_solver,
             d_obs=d_obs,
             allow_full_residual=allow_full_residual,
         )
@@ -1167,17 +1175,20 @@ def surrogate_inversion_loglik_per_period_jax(
     def predict_solver(state: jax.Array, eps_struct: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
         if shock_solver_norm == "rom":
             eps_full = full_shock(eps_struct)
-            obs_rom, state_rom = rom_predict(state, eps_full, theta_vec)
+            obs_rom, state_rom = rom_predict(state, eps_full, theta_solver)
             return eps_full, jnp.asarray(obs_rom, dtype=jnp.float64).reshape(-1), jnp.asarray(state_rom, dtype=jnp.float64).reshape(-1)
         return predict_period(state, eps_struct)
 
     def one_period(state: jax.Array, y_obs: jax.Array) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         if not n_active:
             eps_empty = jnp.zeros((0,), dtype=jnp.float64)
-            eps_full, obs_pred, _ = predict_solver(state, eps_empty)
+            eps_full, obs_pred, state_solver = predict_solver(state, eps_empty)
             resid_obs = (y_obs - obs_pred) / obs_sigma_vec
             ll_t = -0.5 * (jnp.sum(resid_obs**2) + obs_log_norm_const)
-            _, _, state_eval = predict_period(state, eps_empty)
+            if shock_solver_norm == "rom" and bool(batch_replay):
+                state_eval = state_solver
+            else:
+                _, _, state_eval = predict_period(state, eps_empty)
             return state_eval, (ll_t, eps_full)
 
         def residual_aug(eps_struct: jax.Array) -> jax.Array:
@@ -1186,17 +1197,57 @@ def surrogate_inversion_loglik_per_period_jax(
             resid_prior = eps_struct / shock_std
             return jnp.concatenate([resid_obs, resid_prior], axis=0)
 
-        def gn_body(_i: int, eps_struct: jax.Array) -> jax.Array:
-            resid = residual_aug(eps_struct)
-            jac = jax.jacfwd(residual_aug)(eps_struct)
-            lhs = jac.T @ jac + lambda_float * eye_active
-            rhs = -(jac.T @ resid)
-            step = jnp.linalg.solve(lhs, rhs)
-            return eps_struct + step
+        def gn_body(i: int, carry: tuple[jax.Array, jax.Array, jax.Array]) -> tuple[jax.Array, jax.Array, jax.Array]:
+            eps_struct, lambda_eff, done = carry
+
+            def update(_: None) -> tuple[jax.Array, jax.Array, jax.Array]:
+                lambda_eff_local = jax.lax.stop_gradient(lambda_eff)
+                resid = residual_aug(eps_struct)
+                jac = jax.jacfwd(residual_aug)(eps_struct)
+                jtj = jac.T @ jac
+                lhs = jtj + lambda_eff_local * eye_active
+                diag_vals = jnp.diag(lhs)
+                min_diag = jnp.maximum(jnp.min(diag_vals), jnp.finfo(jnp.float64).eps)
+                kappa_approx = jnp.max(diag_vals) / min_diag
+
+                def high_condition(_: None) -> tuple[jax.Array, jax.Array]:
+                    kappa = jnp.linalg.cond(jax.lax.stop_gradient(lhs))
+                    lambda_next = jnp.where(kappa > 1e14, jnp.maximum(lambda_eff_local * 10.0, 1e-2), lambda_eff_local)
+                    lhs_next = jtj + lambda_next * eye_active
+                    return lhs_next, lambda_next
+
+                def low_condition(_: None) -> tuple[jax.Array, jax.Array]:
+                    can_relax = (kappa_approx < 1e4) & (lambda_eff_local > lambda_float) & (i > 0)
+                    lambda_next = jnp.where(can_relax, jnp.maximum(lambda_eff_local / 2.0, lambda_float), lambda_eff_local)
+                    lhs_next = jtj + lambda_next * eye_active
+                    return lhs_next, lambda_next
+
+                lhs_eff, lambda_next = jax.lax.cond(kappa_approx > 1e10, high_condition, low_condition, operand=None)
+                rhs = -(jac.T @ resid)
+                raw_step = jnp.linalg.solve(lhs_eff, rhs)
+                finite_step = jnp.all(jnp.isfinite(raw_step))
+                step = jnp.nan_to_num(raw_step, nan=0.0, posinf=0.0, neginf=0.0)
+                eps_next = eps_struct + step
+                step_norm = jnp.linalg.norm(step)
+                eps_norm = jnp.linalg.norm(eps_next)
+                converged = finite_step & (step_norm <= tol_float * (1.0 + eps_norm))
+                done_next = (~finite_step) | converged
+                return eps_next, lambda_next, done_next
+
+            return jax.lax.cond(done, lambda _: carry, update, operand=None)
 
         eps0 = jnp.zeros((n_active,), dtype=jnp.float64)
-        eps_hat = jax.lax.fori_loop(0, maxit_int, gn_body, eps0)
-        eps_full, obs_pred, _ = predict_solver(state, eps_hat)
+        eps_hat, _, _ = jax.lax.fori_loop(
+            0,
+            maxit_int,
+            gn_body,
+            (
+                eps0,
+                jnp.asarray(lambda_float, dtype=jnp.float64),
+                jnp.asarray(False),
+            ),
+        )
+        eps_full, obs_pred, state_solver = predict_solver(state, eps_hat)
         resid_obs = (y_obs - obs_pred) / obs_sigma_vec
         resid_prior = eps_hat / shock_std
         ll_t = -0.5 * (
@@ -1205,10 +1256,14 @@ def surrogate_inversion_loglik_per_period_jax(
             + obs_log_norm_const
             + shock_log_norm_const
         )
-        _, _, state_eval = predict_period(state, eps_hat)
+        if shock_solver_norm == "rom" and bool(batch_replay):
+            state_eval = state_solver
+        else:
+            _, _, state_eval = predict_period(state, eps_hat)
         return state_eval, (ll_t, eps_full)
 
-    _, (ll, shocks_t) = jax.lax.scan(one_period, state0, observations.T)
+    _, (ll, shocks_t_raw) = jax.lax.scan(one_period, state0, observations.T)
+    shocks_t = shocks_t_raw if bool(differentiate_shocks) else jax.lax.stop_gradient(shocks_t_raw)
     shocks = shocks_t.T
     if not bool(batch_replay):
         return ll, shocks
@@ -1249,11 +1304,13 @@ def surrogate_inversion_loglikelihood_jax(
     shock_sigmas: ArrayLike,
     *,
     maxit: int = 8,
+    tol: float = 1e-6,
     lambda_: float = 1e-4,
     allow_full_residual: bool = True,
     active_shock_indices: Optional[Sequence[int]] = None,
     shock_solver: str = "rom",
     batch_replay: bool = True,
+    differentiate_shocks: bool = False,
 ) -> jax.Array:
     ll, _ = surrogate_inversion_loglik_per_period_jax(
         rom_predict,
@@ -1264,11 +1321,13 @@ def surrogate_inversion_loglikelihood_jax(
         obs_sigma,
         shock_sigmas,
         maxit=maxit,
+        tol=tol,
         lambda_=lambda_,
         allow_full_residual=allow_full_residual,
         active_shock_indices=active_shock_indices,
         shock_solver=shock_solver,
         batch_replay=batch_replay,
+        differentiate_shocks=differentiate_shocks,
     )
     return jnp.sum(ll)
 
@@ -1296,11 +1355,13 @@ def build_numpyro_surrogate_inversion_model_jax(
     parameter_names: Optional[Sequence[str]] = None,
     theta_transform: Optional[Callable[[Mapping[str, Any]], Any]] = None,
     maxit: int = 8,
+    tol: float = 1e-6,
     lambda_: float = 1e-4,
     allow_full_residual: bool = True,
     active_shock_indices: Optional[Sequence[int]] = None,
     shock_solver: str = "rom",
     batch_replay: bool = True,
+    differentiate_shocks: bool = False,
 ):
     """Build a NumPyro model using the JAX surrogate inversion likelihood.
 
@@ -1339,11 +1400,13 @@ def build_numpyro_surrogate_inversion_model_jax(
             obs_sigma,
             shock_sigmas,
             maxit=maxit,
+            tol=tol,
             lambda_=lambda_,
             allow_full_residual=allow_full_residual,
             active_shock_indices=active_shock_indices,
             shock_solver=shock_solver,
             batch_replay=batch_replay,
+            differentiate_shocks=differentiate_shocks,
         )
         numpyro.deterministic("theta_vector", theta)
         numpyro.deterministic("loglikelihood", loglikelihood)
@@ -1365,11 +1428,13 @@ def evaluate_numpyro_surrogate_log_density_jax(
     parameter_names: Optional[Sequence[str]] = None,
     theta_transform: Optional[Callable[[Mapping[str, Any]], Any]] = None,
     maxit: int = 8,
+    tol: float = 1e-6,
     lambda_: float = 1e-4,
     allow_full_residual: bool = True,
     active_shock_indices: Optional[Sequence[int]] = None,
     shock_solver: str = "rom",
     batch_replay: bool = True,
+    differentiate_shocks: bool = False,
 ) -> jax.Array:
     _, log_density = _require_numpyro_surrogate()
     numpyro_model = build_numpyro_surrogate_inversion_model_jax(
@@ -1383,11 +1448,13 @@ def evaluate_numpyro_surrogate_log_density_jax(
         parameter_names=parameter_names,
         theta_transform=theta_transform,
         maxit=maxit,
+        tol=tol,
         lambda_=lambda_,
         allow_full_residual=allow_full_residual,
         active_shock_indices=active_shock_indices,
         shock_solver=shock_solver,
         batch_replay=batch_replay,
+        differentiate_shocks=differentiate_shocks,
     )
     log_joint, _ = log_density(numpyro_model, (), {}, parameter_samples)
     return jnp.asarray(log_joint, dtype=jnp.float64)

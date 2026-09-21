@@ -819,9 +819,11 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         obs_sigma_jax,
                         shock_sigmas,
                         maxit=int(args.hlt_surrogate_inversion_maxit),
+                        tol=float(args.hlt_surrogate_inversion_tol),
                         lambda_=float(args.hlt_surrogate_inversion_lambda),
                         shock_solver=str(args.hlt_jax_shock_solver),
                         batch_replay=bool(args.hlt_jax_batch_replay),
+                        differentiate_shocks=bool(args.hlt_jax_differentiate_shocks),
                     )
 
                 value_and_grad = jax.jit(jax.value_and_grad(log_density))
@@ -831,12 +833,18 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 grad_np = np.asarray(grad, dtype=np.float64)
                 value_float = float(np.asarray(value))
                 python_total = _finite_float_or_none(likelihood_result.get("total_loglikelihood"))
+                value_minus_python = None if python_total is None else value_float - python_total
+                parity_abs_diff = None if value_minus_python is None else abs(value_minus_python)
+                parity_tol = float(args.hlt_jax_python_parity_tol)
                 jax_log_density_result = {
                     "status": "ok",
                     "elapsed_s": jax_elapsed,
                     "value": value_float,
                     "python_surrogate_total_loglikelihood": python_total,
-                    "value_minus_python": None if python_total is None else value_float - python_total,
+                    "value_minus_python": value_minus_python,
+                    "parity_abs_diff": parity_abs_diff,
+                    "parity_tol": parity_tol,
+                    "parity_ok": None if parity_abs_diff is None else bool(parity_abs_diff <= parity_tol),
                     "gradient": grad_np.tolist(),
                     "gradient_finite": bool(np.isfinite(grad_np).all()),
                     "gradient_norm": float(np.linalg.norm(grad_np)),
@@ -844,8 +852,12 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     "target_device": None if target_device is None else str(target_device),
                     "shock_solver": str(args.hlt_jax_shock_solver),
                     "batch_replay": bool(args.hlt_jax_batch_replay),
+                    "differentiate_shocks": bool(args.hlt_jax_differentiate_shocks),
                     "caveat": (
-                        "Differentiates the fixed-ROM surrogate likelihood through theta; "
+                        "Differentiates the fixed-ROM surrogate likelihood through theta and inferred shocks; "
+                        "steady-state and first-order matrices are held fixed in this smoke check."
+                        if bool(args.hlt_jax_differentiate_shocks)
+                        else "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; "
                         "steady-state and first-order matrices are held fixed in this smoke check."
                     ),
                 }
@@ -1087,6 +1099,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-jax-log-density-smoke", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hlt-jax-shock-solver", choices=("rom", "surrogate"), default="rom")
     parser.add_argument("--hlt-jax-batch-replay", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--hlt-jax-differentiate-shocks", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--hlt-jax-python-parity-tol", type=float, default=1e-7)
     parser.add_argument("--output", type=Path)
     return _apply_scenario_defaults(parser.parse_args(argv))
 
