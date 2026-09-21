@@ -46,6 +46,7 @@ from surrogatenn_dsge import (
     solve_stochastic_extended_path_residual_expectation,
     summarize_surrogate_dataset,
     surrogate_inversion_loglik_per_period,
+    surrogate_inversion_loglikelihood_jax,
     train_surrogate_from_dataset,
 )
 
@@ -736,6 +737,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
 
     likelihood_started = time.perf_counter()
     likelihood_result: dict[str, Any]
+    jax_log_density_result: dict[str, Any] = {
+        "status": "skipped",
+        "reason": "hlt_jax_log_density_smoke disabled or likelihood skipped",
+    }
     likelihood_periods = int(args.hlt_likelihood_periods)
     if likelihood_periods <= 0:
         likelihood_result = {"status": "skipped", "reason": "hlt_likelihood_periods <= 0"}
@@ -781,11 +786,74 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 "inferred_shocks_finite": bool(np.isfinite(inferred_shocks).all()),
                 "inferred_shocks_max_abs": float(np.max(np.abs(inferred_shocks))) if inferred_shocks.size else 0.0,
             }
+            if bool(args.hlt_jax_log_density_smoke):
+                jax_started = time.perf_counter()
+
+                def device_array(values: Any, *, dtype: Any = jnp.float64) -> jax.Array:
+                    array = jnp.asarray(values, dtype=dtype)
+                    return array if target_device is None else jax.device_put(array, target_device)
+
+                state_idx_jax = device_array(state_idx.astype(np.int64), dtype=jnp.int64)
+                observable_idx_jax = device_array(np.asarray(observable_idx, dtype=np.int64), dtype=jnp.int64)
+                steady_state_jax = device_array(runtime0["steady_state"])
+                state_transition_jax = device_array(runtime0["state_transition"])
+                shock_impact_jax = device_array(runtime0["shock_impact"])
+                obs_data_jax = device_array(obs_data)
+                obs_sigma_jax = device_array(obs_sigma)
+                theta0_jax = device_array(theta0)
+
+                def rom_predict_jax(state: Any, shock_t: Any, _theta_t: Any) -> tuple[jax.Array, jax.Array]:
+                    state_arr = jnp.asarray(state, dtype=jnp.float64).reshape(-1)
+                    shock_arr = jnp.asarray(shock_t, dtype=jnp.float64).reshape(-1)
+                    state_dev = state_arr[state_idx_jax] - steady_state_jax[state_idx_jax]
+                    next_state = steady_state_jax + state_transition_jax @ state_dev + shock_impact_jax @ shock_arr
+                    return next_state[observable_idx_jax], next_state
+
+                def log_density(theta_local: jax.Array) -> jax.Array:
+                    return surrogate_inversion_loglikelihood_jax(
+                        rom_predict_jax,
+                        result.training.frozen,
+                        steady_state_jax,
+                        theta_local,
+                        obs_data_jax,
+                        obs_sigma_jax,
+                        shock_sigmas,
+                        maxit=int(args.hlt_surrogate_inversion_maxit),
+                        lambda_=float(args.hlt_surrogate_inversion_lambda),
+                    )
+
+                value_and_grad = jax.jit(jax.value_and_grad(log_density))
+                value, grad = value_and_grad(theta0_jax)
+                _block_until_ready_tree((value, grad))
+                jax_elapsed = time.perf_counter() - jax_started
+                grad_np = np.asarray(grad, dtype=np.float64)
+                value_float = float(np.asarray(value))
+                python_total = _finite_float_or_none(likelihood_result.get("total_loglikelihood"))
+                jax_log_density_result = {
+                    "status": "ok",
+                    "elapsed_s": jax_elapsed,
+                    "value": value_float,
+                    "python_surrogate_total_loglikelihood": python_total,
+                    "value_minus_python": None if python_total is None else value_float - python_total,
+                    "gradient": grad_np.tolist(),
+                    "gradient_finite": bool(np.isfinite(grad_np).all()),
+                    "gradient_norm": float(np.linalg.norm(grad_np)),
+                    "backend": jax.default_backend(),
+                    "target_device": None if target_device is None else str(target_device),
+                    "caveat": (
+                        "Differentiates the fixed-ROM surrogate likelihood through theta; "
+                        "steady-state and first-order matrices are held fixed in this smoke check."
+                    ),
+                }
         except Exception as exc:
             likelihood_result = {
                 "status": "error",
                 "elapsed_s": time.perf_counter() - likelihood_started,
                 "error": repr(exc),
+            }
+            jax_log_density_result = {
+                "status": "skipped",
+                "reason": "Python surrogate likelihood failed before JAX log-density smoke.",
             }
 
     steady_statuses = [str(row["steady_state_status"]) for row in steady_state_diagnostics]
@@ -847,6 +915,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         if result.training.validation_improvement is None
         else float(np.nanmean(result.training.validation_improvement)),
         "surrogate_inversion_likelihood": likelihood_result,
+        "jax_surrogate_log_density": jax_log_density_result,
     }
 
 
@@ -1011,6 +1080,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-surrogate-inversion-maxit", type=int, default=4)
     parser.add_argument("--hlt-surrogate-inversion-tol", type=float, default=1e-5)
     parser.add_argument("--hlt-surrogate-inversion-lambda", type=float, default=1e-4)
+    parser.add_argument("--hlt-jax-log-density-smoke", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output", type=Path)
     return _apply_scenario_defaults(parser.parse_args(argv))
 

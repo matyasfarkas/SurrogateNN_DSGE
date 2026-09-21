@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -8,14 +10,18 @@ from surrogatenn_dsge import (
     FrozenResNet,
     NormStats,
     ResBlock,
+    build_numpyro_surrogate_inversion_model_jax,
     additive_residual_loglik_per_period,
     compute_ood_flag,
+    evaluate_numpyro_surrogate_log_density_jax,
     inversion_loglik_per_period,
     predict_frozen,
     predict_frozen_batch,
     predict_frozen_safe,
     surrogate_additive_residual_loglik_per_period,
     surrogate_inversion_loglik_per_period,
+    surrogate_inversion_loglik_per_period_jax,
+    surrogate_inversion_loglikelihood_jax,
     train_mlp,
     train_resnet,
     validate_surrogate,
@@ -39,6 +45,15 @@ def _toy_full_predict(state, shock_t, theta):
 def _toy_split_predict(state, shock_t, theta):
     y = _toy_full_predict(state, shock_t, theta)
     return y[:1], y[1:]
+
+
+def _toy_split_predict_jax(state, shock_t, theta):
+    state = jnp.asarray(state, dtype=jnp.float64).reshape(-1)
+    shock_t = jnp.asarray(shock_t, dtype=jnp.float64).reshape(-1)
+    theta = jnp.asarray(theta, dtype=jnp.float64).reshape(-1)
+    obs = jnp.asarray([state[0] + shock_t[0] + theta[0]], dtype=jnp.float64)
+    next_state = jnp.asarray([state[0] + shock_t[0]], dtype=jnp.float64)
+    return obs, next_state
 
 
 def _constant_residual_mlp(d_in: int, d_out: int, value: float = 0.5) -> FrozenMLP:
@@ -353,3 +368,109 @@ def test_surrogate_inversion_likelihood_zero_residual_matches_rom() -> None:
     )
     np.testing.assert_allclose(shocks_sur, shocks_rom, rtol=1e-10, atol=1e-10)
     np.testing.assert_allclose(ll_sur, ll_rom, rtol=1e-10, atol=1e-10)
+
+
+def test_surrogate_inversion_likelihood_jax_matches_numpy_and_differentiates() -> None:
+    frozen_zero = _constant_residual_mlp(d_in=4, d_out=1, value=0.0)
+    obs = np.asarray([[1.0, 0.5]], dtype=np.float64)
+    obs_sigma = np.asarray([0.1], dtype=np.float64)
+    shock_sigmas = np.asarray([0.5, 0.0], dtype=np.float64)
+    theta = np.asarray([0.1], dtype=np.float64)
+
+    ll_py, shocks_py = surrogate_inversion_loglik_per_period(
+        _toy_split_predict,
+        frozen_zero,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=12,
+        tol=1e-8,
+        lambda_=1e-6,
+    )
+    ll_jax, shocks_jax = surrogate_inversion_loglik_per_period_jax(
+        _toy_split_predict_jax,
+        frozen_zero,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=12,
+        lambda_=1e-6,
+    )
+
+    np.testing.assert_allclose(np.asarray(shocks_jax), shocks_py, rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(ll_jax), ll_py, rtol=1e-9, atol=1e-9)
+
+    compiled = jax.jit(
+        lambda theta_local: surrogate_inversion_loglikelihood_jax(
+            _toy_split_predict_jax,
+            frozen_zero,
+            jnp.asarray([0.0], dtype=jnp.float64),
+            theta_local,
+            jnp.asarray(obs, dtype=jnp.float64),
+            jnp.asarray(obs_sigma, dtype=jnp.float64),
+            shock_sigmas,
+            maxit=8,
+            lambda_=1e-6,
+        )
+    )
+    value = compiled(jnp.asarray(theta, dtype=jnp.float64))
+    grad = jax.grad(lambda x: compiled(jnp.asarray([x], dtype=jnp.float64)))(jnp.asarray(0.1, dtype=jnp.float64))
+    assert bool(jnp.isfinite(value))
+    assert bool(jnp.isfinite(grad))
+
+
+def test_numpyro_surrogate_log_density_wraps_jax_likelihood() -> None:
+    numpyro = pytest.importorskip("numpyro")
+    dist = pytest.importorskip("numpyro.distributions")
+    frozen_zero = _constant_residual_mlp(d_in=4, d_out=1, value=0.0)
+    obs = np.asarray([[1.0, 0.5]], dtype=np.float64)
+    obs_sigma = np.asarray([0.1], dtype=np.float64)
+    shock_sigmas = np.asarray([0.5, 0.0], dtype=np.float64)
+    priors = {"theta": dist.Normal(0.0, 1.0)}
+    samples = {"theta": jnp.asarray(0.1, dtype=jnp.float64)}
+
+    model = build_numpyro_surrogate_inversion_model_jax(
+        _toy_split_predict_jax,
+        frozen_zero,
+        [0.0],
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        priors,
+        parameter_names=("theta",),
+        maxit=8,
+        lambda_=1e-6,
+    )
+    assert callable(model)
+
+    log_joint = evaluate_numpyro_surrogate_log_density_jax(
+        _toy_split_predict_jax,
+        frozen_zero,
+        [0.0],
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        priors,
+        samples,
+        parameter_names=("theta",),
+        maxit=8,
+        lambda_=1e-6,
+    )
+    likelihood = surrogate_inversion_loglikelihood_jax(
+        _toy_split_predict_jax,
+        frozen_zero,
+        [0.0],
+        jnp.asarray([0.1], dtype=jnp.float64),
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=8,
+        lambda_=1e-6,
+    )
+    expected = likelihood + priors["theta"].log_prob(samples["theta"])
+    np.testing.assert_allclose(np.asarray(log_joint), np.asarray(expected), rtol=1e-10, atol=1e-10)
+    assert numpyro.__version__
