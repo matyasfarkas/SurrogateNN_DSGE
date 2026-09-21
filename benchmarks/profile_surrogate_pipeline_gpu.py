@@ -39,10 +39,13 @@ from surrogatenn_dsge import (
     SEPConfig,
     SurrogateDataset,
     build_surrogate_residual_dataset,
+    fit_surrogate_pipeline,
+    parse_macro_model,
     predict_frozen_batch,
     resolve_jax_device,
     solve_stochastic_extended_path_residual_expectation,
     summarize_surrogate_dataset,
+    surrogate_inversion_loglik_per_period,
     train_surrogate_from_dataset,
 )
 
@@ -78,6 +81,14 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(v) for v in value]
     return value
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _run_text(cmd: Sequence[str], *, check: bool = False) -> str:
@@ -472,6 +483,373 @@ def run_sep_micro_profile(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _load_hlt_payload_case(args: argparse.Namespace) -> dict[str, Any]:
+    payload_path = Path(args.hlt_payload)
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    cases = payload.get("cases", [])
+    for case in cases:
+        if case.get("name") == args.hlt_case_name:
+            return dict(case)
+    raise ValueError(f"Could not find case {args.hlt_case_name!r} in {payload_path}.")
+
+
+def _make_hlt_theta_design(
+    *,
+    base_parameters: np.ndarray,
+    parameter_names: Sequence[str],
+    subset_names: Sequence[str],
+    draws: int,
+    perturbation: float,
+) -> tuple[np.ndarray, list[int]]:
+    if draws < 1:
+        raise ValueError(f"hlt_theta_draws must be >= 1, got {draws}.")
+    subset_idx = [tuple(parameter_names).index(name) for name in subset_names]
+    base_subset = np.asarray(base_parameters[subset_idx], dtype=np.float64)
+    theta = np.repeat(base_subset[:, None], int(draws), axis=1)
+    if draws > 1 and perturbation != 0.0:
+        grid = np.linspace(-1.0, 1.0, int(draws), dtype=np.float64)
+        signs = np.where(np.arange(base_subset.size) % 2 == 0, 1.0, -1.0)
+        theta *= 1.0 + float(perturbation) * signs[:, None] * grid[None, :]
+    return theta, subset_idx
+
+
+def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, Any]:
+    """Run the actual HLT model through a tiny ROM/FOM surrogate path.
+
+    This is intentionally a smoke/profile mode. It verifies that the parsed HLT
+    model, first-order ROM, SEP FOM target generation, JAX surrogate training,
+    and trained-surrogate likelihood evaluation compose on the selected device.
+    Use ``--hlt-steady-state-mode solve`` to require parameter-specific steady
+    states; the default fixed-reference mode is a conservative stability check.
+    """
+
+    target_device = None if args.device == "auto" else resolve_jax_device(args.device)
+    case = _load_hlt_payload_case(args)
+    model_source = Path(args.hlt_model_source)
+    started = time.perf_counter()
+    model = parse_macro_model(model_source.read_text(encoding="utf-8"))
+    parse_s = time.perf_counter() - started
+
+    reference_steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
+    base_parameters = np.asarray(model.parameter_values, dtype=np.float64)
+    parameter_subset = [str(name) for name in case["parameter_subset"]]
+    theta, subset_idx = _make_hlt_theta_design(
+        base_parameters=base_parameters,
+        parameter_names=model.parameter_names,
+        subset_names=parameter_subset,
+        draws=int(args.hlt_theta_draws),
+        perturbation=float(args.hlt_parameter_perturbation),
+    )
+
+    periods = int(args.hlt_periods)
+    shock_dim = int(model.timings.nExo)
+    shocks = np.zeros((theta.shape[1], shock_dim, periods), dtype=np.float64)
+    if shock_dim > 0 and periods > 0:
+        shocks[:, 0, 0] = float(args.hlt_shock_scale)
+    if shock_dim > 1 and periods > 1:
+        shocks[:, 1, 1] = -0.5 * float(args.hlt_shock_scale)
+
+    observables = [str(name) for name in case["observables"]]
+    observable_idx = [model.timings.var.index(name) for name in observables]
+    state_idx = np.asarray(model.timings.past_not_future_and_mixed_idx, dtype=np.int64)
+    sep_config = SEPConfig(
+        periods=int(args.sep_periods),
+        branching_order=int(args.sep_order),
+        nnodes=int(args.sep_nnodes),
+        sparse_tree=bool(args.sep_sparse_tree),
+        max_iter=int(args.sep_max_iter),
+        tol=float(args.sep_tol),
+        accept_tol=float(args.sep_accept_tol),
+    )
+    steady_state_mode = str(args.hlt_steady_state_mode).strip().lower()
+    if steady_state_mode not in {"fixed-reference", "solve", "solve-or-reference"}:
+        raise ValueError(
+            "hlt_steady_state_mode must be 'fixed-reference', 'solve', or "
+            f"'solve-or-reference', got {args.hlt_steady_state_mode!r}."
+        )
+
+    def full_parameters(theta_t: Any) -> np.ndarray:
+        values = base_parameters.copy()
+        values[subset_idx] = np.asarray(theta_t, dtype=np.float64)
+        return values
+
+    first_order_s = 0.0
+    steady_state_s = 0.0
+    runtime_cache: dict[tuple[float, ...], dict[str, Any]] = {}
+    steady_state_diagnostics: list[dict[str, Any]] = []
+
+    def theta_key(theta_t: Any) -> tuple[float, ...]:
+        theta_arr = np.asarray(theta_t, dtype=np.float64).reshape(-1)
+        return tuple(float(x) for x in np.round(theta_arr, 14))
+
+    def runtime_for_theta(theta_t: Any, *, theta_index: int | None = None) -> dict[str, Any]:
+        nonlocal first_order_s, steady_state_s
+        theta_arr = np.asarray(theta_t, dtype=np.float64).reshape(-1)
+        key = theta_key(theta_arr)
+        cached = runtime_cache.get(key)
+        if cached is not None:
+            return cached
+
+        parameter_values = full_parameters(theta_arr)
+        steady_state = reference_steady_state.copy()
+        ss_status = "fixed_reference"
+        ss_converged: bool | None = None
+        ss_iterations: int | None = None
+        ss_residual_norm: float | None = None
+        ss_error: str | None = None
+        ss_elapsed = 0.0
+
+        if steady_state_mode != "fixed-reference":
+            ss_started = time.perf_counter()
+            try:
+                steady_state_result = model.solve_steady_state(
+                    parameter_values=parameter_values,
+                    initial_guess=reference_steady_state,
+                    tol=float(args.hlt_steady_state_tol),
+                    max_iter=int(args.hlt_steady_state_max_iter),
+                )
+                ss_elapsed = time.perf_counter() - ss_started
+                ss_converged = bool(steady_state_result.converged)
+                ss_iterations = int(steady_state_result.iterations)
+                ss_residual_norm = _finite_float_or_none(steady_state_result.residual_norm)
+                candidate = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+                if ss_converged and np.isfinite(candidate).all():
+                    steady_state = candidate
+                    ss_status = "solved"
+                elif steady_state_mode == "solve":
+                    raise RuntimeError(
+                        "HLT steady-state solve failed "
+                        f"(converged={ss_converged}, residual={steady_state_result.residual_norm})."
+                    )
+                else:
+                    ss_status = "fallback_reference"
+            except Exception as exc:
+                ss_elapsed = time.perf_counter() - ss_started
+                ss_error = repr(exc)
+                if steady_state_mode == "solve":
+                    raise
+                ss_status = "fallback_reference_error"
+        steady_state_s += ss_elapsed
+
+        first_order_started = time.perf_counter()
+        first_order = model.solve_first_order(
+            parameter_values=parameter_values,
+            steady_state=steady_state,
+        )
+        first_order_elapsed = time.perf_counter() - first_order_started
+        first_order_s += first_order_elapsed
+        state_transition = np.asarray(first_order.solution.state_transition, dtype=np.float64)
+        shock_impact = np.asarray(first_order.solution.shock_impact, dtype=np.float64)
+        if not first_order.solution.converged:
+            raise RuntimeError("HLT first-order ROM did not converge.")
+        if not np.isfinite(state_transition).all() or not np.isfinite(shock_impact).all():
+            raise RuntimeError("HLT first-order ROM contains non-finite matrices.")
+
+        runtime = {
+            "parameter_values": parameter_values,
+            "steady_state": steady_state,
+            "state_transition": state_transition,
+            "shock_impact": shock_impact,
+        }
+        runtime_cache[key] = runtime
+        steady_state_diagnostics.append(
+            {
+                "theta_index": theta_index,
+                "steady_state_status": ss_status,
+                "steady_state_converged": ss_converged,
+                "steady_state_iterations": ss_iterations,
+                "steady_state_residual_norm": ss_residual_norm,
+                "steady_state_s": ss_elapsed,
+                "steady_state_error": ss_error,
+                "first_order_s": first_order_elapsed,
+                "theta": theta_arr.tolist(),
+            }
+        )
+        return runtime
+
+    runtime_prepare_started = time.perf_counter()
+    initial_states = np.column_stack(
+        [
+            runtime_for_theta(theta[:, theta_idx], theta_index=theta_idx)["steady_state"]
+            for theta_idx in range(theta.shape[1])
+        ]
+    )
+    runtime_prepare_s = time.perf_counter() - runtime_prepare_started
+
+    def rom_predict(state: Any, shock_t: Any, theta_t: Any) -> tuple[np.ndarray, np.ndarray]:
+        runtime = runtime_for_theta(theta_t)
+        state_arr = np.asarray(state, dtype=np.float64)
+        shock_arr = np.asarray(shock_t, dtype=np.float64)
+        steady_state = runtime["steady_state"]
+        state_transition = runtime["state_transition"]
+        shock_impact = runtime["shock_impact"]
+        state_dev = state_arr[state_idx] - steady_state[state_idx]
+        next_state = steady_state + _mv(state_transition, state_dev) + _mv(shock_impact, shock_arr)
+        if not np.isfinite(next_state).all():
+            raise RuntimeError("HLT ROM produced a non-finite next state.")
+        return next_state[observable_idx], next_state
+
+    def fom_predict(state: Any, shock_t: Any, theta_t: Any) -> tuple[np.ndarray, np.ndarray]:
+        runtime = runtime_for_theta(theta_t)
+        steady_state = runtime["steady_state"]
+        deterministic = np.zeros((sep_config.periods, shock_dim), dtype=np.float64)
+        if sep_config.periods > 0:
+            deterministic[0, :] = np.asarray(shock_t, dtype=np.float64)
+        sep_result = model.solve_stochastic_extended_path(
+            parameter_values=runtime["parameter_values"],
+            steady_state=steady_state,
+            initial_state=np.asarray(state, dtype=np.float64),
+            terminal_state=steady_state,
+            deterministic_shocks=deterministic,
+            config=sep_config,
+        )
+        if not sep_result.solution.accepted:
+            raise RuntimeError(f"HLT SEP failed with residual {sep_result.solution.residual_norm}.")
+        next_state = np.asarray(sep_result.solution.mean_path, dtype=np.float64)[:, 1]
+        if not np.isfinite(next_state).all():
+            raise RuntimeError("HLT SEP produced a non-finite next state.")
+        return next_state[observable_idx], next_state
+
+    pipeline_started = time.perf_counter()
+    result = fit_surrogate_pipeline(
+        rom_predict,
+        fom_predict,
+        initial_state=initial_states,
+        shocks=shocks,
+        theta_design=theta,
+        target_mode="fom_full",
+        min_stable_periods=periods,
+        input_names=tuple(list(model.timings.var) + list(model.timings.exo) + parameter_subset),
+        output_names=tuple(observables + [f"{name}[1]" for name in model.timings.var]),
+        architecture="resnet",
+        rom_residual=True,
+        validation_fraction=float(args.validation_fraction),
+        split_by_theta=bool(args.split_by_theta),
+        d_hidden=int(args.hidden),
+        n_blocks=int(args.blocks),
+        nepoch=int(args.epochs),
+        eta_init=float(args.learning_rate),
+        batch_size=int(args.batch_size),
+        device=target_device,
+    )
+    pipeline_s = time.perf_counter() - pipeline_started
+
+    likelihood_started = time.perf_counter()
+    likelihood_result: dict[str, Any]
+    likelihood_periods = int(args.hlt_likelihood_periods)
+    if likelihood_periods <= 0:
+        likelihood_result = {"status": "skipped", "reason": "hlt_likelihood_periods <= 0"}
+    else:
+        try:
+            observations = np.asarray(case["observations"], dtype=np.float64)
+            if observations.ndim != 2 or observations.shape[0] != len(observables):
+                raise ValueError(
+                    f"HLT observations must have shape ({len(observables)}, T), got {observations.shape}."
+                )
+            likelihood_periods = min(likelihood_periods, observations.shape[1])
+            obs_data = observations[:, :likelihood_periods]
+            obs_sigma_map = {str(name): value for name, value in dict(case["obs_sigma"]).items()}
+            shock_sigma_map = {str(name): value for name, value in dict(case["shock_sigmas"]).items()}
+            shock_names = [str(name) for name in case.get("shock_names", model.timings.exo)]
+            obs_sigma = np.asarray([obs_sigma_map[name] for name in observables], dtype=np.float64)
+            shock_sigmas = np.asarray([shock_sigma_map[name] for name in shock_names], dtype=np.float64)
+            if shock_sigmas.shape[0] != shock_dim:
+                raise ValueError(f"Expected {shock_dim} shock sigmas, got {shock_sigmas.shape[0]}.")
+            theta0 = theta[:, 0]
+            runtime0 = runtime_for_theta(theta0, theta_index=0)
+            loglik_per_period, inferred_shocks = surrogate_inversion_loglik_per_period(
+                rom_predict,
+                result.training.frozen,
+                runtime0["steady_state"],
+                theta0,
+                obs_data,
+                obs_sigma,
+                shock_sigmas,
+                maxit=int(args.hlt_surrogate_inversion_maxit),
+                tol=float(args.hlt_surrogate_inversion_tol),
+                lambda_=float(args.hlt_surrogate_inversion_lambda),
+            )
+            loglik_per_period = np.asarray(loglik_per_period, dtype=np.float64)
+            inferred_shocks = np.asarray(inferred_shocks, dtype=np.float64)
+            likelihood_result = {
+                "status": "ok",
+                "periods": likelihood_periods,
+                "elapsed_s": time.perf_counter() - likelihood_started,
+                "total_loglikelihood": float(np.sum(loglik_per_period)),
+                "per_period_loglikelihood": loglik_per_period.tolist(),
+                "inferred_shocks_shape": list(inferred_shocks.shape),
+                "inferred_shocks_finite": bool(np.isfinite(inferred_shocks).all()),
+                "inferred_shocks_max_abs": float(np.max(np.abs(inferred_shocks))) if inferred_shocks.size else 0.0,
+            }
+        except Exception as exc:
+            likelihood_result = {
+                "status": "error",
+                "elapsed_s": time.perf_counter() - likelihood_started,
+                "error": repr(exc),
+            }
+
+    steady_statuses = [str(row["steady_state_status"]) for row in steady_state_diagnostics]
+    fallback_count = sum(status.startswith("fallback") for status in steady_statuses)
+    solved_count = sum(status == "solved" for status in steady_statuses)
+    caveats = [
+        "SEP target generation is still callback/Python-loop based; ResNet training is the GPU-native part.",
+        "The likelihood block evaluates a trained-surrogate inversion likelihood; it is not a full HMC posterior run.",
+    ]
+    if steady_state_mode == "fixed-reference":
+        caveats.append(
+            "Uses a Julia-exported reference steady state for all draws; this is a fixed-SS smoke/stress test."
+        )
+    elif steady_state_mode == "solve-or-reference":
+        caveats.append(
+            "Attempts parameter-specific steady states and falls back to the Julia reference if a solve fails; inspect fallback_count."
+        )
+    else:
+        caveats.append("Requires parameter-specific steady states; any failed solve aborts the run.")
+
+    return {
+        "status": "ok",
+        "kind": "actual_hlt_surrogate_pipeline",
+        "backend": jax.default_backend(),
+        "target_device": None if target_device is None else str(target_device),
+        "model_source": str(model_source),
+        "payload_case": str(case["name"]),
+        "caveats": caveats,
+        "parse_s": parse_s,
+        "runtime_prepare_s": runtime_prepare_s,
+        "steady_state_s": steady_state_s,
+        "first_order_s": first_order_s,
+        "pipeline_s": pipeline_s,
+        "n_vars": int(model.timings.nVars),
+        "n_exo": int(model.timings.nExo),
+        "parameter_subset": parameter_subset,
+        "theta_draws": int(theta.shape[1]),
+        "steady_state_mode": steady_state_mode,
+        "steady_state_solved_count": int(solved_count),
+        "steady_state_fallback_count": int(fallback_count),
+        "steady_state_diagnostics": steady_state_diagnostics,
+        "periods": periods,
+        "sep_config": {
+            "periods": int(sep_config.periods),
+            "branching_order": int(sep_config.branching_order),
+            "nnodes": int(sep_config.nnodes),
+            "sparse_tree": bool(sep_config.sparse_tree),
+            "max_iter": int(sep_config.max_iter),
+            "tol": float(sep_config.tol),
+            "accept_tol": float(sep_config.accept_tol),
+        },
+        "dataset_summary": result.dataset_summary,
+        "train_size": int(result.training.train_size),
+        "val_size": int(result.training.val_size),
+        "validation_rmse_mean": None
+        if result.training.validation_rmse is None
+        else float(np.mean(result.training.validation_rmse)),
+        "validation_improvement_mean": None
+        if result.training.validation_improvement is None
+        else float(np.nanmean(result.training.validation_improvement)),
+        "surrogate_inversion_likelihood": likelihood_result,
+    }
+
+
 def scenario_defaults(mode: str) -> dict[str, Any]:
     if mode == "calibration":
         return {
@@ -561,7 +939,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("plan", "calibration", "training-scale", "full-scout", "sep-micro", "callback-dataset"),
+        choices=(
+            "plan",
+            "calibration",
+            "training-scale",
+            "full-scout",
+            "sep-micro",
+            "callback-dataset",
+            "hlt-fixed-ss-smoke",
+        ),
         default="calibration",
     )
     parser.add_argument("--device", choices=("auto", "cpu", "gpu"), default="auto")
@@ -593,6 +979,38 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sep-tol", type=float, default=1e-8)
     parser.add_argument("--sep-accept-tol", type=float, default=1e-5)
     parser.add_argument("--sep-reps", type=int, default=3)
+    parser.add_argument(
+        "--hlt-model-source",
+        type=Path,
+        default=ROOT / "benchmarks" / "model_sources" / "Smets_Wouters_2007_HLT.jl",
+    )
+    parser.add_argument(
+        "--hlt-payload",
+        type=Path,
+        default=ROOT / "benchmarks" / "results" / "test_payloads.json",
+    )
+    parser.add_argument("--hlt-case-name", default="medium_sw07_hlt")
+    parser.add_argument("--hlt-periods", type=int, default=2)
+    parser.add_argument("--hlt-theta-draws", type=int, default=2)
+    parser.add_argument("--hlt-shock-scale", type=float, default=0.02)
+    parser.add_argument("--hlt-parameter-perturbation", type=float, default=1e-6)
+    parser.add_argument(
+        "--hlt-steady-state-mode",
+        choices=("fixed-reference", "solve", "solve-or-reference"),
+        default="fixed-reference",
+        help=(
+            "How the actual HLT smoke runner handles parameter-dependent steady states. "
+            "'fixed-reference' preserves the Julia payload steady state; 'solve' requires "
+            "a successful Python steady-state solve for each theta draw; "
+            "'solve-or-reference' records failures and falls back to the reference."
+        ),
+    )
+    parser.add_argument("--hlt-steady-state-tol", type=float, default=1e-10)
+    parser.add_argument("--hlt-steady-state-max-iter", type=int, default=100)
+    parser.add_argument("--hlt-likelihood-periods", type=int, default=1)
+    parser.add_argument("--hlt-surrogate-inversion-maxit", type=int, default=4)
+    parser.add_argument("--hlt-surrogate-inversion-tol", type=float, default=1e-5)
+    parser.add_argument("--hlt-surrogate-inversion-lambda", type=float, default=1e-4)
     parser.add_argument("--output", type=Path)
     return _apply_scenario_defaults(parser.parse_args(argv))
 
@@ -625,6 +1043,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         payload["results"]["sep_micro"] = run_sep_micro_profile(args)
     elif args.mode == "callback-dataset":
         payload["results"]["callback_dataset"] = run_callback_dataset_profile(args, shape)
+    elif args.mode == "hlt-fixed-ss-smoke":
+        payload["results"]["hlt_fixed_ss_smoke"] = run_hlt_fixed_steady_state_profile(args)
     else:
         raise ValueError(f"Unsupported mode {args.mode!r}.")
 

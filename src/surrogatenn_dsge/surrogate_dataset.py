@@ -128,6 +128,30 @@ def _coerce_shocks(shocks: Any, *, n_theta: int) -> np.ndarray:
     return np.asarray(out, dtype=np.float64)
 
 
+def _coerce_initial_states(initial_state: Any, *, n_theta: int) -> np.ndarray:
+    array = np.asarray(initial_state, dtype=np.float64)
+    if array.ndim == 1:
+        state = _as_vector(array, label="initial_state")
+        return np.broadcast_to(state[None, :], (int(n_theta), state.shape[0])).copy()
+    if array.ndim != 2:
+        raise ValueError(
+            "initial_state must have shape (d_state,), (n_theta, d_state), "
+            f"or (d_state, n_theta); got shape {array.shape}."
+        )
+    if array.shape[0] == int(n_theta):
+        out = array
+    elif array.shape[1] == int(n_theta):
+        out = array.T
+    else:
+        raise ValueError(
+            "Rank-2 initial_state must put theta draws on axis 0 or axis 1; "
+            f"got shape {array.shape} for n_theta={n_theta}."
+        )
+    if not np.isfinite(out).all():
+        raise ValueError("initial_state contains non-finite values.")
+    return np.asarray(out, dtype=np.float64).copy()
+
+
 def _target_vector(
     target_mode: str,
     fom_obs: np.ndarray,
@@ -193,7 +217,7 @@ def build_surrogate_residual_dataset(
     if theta.shape[1] < 1:
         raise ValueError("theta_design must contain at least one theta draw.")
     shock_cube = _coerce_shocks(shocks, n_theta=theta.shape[1])
-    state0 = _as_vector(initial_state, label="initial_state")
+    initial_states = _coerce_initial_states(initial_state, n_theta=theta.shape[1])
     if int(min_stable_periods) < 0:
         raise ValueError(f"min_stable_periods must be nonnegative, got {min_stable_periods}.")
 
@@ -210,7 +234,7 @@ def build_surrogate_residual_dataset(
     for theta_idx in range(theta.shape[1]):
         theta_t = theta[:, theta_idx]
         shock_matrix = shock_cube[theta_idx]
-        state = state0.copy()
+        state = initial_states[theta_idx].copy()
         period_records: list[tuple[np.ndarray, np.ndarray, np.ndarray, int]] = []
         for period in range(shock_matrix.shape[1]):
             shock_t = shock_matrix[:, period]

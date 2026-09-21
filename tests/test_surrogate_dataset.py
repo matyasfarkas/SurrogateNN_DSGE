@@ -107,6 +107,37 @@ def test_fom_obs_target_stores_rom_observation_as_baseline() -> None:
     np.testing.assert_allclose(dataset.Y_rom[:, 0], rom_obs, rtol=0, atol=1e-12)
 
 
+def test_initial_state_can_vary_by_theta_draw() -> None:
+    theta = np.asarray(
+        [
+            [0.1, 0.2, 0.3],
+            [1.0, 1.5, 1.75],
+        ],
+        dtype=np.float64,
+    )
+    initial_states = np.asarray(
+        [
+            [1.0, -2.0, 0.3],
+            [-0.5, 0.25, 0.9],
+        ],
+        dtype=np.float64,
+    )
+    dataset = build_surrogate_residual_dataset(
+        _rom_predict,
+        _fom_predict,
+        initial_state=initial_states,
+        shocks=np.asarray([[0.3]], dtype=np.float64),
+        theta_design=theta,
+        target_mode="residual_obs",
+    )
+
+    assert dataset.X.shape == (5, 3)
+    np.testing.assert_allclose(dataset.X[:2, 0], initial_states[:, 0], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(dataset.X[:2, 1], initial_states[:, 1], rtol=0, atol=1e-12)
+    np.testing.assert_allclose(dataset.X[:2, 2], initial_states[:, 2], rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(dataset.theta_ids, np.asarray([0, 1, 2]))
+
+
 def test_samples_per_theta_uses_julia_like_sampling_with_replacement() -> None:
     shocks = np.asarray([[0.1, 0.2, 0.3, 0.4]], dtype=np.float64)
     dataset = build_surrogate_residual_dataset(
