@@ -189,9 +189,11 @@ from .parameter_sampling import (
     summarize_parameter_design,
 )
 from .sep import (
+    BatchedSEPSolution,
     SEPConfig,
     SEPSolution,
     gauss_hermite_rule,
+    solve_batched_stochastic_extended_path_residual_expectation,
     solve_stochastic_extended_path,
     solve_stochastic_extended_path_residual_expectation,
 )
@@ -336,6 +338,7 @@ __all__ = [
     "ParameterDesign",
     "ParameterSpec",
     "QuadraticMatrixEquationResult",
+    "BatchedSEPSolution",
     "BatchedSurrogateRolloutArrays",
     "RegimeSwitchConfig",
     "ResBlock",
@@ -559,6 +562,7 @@ __all__ = [
     "solve_third_order_stochastic_steady_state",
     "solve_steady_state",
     "solve_steady_state_jax",
+    "solve_batched_stochastic_extended_path_residual_expectation",
     "solve_stochastic_extended_path",
     "solve_stochastic_extended_path_residual_expectation",
     "solve_lyapunov_equation",

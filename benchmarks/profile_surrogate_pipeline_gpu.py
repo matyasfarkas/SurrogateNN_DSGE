@@ -44,6 +44,7 @@ from surrogatenn_dsge import (
     parse_macro_model,
     predict_frozen_batch,
     resolve_jax_device,
+    solve_batched_stochastic_extended_path_residual_expectation,
     solve_stochastic_extended_path_residual_expectation,
     summarize_surrogate_dataset,
     surrogate_inversion_loglik_per_period,
@@ -666,6 +667,106 @@ def run_sep_micro_profile(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def run_batched_sep_micro_profile(args: argparse.Namespace) -> dict[str, Any]:
+    target_device = None if args.device == "auto" else resolve_jax_device(args.device)
+    state_dim = int(args.sep_state_dim)
+    shock_dim = int(args.sep_shock_dim)
+    batch_size = int(args.sep_batch_size)
+    if batch_size < 1:
+        raise ValueError(f"sep_batch_size must be positive, got {batch_size}.")
+    rng = np.random.default_rng(int(args.seed) + 71)
+    B_np = rng.normal(scale=0.06, size=(state_dim, shock_dim))
+    initial_np = rng.normal(scale=0.04, size=(batch_size, state_dim))
+    terminal_np = np.zeros((state_dim,), dtype=np.float64)
+    deterministic_np = rng.normal(scale=0.02, size=(batch_size, int(args.sep_periods), shock_dim))
+    if int(args.sep_periods) > 1:
+        deterministic_np[:, 1:, :] *= 0.25
+    rho_np = np.linspace(0.80, 0.88, batch_size, dtype=np.float64)[:, None]
+
+    def put(values: Any) -> jax.Array:
+        array = jnp.asarray(values, dtype=jnp.float64)
+        return array if target_device is None else jax.device_put(array, target_device)
+
+    B = put(B_np)
+    initial = put(initial_np)
+    terminal = put(terminal_np)
+    deterministic = put(deterministic_np)
+    rho = put(rho_np)
+    gamma = jnp.asarray(0.05, dtype=jnp.float64)
+
+    def conditional_residual(
+        prev_state: jax.Array,
+        current_state: jax.Array,
+        next_state: jax.Array,
+        current_shock: jax.Array,
+        params: jax.Array,
+    ) -> jax.Array:
+        target = params[0] * prev_state + gamma * jnp.tanh(next_state) + B @ current_shock
+        return current_state - target
+
+    config = SEPConfig(
+        periods=int(args.sep_periods),
+        branching_order=int(args.sep_order),
+        nnodes=int(args.sep_nnodes),
+        sparse_tree=bool(args.sep_sparse_tree),
+        max_iter=int(args.sep_max_iter),
+        tol=float(args.sep_tol),
+        accept_tol=float(args.sep_accept_tol),
+        line_search=True,
+        line_search_batch=True,
+        jit=True,
+        vectorize_residual=True,
+    )
+    reps = max(1, int(args.sep_reps))
+    times: list[float] = []
+    last_solution: Any = None
+    for _ in range(reps):
+        started = time.perf_counter()
+        last_solution = solve_batched_stochastic_extended_path_residual_expectation(
+            conditional_residual,
+            initial_state=initial,
+            terminal_state=terminal,
+            shock_dim=shock_dim,
+            deterministic_shocks=deterministic,
+            config=config,
+            params=rho,
+        )
+        _block_until_ready_tree(last_solution)
+        times.append(time.perf_counter() - started)
+    assert last_solution is not None
+    accepted_count = int(np.count_nonzero(np.asarray(last_solution.accepted, dtype=bool)))
+    converged_count = int(np.count_nonzero(np.asarray(last_solution.converged, dtype=bool)))
+    median_s = float(statistics.median(times))
+    return {
+        "status": "ok",
+        "kind": "batched_sep_sparse_tree_microbenchmark",
+        "backend": jax.default_backend(),
+        "target_device": None if target_device is None else str(target_device),
+        "batch_size": batch_size,
+        "state_dim": state_dim,
+        "shock_dim": shock_dim,
+        "periods": int(config.periods),
+        "branching_order": int(config.branching_order),
+        "nnodes": int(config.nnodes),
+        "sparse_tree": bool(config.sparse_tree),
+        "reps": reps,
+        "first_s": float(times[0]),
+        "median_s": median_s,
+        "solves_per_s_median": batch_size / median_s if median_s > 0 else math.inf,
+        "accepted_count": accepted_count,
+        "converged_count": converged_count,
+        "max_residual_norm": float(np.max(np.asarray(last_solution.residual_norm))),
+        "mean_path_shape": list(last_solution.mean_path.shape),
+        "stacked_states_shape": list(last_solution.stacked_states.shape),
+        "group_counts": [int(x) for x in last_solution.group_counts],
+        "jacobian_method": str(last_solution.jacobian_method),
+        "caveat": (
+            "Synthetic batched conditional-residual SEP benchmark. It validates fixed-shape GPU SEP mechanics, "
+            "not parsed HLT dynamic equations or OBC enforcement."
+        ),
+    }
+
+
 def _load_hlt_payload_case(args: argparse.Namespace) -> dict[str, Any]:
     payload_path = Path(args.hlt_payload)
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
@@ -1214,6 +1315,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "full-scout",
             "batched-training",
             "sep-micro",
+            "batched-sep-micro",
             "callback-dataset",
             "hlt-fixed-ss-smoke",
         ),
@@ -1250,6 +1352,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sep-tol", type=float, default=1e-8)
     parser.add_argument("--sep-accept-tol", type=float, default=1e-5)
     parser.add_argument("--sep-reps", type=int, default=3)
+    parser.add_argument("--sep-batch-size", type=int, default=64)
     parser.add_argument(
         "--hlt-model-source",
         type=Path,
@@ -1319,6 +1422,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         payload["results"]["batched_training"] = run_batched_training_profile(args, shape)
     elif args.mode == "sep-micro":
         payload["results"]["sep_micro"] = run_sep_micro_profile(args)
+    elif args.mode == "batched-sep-micro":
+        payload["results"]["batched_sep_micro"] = run_batched_sep_micro_profile(args)
     elif args.mode == "callback-dataset":
         payload["results"]["callback_dataset"] = run_callback_dataset_profile(args, shape)
     elif args.mode == "hlt-fixed-ss-smoke":

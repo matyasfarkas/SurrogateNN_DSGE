@@ -152,3 +152,39 @@ def test_batched_training_profile_tiny_cpu_smoke() -> None:
     assert result["sample_mask_false_count"] > 0
     assert result["masked_sample_count"] == result["sample_mask_false_count"]
     assert result["train_s"] >= 0.0
+
+
+def test_batched_sep_micro_profile_tiny_cpu_smoke() -> None:
+    mod = _load_profile_module()
+    args = mod.parse_args(
+        [
+            "--mode",
+            "batched-sep-micro",
+            "--device",
+            "cpu",
+            "--sep-batch-size",
+            "3",
+            "--sep-state-dim",
+            "2",
+            "--sep-shock-dim",
+            "1",
+            "--sep-periods",
+            "3",
+            "--sep-order",
+            "1",
+            "--sep-nnodes",
+            "3",
+            "--sep-max-iter",
+            "8",
+            "--sep-reps",
+            "1",
+        ]
+    )
+    result = mod.run_batched_sep_micro_profile(args)
+
+    assert result["status"] == "ok"
+    assert result["kind"] == "batched_sep_sparse_tree_microbenchmark"
+    assert result["batch_size"] == 3
+    assert result["accepted_count"] == 3
+    assert result["converged_count"] == 3
+    assert result["median_s"] >= 0.0

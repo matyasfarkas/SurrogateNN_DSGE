@@ -6,6 +6,7 @@ import surrogatenn_dsge.sep as sep_module
 
 from surrogatenn_dsge import (
     SEPConfig,
+    solve_batched_stochastic_extended_path_residual_expectation,
     gauss_hermite_rule,
     solve_stochastic_extended_path,
     solve_stochastic_extended_path_residual_expectation,
@@ -576,6 +577,129 @@ def test_sep_batched_line_search_matches_sequential_line_search() -> None:
         rtol=1e-10,
         atol=1e-10,
     )
+
+
+def test_batched_sep_residual_expectation_matches_sequential_draws() -> None:
+    deterministic_shocks = jnp.asarray(
+        [
+            [[0.12, -0.03], [0.04, 0.01], [0.00, 0.02], [0.00, 0.00]],
+            [[-0.05, 0.02], [0.03, -0.04], [0.01, 0.00], [0.00, 0.00]],
+            [[0.08, 0.04], [-0.02, 0.01], [0.00, -0.01], [0.00, 0.00]],
+        ],
+        dtype=jnp.float64,
+    )
+    initial_states = jnp.asarray(
+        [[0.03, -0.02], [0.01, 0.04], [-0.02, 0.01]],
+        dtype=jnp.float64,
+    )
+    terminal_state = jnp.zeros((2,), dtype=jnp.float64)
+    params = jnp.asarray(
+        [
+            [0.18, 0.16],
+            [0.21, 0.14],
+            [0.17, 0.19],
+        ],
+        dtype=jnp.float64,
+    )
+
+    def conditional_residual(y_prev, y_curr, y_next, shock, theta):
+        target = jnp.asarray(
+            [
+                theta[0] * y_prev[0]
+                + 0.06 * y_prev[1]
+                + 0.18 * jnp.tanh(y_next[0])
+                + 0.05 * y_next[1]
+                - 0.04 * y_curr[0] ** 2
+                + 0.14 * shock[0],
+                -0.02 * y_prev[0]
+                + theta[1] * y_prev[1]
+                + 0.03 * y_next[0]
+                + 0.14 * jnp.tanh(y_next[1])
+                - 0.03 * y_curr[1] ** 2
+                - 0.10 * shock[1],
+            ],
+            dtype=jnp.float64,
+        )
+        return y_curr - target
+
+    config = SEPConfig(
+        periods=4,
+        branching_order=2,
+        nnodes=3,
+        sparse_tree=True,
+        tol=1e-10,
+        max_iter=20,
+        jit=True,
+        vectorize_residual=True,
+        line_search_batch=True,
+    )
+    batched = solve_batched_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=initial_states,
+        terminal_state=terminal_state,
+        shock_dim=2,
+        deterministic_shocks=deterministic_shocks,
+        config=config,
+        params=params,
+    )
+
+    assert np.all(np.asarray(batched.converged))
+    assert np.all(np.asarray(batched.accepted))
+    for draw in range(deterministic_shocks.shape[0]):
+        sequential = solve_stochastic_extended_path_residual_expectation(
+            conditional_residual,
+            initial_state=initial_states[draw],
+            terminal_state=terminal_state,
+            shock_dim=2,
+            deterministic_shocks=deterministic_shocks[draw],
+            config=config,
+            params=params[draw],
+        )
+        assert sequential.converged
+        np.testing.assert_allclose(
+            np.asarray(batched.mean_path[draw]),
+            np.asarray(sequential.mean_path),
+            rtol=1e-9,
+            atol=1e-10,
+        )
+        np.testing.assert_allclose(
+            np.asarray(batched.stacked_states[draw]),
+            np.asarray(sequential.stacked_states),
+            rtol=1e-9,
+            atol=1e-10,
+        )
+
+
+def test_batched_sep_reports_per_draw_acceptance_failures() -> None:
+    deterministic_shocks = jnp.zeros((2, 2, 1), dtype=jnp.float64)
+
+    def conditional_residual(y_prev, y_curr, y_next, shock, theta):
+        del y_prev, y_curr, y_next, shock
+        return theta
+
+    config = SEPConfig(
+        periods=2,
+        branching_order=0,
+        nnodes=3,
+        tol=1e-10,
+        accept_tol=1e-8,
+        max_iter=1,
+        jit=True,
+        vectorize_residual=True,
+    )
+    solution = solve_batched_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=jnp.zeros((2, 1), dtype=jnp.float64),
+        terminal_state=jnp.zeros((1,), dtype=jnp.float64),
+        shock_dim=1,
+        deterministic_shocks=deterministic_shocks,
+        config=config,
+        params=jnp.asarray([[0.0], [1.0]], dtype=jnp.float64),
+    )
+
+    np.testing.assert_array_equal(np.asarray(solution.accepted), np.asarray([True, False]))
+    np.testing.assert_array_equal(np.asarray(solution.converged), np.asarray([True, False]))
+    assert np.asarray(solution.residual_norm)[1] > config.accept_tol
 
 
 def test_sep_warm_start_accepts_previous_solution_and_finishes_immediately() -> None:

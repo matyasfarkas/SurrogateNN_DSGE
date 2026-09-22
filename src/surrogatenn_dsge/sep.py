@@ -33,6 +33,17 @@ class SEPSolution(NamedTuple):
     jacobian_method: str
 
 
+class BatchedSEPSolution(NamedTuple):
+    stacked_states: jax.Array
+    mean_path: jax.Array
+    residual_norm: jax.Array
+    converged: jax.Array
+    accepted: jax.Array
+    iterations: jax.Array
+    group_counts: tuple[int, ...]
+    jacobian_method: str
+
+
 class _SEPTreeMetadata(NamedTuple):
     parent_indices: tuple[Optional[np.ndarray], ...]
     current_shocks: tuple[jax.Array, ...]
@@ -982,6 +993,352 @@ def solve_stochastic_extended_path_residual_expectation(
         residual_fn=None,
         conditional_residual_fn=conditional_residual_fn,
         jacobian_fn=jacobian_fn,
+    )
+
+
+def solve_batched_stochastic_extended_path_residual_expectation(
+    conditional_residual_fn: SEPConditionalResidualFn,
+    *,
+    initial_state: Sequence[Sequence[float]] | Sequence[float],
+    terminal_state: Sequence[Sequence[float]] | Sequence[float],
+    shock_dim: int,
+    deterministic_shocks: Sequence[Sequence[Sequence[float]]],
+    config: SEPConfig = SEPConfig(),
+    params: object = None,
+    initial_guess: Optional[Sequence[Sequence[float]]] = None,
+) -> BatchedSEPSolution:
+    """Solve a fixed-shape batch of conditional-residual SEP problems with JAX.
+
+    This is the first GPU-native target-generation path: it batches independent
+    SEP Newton solves with identical dimensions/configuration using JAX arrays,
+    ``vmap``-ed residuals/Jacobians, and batched line-search evaluations.
+
+    Current scope is intentionally explicit: Gauss-Hermite expectations,
+    autodiff Jacobians, no HMC, no custom subgradient/OBC enforcement, and no
+    fallback solver. Those nonlinear/OBC layers still need separate batching.
+    """
+
+    _validate_sep_config(config, shock_dim=shock_dim)
+    if config.expectation_method != "gauss_hermite":
+        raise NotImplementedError("Batched SEP currently supports expectation_method='gauss_hermite' only.")
+    if config.jacobian_method not in {"auto", "autodiff"}:
+        raise NotImplementedError("Batched SEP currently supports autodiff Jacobians only.")
+    if config.fallback_solver is not None:
+        raise NotImplementedError("Batched SEP currently does not support fallback_solver.")
+
+    deterministic = jnp.asarray(deterministic_shocks, dtype=jnp.float64)
+    if deterministic.ndim != 3 or deterministic.shape[1:] != (config.periods, shock_dim):
+        raise ValueError(
+            "deterministic_shocks must have shape "
+            f"(batch, {config.periods}, {shock_dim}), got {deterministic.shape}."
+        )
+    batch_size = int(deterministic.shape[0])
+    if batch_size < 1:
+        raise ValueError("deterministic_shocks must contain at least one batch element.")
+
+    initial_state_arr = jnp.asarray(initial_state, dtype=jnp.float64)
+    if initial_state_arr.ndim == 1:
+        initial_state_arr = jnp.broadcast_to(initial_state_arr[None, :], (batch_size, initial_state_arr.shape[0]))
+    if initial_state_arr.ndim != 2 or int(initial_state_arr.shape[0]) != batch_size:
+        raise ValueError(
+            "initial_state must have shape (state_dim,) or (batch, state_dim), "
+            f"got {initial_state_arr.shape}."
+        )
+    terminal_state_arr = jnp.asarray(terminal_state, dtype=jnp.float64)
+    if terminal_state_arr.ndim == 1:
+        terminal_state_arr = jnp.broadcast_to(terminal_state_arr[None, :], initial_state_arr.shape)
+    if terminal_state_arr.shape != initial_state_arr.shape:
+        raise ValueError(
+            "terminal_state must have shape (state_dim,) or match initial_state, "
+            f"got {terminal_state_arr.shape} vs {initial_state_arr.shape}."
+        )
+    state_dim = int(initial_state_arr.shape[1])
+
+    rule = (
+        _gauss_hermite_sparse_rule(config.nnodes, shock_dim, config.shock_scale)
+        if config.sparse_tree
+        else gauss_hermite_rule(config.nnodes, shock_dim, config.shock_scale)
+    )
+    num_nodes = int(rule.weights.shape[0])
+    counts = _group_counts(
+        config.periods,
+        config.branching_order,
+        num_nodes,
+        sparse_tree=config.sparse_tree,
+    )
+    probabilities = _group_probabilities(
+        rule,
+        config.periods,
+        config.branching_order,
+        sparse_tree=config.sparse_tree,
+    )
+    zero_deterministic = jnp.zeros((config.periods, shock_dim), dtype=jnp.float64)
+    tree_metadata = _precompute_sep_tree_metadata(
+        rule=rule,
+        deterministic=zero_deterministic,
+        counts=counts,
+        periods=config.periods,
+        branching_order=config.branching_order,
+        num_nodes=num_nodes,
+        shock_dim=shock_dim,
+        sparse_tree=config.sparse_tree,
+        use_hmc=False,
+    )
+    tree_array_metadata = _precompute_sep_tree_array_metadata(
+        rule=rule,
+        metadata=tree_metadata,
+        counts=counts,
+        periods=config.periods,
+        shock_dim=shock_dim,
+    )
+
+    time_offsets = [0]
+    for t in range(1, config.periods + 1):
+        time_offsets.append(time_offsets[-1] + counts[t] * state_dim)
+    expected_stacked_size = time_offsets[-1]
+
+    def unflatten(stacked: jax.Array) -> tuple[jax.Array, ...]:
+        values = []
+        for t in range(1, config.periods + 1):
+            start = time_offsets[t - 1]
+            end = time_offsets[t]
+            values.append(jnp.reshape(stacked[start:end], (counts[t], state_dim)))
+        return tuple(values)
+
+    def unflatten_batch(stacked_batch: jax.Array) -> tuple[jax.Array, ...]:
+        values = []
+        for t in range(1, config.periods + 1):
+            start = time_offsets[t - 1]
+            end = time_offsets[t]
+            values.append(jnp.reshape(stacked_batch[:, start:end], (batch_size, counts[t], state_dim)))
+        return tuple(values)
+
+    if initial_guess is None:
+        guess = jnp.concatenate(
+            [
+                jnp.reshape(
+                    jnp.broadcast_to(
+                        terminal_state_arr[:, None, :],
+                        (batch_size, counts[t], state_dim),
+                    ),
+                    (batch_size, counts[t] * state_dim),
+                )
+                for t in range(1, config.periods + 1)
+            ],
+            axis=1,
+        )
+    else:
+        guess_arr = jnp.asarray(initial_guess, dtype=jnp.float64)
+        if guess_arr.shape[0] != batch_size:
+            raise ValueError(
+                "initial_guess must have one leading batch entry per deterministic_shocks draw, "
+                f"got {guess_arr.shape[0]} vs {batch_size}."
+            )
+        guess = jnp.reshape(guess_arr, (batch_size, -1))
+        if guess.shape[1] != expected_stacked_size:
+            raise ValueError(
+                "initial_guess must flatten per draw to shape "
+                f"({expected_stacked_size},), got {guess.shape[1]}."
+            )
+
+    def weighted_child_sum(terms: jax.Array, weights: jax.Array) -> jax.Array:
+        weight_shape = (weights.shape[0],) + (1,) * (terms.ndim - 1)
+        return jnp.sum(jnp.reshape(weights, weight_shape) * terms, axis=0)
+
+    def residual_single(
+        stacked: jax.Array,
+        deterministic_one: jax.Array,
+        initial_one: jax.Array,
+        terminal_one: jax.Array,
+        params_one: object,
+    ) -> jax.Array:
+        states_by_time = unflatten(stacked)
+        residuals = []
+        for t in range(1, config.periods + 1):
+            current_states = states_by_time[t - 1]
+            if t == 1:
+                prev_states = jnp.broadcast_to(initial_one, (counts[t], state_dim))
+            else:
+                parent_indices = tree_array_metadata.parent_indices[t - 1]
+                prev_states = states_by_time[t - 2][parent_indices]
+            current_shocks = tree_array_metadata.current_shocks[t - 1] + deterministic_one[t - 1][None, :]
+
+            if t == config.periods:
+                terminal_states = jnp.broadcast_to(terminal_one, (counts[t], state_dim))
+                residuals.append(
+                    jax.vmap(
+                        lambda prev, current, next_state, shock: conditional_residual_fn(
+                            prev,
+                            current,
+                            next_state,
+                            shock,
+                            params_one,
+                        )
+                    )(prev_states, current_states, terminal_states, current_shocks)
+                )
+                continue
+
+            child_indices = tree_array_metadata.child_indices[t - 1]
+            child_weights = tree_array_metadata.child_weights[t - 1]
+            assert child_indices is not None
+            assert child_weights is not None
+            next_states = states_by_time[t]
+            child_states = next_states[child_indices]
+
+            def group_conditional_residual(
+                prev_state: jax.Array,
+                current_state: jax.Array,
+                current_shock: jax.Array,
+                group_child_states: jax.Array,
+                group_weights: jax.Array,
+            ) -> jax.Array:
+                terms = jax.vmap(
+                    lambda next_state: conditional_residual_fn(
+                        prev_state,
+                        current_state,
+                        next_state,
+                        current_shock,
+                        params_one,
+                    )
+                )(group_child_states)
+                return weighted_child_sum(terms, group_weights)
+
+            residuals.append(
+                jax.vmap(group_conditional_residual)(
+                    prev_states,
+                    current_states,
+                    current_shocks,
+                    child_states,
+                    child_weights,
+                )
+            )
+        return jnp.concatenate([period.reshape(-1) for period in residuals], axis=0)
+
+    if params is None:
+        residual_batch = jax.jit(
+            jax.vmap(
+                lambda stacked, deterministic_one, initial_one, terminal_one: residual_single(
+                    stacked,
+                    deterministic_one,
+                    initial_one,
+                    terminal_one,
+                    None,
+                )
+            )
+        )
+        jacobian_batch = jax.jit(
+            jax.vmap(
+                jax.jacobian(
+                    lambda stacked, deterministic_one, initial_one, terminal_one: residual_single(
+                        stacked,
+                        deterministic_one,
+                        initial_one,
+                        terminal_one,
+                        None,
+                    ),
+                    argnums=0,
+                )
+            )
+        )
+    else:
+        params_batch = jax.tree_util.tree_map(lambda value: jnp.asarray(value, dtype=jnp.float64), params)
+        residual_batch = jax.jit(jax.vmap(residual_single))
+        jacobian_batch = jax.jit(jax.vmap(jax.jacobian(residual_single, argnums=0)))
+
+    def eval_residual(stacked_batch: jax.Array) -> jax.Array:
+        if params is None:
+            return residual_batch(stacked_batch, deterministic, initial_state_arr, terminal_state_arr)
+        return residual_batch(stacked_batch, deterministic, initial_state_arr, terminal_state_arr, params_batch)
+
+    def eval_jacobian(stacked_batch: jax.Array) -> jax.Array:
+        if params is None:
+            return jacobian_batch(stacked_batch, deterministic, initial_state_arr, terminal_state_arr)
+        return jacobian_batch(stacked_batch, deterministic, initial_state_arr, terminal_state_arr, params_batch)
+
+    def solve_direction_batch(jacobian: jax.Array, residual: jax.Array, lambda_values: jax.Array) -> jax.Array:
+        return jax.vmap(
+            lambda jac, res, lam: _solve_sep_newton_direction(
+                jac,
+                res,
+                lambda_value=lam,
+                solver=config.linear_solver,
+            )
+        )(jacobian, residual, lambda_values)
+
+    solve_direction_batch_jit = jax.jit(solve_direction_batch)
+    line_search_alphas = _sep_line_search_alphas(config)
+    current = guess
+    current_lambda = jnp.full((batch_size,), float(config.newton_regularization), dtype=jnp.float64)
+    iterations = jnp.zeros((batch_size,), dtype=jnp.int32)
+    accept_threshold = config.tol if config.accept_tol is None else float(config.accept_tol)
+
+    for _ in range(1, config.max_iter + 1):
+        residual = eval_residual(current)
+        residual_norm = jnp.max(jnp.abs(residual), axis=1)
+        active = residual_norm >= float(config.tol)
+        jacobian = eval_jacobian(current)
+        step = solve_direction_batch_jit(jacobian, residual, current_lambda)
+        finite_step = jnp.all(jnp.isfinite(step), axis=1)
+
+        candidate = current
+        candidate_norm = residual_norm
+        accepted_step = jnp.zeros((batch_size,), dtype=bool)
+        if config.line_search:
+            for alpha in tuple(float(value) for value in np.asarray(line_search_alphas)):
+                trial = current + float(alpha) * step
+                trial_residual = eval_residual(trial)
+                trial_norm = jnp.max(jnp.abs(trial_residual), axis=1)
+                improving = (
+                    active
+                    & finite_step
+                    & (~accepted_step)
+                    & jnp.isfinite(trial_norm)
+                    & (trial_norm < residual_norm)
+                )
+                candidate = jnp.where(improving[:, None], trial, candidate)
+                candidate_norm = jnp.where(improving, trial_norm, candidate_norm)
+                accepted_step = accepted_step | improving
+        else:
+            trial = current + step
+            trial_residual = eval_residual(trial)
+            trial_norm = jnp.max(jnp.abs(trial_residual), axis=1)
+            accepted_step = active & finite_step & jnp.isfinite(trial_norm)
+            candidate = jnp.where(accepted_step[:, None], trial, candidate)
+            candidate_norm = jnp.where(accepted_step, trial_norm, candidate_norm)
+
+        current = jnp.where(active[:, None], candidate, current)
+        iterations = iterations + (active & accepted_step).astype(jnp.int32)
+        current_lambda = jnp.where(
+            active & accepted_step & (candidate_norm < residual_norm),
+            jnp.maximum(current_lambda / float(config.lm_lambda_scale), float(config.lm_lambda_min)),
+            current_lambda,
+        )
+        current_lambda = jnp.where(
+            active & (~accepted_step),
+            jnp.minimum(current_lambda * float(config.lm_lambda_scale), float(config.lm_lambda_max)),
+            current_lambda,
+        )
+
+    final_residual = eval_residual(current)
+    residual_norm = jnp.max(jnp.abs(final_residual), axis=1)
+    converged = residual_norm < float(config.tol)
+    accepted = jnp.isfinite(residual_norm) & (residual_norm <= float(accept_threshold))
+
+    states_by_time_batch = unflatten_batch(current)
+    mean_path_blocks = [initial_state_arr]
+    for t in range(1, config.periods + 1):
+        weighted = probabilities[t][None, :, None] * states_by_time_batch[t - 1]
+        mean_path_blocks.append(jnp.sum(weighted, axis=1))
+
+    return BatchedSEPSolution(
+        stacked_states=current,
+        mean_path=jnp.stack(mean_path_blocks, axis=2),
+        residual_norm=residual_norm,
+        converged=converged,
+        accepted=accepted,
+        iterations=iterations,
+        group_counts=counts,
+        jacobian_method="autodiff",
     )
 
 
