@@ -29,6 +29,18 @@ end
 """
 
 
+PARAMETER_BATCH_SEP_SOURCE = """
+@model parameter_batch_sep begin
+    y[0] = rho * y[-1] + (1-rho) * mu + u[x]
+end
+
+@parameters parameter_batch_sep begin
+    rho = 0.25
+    mu = 1.0
+end
+"""
+
+
 def test_evaluate_dynamic_residual_matches_manual_equation() -> None:
     model = parse_macro_model(NONLINEAR_SEP_SOURCE)
 
@@ -156,6 +168,73 @@ def test_batched_parsed_model_sep_accepts_named_shock_batches() -> None:
         rtol=1e-9,
         atol=1e-10,
     )
+
+
+def test_batched_parsed_model_sep_batches_parameters_and_steady_states() -> None:
+    model = parse_macro_model(PARAMETER_BATCH_SEP_SOURCE)
+    config = SEPConfig(periods=3, branching_order=1, nnodes=3, tol=1e-10, max_iter=20)
+    name_to_idx = {name: idx for idx, name in enumerate(model.parameter_names)}
+    params = np.zeros((3, len(model.parameter_names)), dtype=np.float64)
+    params[:, name_to_idx["rho"]] = np.asarray([0.20, 0.35, 0.50], dtype=np.float64)
+    params[:, name_to_idx["mu"]] = np.asarray([0.9, 1.1, 1.3], dtype=np.float64)
+    steady_states = params[:, name_to_idx["mu"]][:, None]
+    deterministic = np.asarray(
+        [
+            [[0.10], [0.00], [0.00]],
+            [[-0.05], [0.02], [0.00]],
+            [[0.03], [-0.01], [0.02]],
+        ],
+        dtype=np.float64,
+    )
+
+    batched = solve_batched_stochastic_extended_path_model(
+        model,
+        parameter_values=params,
+        steady_state=steady_states,
+        initial_state=steady_states,
+        terminal_state=steady_states,
+        config=config,
+        deterministic_shocks=deterministic,
+    )
+
+    assert batched.parameter_values.shape == params.shape
+    assert batched.steady_state.shape == (3, 1)
+    assert np.all(np.asarray(batched.solution.accepted, dtype=bool))
+    for draw in range(params.shape[0]):
+        sequential = solve_stochastic_extended_path_model(
+            model,
+            parameter_values=params[draw],
+            steady_state=steady_states[draw],
+            initial_state=steady_states[draw],
+            terminal_state=steady_states[draw],
+            config=config,
+            deterministic_shocks={"u": deterministic[draw, :, 0]},
+        )
+        np.testing.assert_allclose(
+            np.asarray(batched.solution.mean_path[draw], dtype=np.float64),
+            np.asarray(sequential.solution.mean_path, dtype=np.float64),
+            rtol=1e-9,
+            atol=1e-10,
+        )
+
+
+def test_batched_parsed_model_sep_requires_steady_states_for_parameter_batches() -> None:
+    model = parse_macro_model(PARAMETER_BATCH_SEP_SOURCE)
+    params = np.asarray(
+        [
+            [0.20, 0.90],
+            [0.35, 1.10],
+        ],
+        dtype=np.float64,
+    )
+
+    with pytest.raises(ValueError, match="Batched parameter_values require explicit steady_state"):
+        solve_batched_stochastic_extended_path_model(
+            model,
+            parameter_values=params,
+            config=SEPConfig(periods=2, branching_order=0, tol=1e-10),
+            deterministic_shocks={"u": [[0.10, 0.00], [-0.05, 0.00]]},
+        )
 
 
 def test_parsed_model_sep_hmc_backend_runs() -> None:

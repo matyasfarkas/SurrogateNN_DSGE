@@ -239,3 +239,45 @@ def test_batched_sep_training_profile_tiny_cpu_smoke() -> None:
     assert result["jax_likelihood_status"] == "ok"
     assert result["jax_likelihood_grad_finite"]
     assert result["end_to_end_s"] >= 0.0
+
+
+def test_parsed_batched_sep_training_profile_tiny_cpu_smoke() -> None:
+    mod = _load_profile_module()
+    args = mod.parse_args(
+        [
+            "--mode",
+            "parsed-batched-sep-training",
+            "--device",
+            "cpu",
+            "--sep-batch-size",
+            "3",
+            "--sep-periods",
+            "3",
+            "--sep-order",
+            "1",
+            "--sep-nnodes",
+            "3",
+            "--sep-max-iter",
+            "12",
+            "--epochs",
+            "1",
+            "--batch-size",
+            "4",
+            "--hidden",
+            "8",
+            "--blocks",
+            "0",
+            "--obs-dim",
+            "2",
+        ]
+    )
+    result = mod.run_parsed_batched_sep_training_profile(args)
+
+    assert result["status"] == "ok"
+    assert result["kind"] == "parsed_batched_sep_target_training"
+    assert result["batch_size"] == 3
+    assert result["actual_samples"] == 9
+    assert result["sep_accepted_count"] == 3
+    assert result["sep_converged_count"] == 3
+    assert result["train_size"] > 0
+    assert result["end_to_end_s"] >= 0.0

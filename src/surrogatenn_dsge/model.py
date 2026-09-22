@@ -6261,8 +6261,8 @@ class MacroModel:
     def solve_batched_stochastic_extended_path(
         self,
         *,
-        parameter_values: Optional[Sequence[float]] = None,
-        steady_state: Optional[Sequence[float]] = None,
+        parameter_values: Optional[Sequence[Sequence[float]] | Sequence[float]] = None,
+        steady_state: Optional[Sequence[Sequence[float]] | Sequence[float]] = None,
         steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
         steady_state_tol: float = 1e-12,
         steady_state_max_iter: int = 100,
@@ -6278,9 +6278,10 @@ class MacroModel:
         """Solve a fixed-shape batch of parsed-model SEP problems with JAX.
 
         This keeps the MacroModelling-style parser and symbolic residuals, but
-        executes independent shock/initial-state draws through the batched JAX
-        SEP solver. Parameter values and steady state are fixed across the
-        batch in this first GPU target-generation bridge.
+        executes independent parameter/steady-state/shock/initial-state draws
+        through the batched JAX SEP solver. Parameter-specific steady states are
+        not solved inside this routine; provide explicit batched steady states
+        when batching parameter draws that need different steady states.
         """
 
         if len(self._dynamic_expressions) != self.timings.nVars:
@@ -6295,41 +6296,137 @@ class MacroModel:
                 "path for models with OBC shock variables for now."
             )
 
-        deterministic_shock_values = self._coerce_batched_sep_deterministic_shocks(
-            deterministic_shocks,
-            periods=config.periods,
-            batch_size=batch_size,
-        )
-        batch = int(deterministic_shock_values.shape[0])
+        def merge_batch_size(current: Optional[int], candidate: int, *, label: str) -> int:
+            candidate_int = int(candidate)
+            if candidate_int < 1:
+                raise ValueError(f"{label} batch size must be positive, got {candidate}.")
+            if current is None:
+                return candidate_int
+            if candidate_int == 1 or candidate_int == int(current):
+                return int(current)
+            if int(current) == 1:
+                return candidate_int
+            raise ValueError(
+                f"Incompatible batch sizes: {label} has {candidate_int}, expected {current}."
+            )
+
+        n_params = len(self.parameter_names)
+        n_steady = len(self.steady_state_names)
+
+        def coerce_parameter_matrix(
+            values: Optional[Sequence[Sequence[float]] | Sequence[float]],
+        ) -> tuple[np.ndarray, Optional[int], bool]:
+            if values is None:
+                return np.asarray(self.parameter_values, dtype=np.float64)[None, :], None, False
+            array = np.asarray(values, dtype=np.float64)
+            if array.shape == (n_params,):
+                return array[None, :], None, False
+            if array.ndim == 2 and array.shape[1] == n_params:
+                return array, int(array.shape[0]), int(array.shape[0]) > 1
+            if array.ndim == 2 and array.shape[0] == n_params:
+                return array.T, int(array.shape[1]), int(array.shape[1]) > 1
+            raise ValueError(
+                "parameter_values must have shape "
+                f"({n_params},), (batch, {n_params}), or ({n_params}, batch), got {array.shape}."
+            )
+
+        def expand_steady_state_row(row: np.ndarray) -> np.ndarray:
+            if row.shape == (self.timings.nVars,):
+                return row
+            if row.shape == (n_steady,):
+                return self._expand_to_full_steady_state(row)
+            raise ValueError(
+                "steady_state rows must have shape "
+                f"({self.timings.nVars},) or ({n_steady},), got {row.shape}."
+            )
+
+        def coerce_steady_matrix(
+            values: Sequence[Sequence[float]] | Sequence[float],
+        ) -> tuple[np.ndarray, Optional[int]]:
+            array = np.asarray(values, dtype=np.float64)
+            if array.ndim == 1:
+                return expand_steady_state_row(array)[None, :], None
+            if array.ndim == 2 and array.shape[1] in {self.timings.nVars, n_steady}:
+                return np.vstack([expand_steady_state_row(row) for row in array]), int(array.shape[0])
+            if array.ndim == 2 and array.shape[0] in {self.timings.nVars, n_steady}:
+                transposed = array.T
+                return np.vstack([expand_steady_state_row(row) for row in transposed]), int(array.shape[1])
+            raise ValueError(
+                "steady_state must have shape "
+                f"({self.timings.nVars},), ({n_steady},), "
+                f"(batch, {self.timings.nVars}), (batch, {n_steady}), "
+                f"({self.timings.nVars}, batch), or ({n_steady}, batch), got {array.shape}."
+            )
+
+        def infer_state_batch(
+            values: Optional[Sequence[Sequence[float]] | Sequence[float]],
+            *,
+            label: str,
+        ) -> Optional[int]:
+            if values is None:
+                return None
+            array = np.asarray(values, dtype=np.float64)
+            if array.shape == (self.timings.nVars,):
+                return None
+            if array.ndim == 2 and array.shape[1] == self.timings.nVars:
+                return int(array.shape[0])
+            if array.ndim == 2 and array.shape[0] == self.timings.nVars:
+                return int(array.shape[1])
+            raise ValueError(
+                f"{label} must have shape ({self.timings.nVars},), "
+                f"(batch, {self.timings.nVars}), or ({self.timings.nVars}, batch), got {array.shape}."
+            )
+
+        parameter_matrix, parameter_batch, parameter_values_are_batched = coerce_parameter_matrix(parameter_values)
+        batch_hint = int(batch_size) if batch_size is not None else None
+        if batch_hint is not None and batch_hint < 1:
+            raise ValueError(f"batch_size must be positive, got {batch_size}.")
+        if parameter_batch is not None:
+            batch_hint = merge_batch_size(batch_hint, parameter_batch, label="parameter_values")
 
         if steady_state is None:
+            if parameter_values_are_batched:
+                raise ValueError(
+                    "Batched parameter_values require explicit steady_state values; "
+                    "parameter-specific steady-state solves are not batched yet."
+                )
             steady_state_result = self.solve_steady_state(
-                parameter_values=parameter_values,
+                parameter_values=parameter_matrix[0],
                 initial_guess=steady_state_initial_guess,
                 tol=steady_state_tol,
                 max_iter=steady_state_max_iter,
             )
-            full_steady_state = np.asarray(
-                steady_state_result.steady_state,
-                dtype=np.float64,
-            )
-            resolved_parameters = np.asarray(
-                steady_state_result.parameter_values,
-                dtype=np.float64,
-            )
+            steady_matrix = np.asarray(steady_state_result.steady_state, dtype=np.float64)[None, :]
+            parameter_matrix = np.asarray(steady_state_result.parameter_values, dtype=np.float64)[None, :]
         else:
-            full_steady_state = self._coerce_full_steady_state(
-                steady_state,
-                parameter_values=parameter_values,
-            )
-            resolved_parameters = (
-                self._coerce_parameter_values(parameter_values)
-                if parameter_values is not None
-                else np.asarray(
-                    self.resolve_parameter_values(steady_state=full_steady_state),
-                    dtype=np.float64,
-                )
-            )
+            steady_matrix, steady_batch = coerce_steady_matrix(steady_state)
+            if steady_batch is not None:
+                batch_hint = merge_batch_size(batch_hint, steady_batch, label="steady_state")
+            if parameter_values is None:
+                parameter_matrix = np.asarray(self.parameter_values, dtype=np.float64)[None, :]
+
+        for values, label in ((initial_state, "initial_state"), (terminal_state, "terminal_state")):
+            state_batch = infer_state_batch(values, label=label)
+            if state_batch is not None:
+                batch_hint = merge_batch_size(batch_hint, state_batch, label=label)
+
+        deterministic_shock_values = self._coerce_batched_sep_deterministic_shocks(
+            deterministic_shocks,
+            periods=config.periods,
+            batch_size=batch_hint,
+        )
+        batch = int(deterministic_shock_values.shape[0])
+
+        def broadcast_batch(matrix: np.ndarray, *, label: str) -> np.ndarray:
+            array = np.asarray(matrix, dtype=np.float64)
+            if array.shape[0] == batch:
+                return array
+            if array.shape[0] == 1:
+                return np.broadcast_to(array, (batch, array.shape[1])).copy()
+            raise ValueError(f"{label} has batch size {array.shape[0]}, expected {batch}.")
+
+        parameter_matrix = broadcast_batch(parameter_matrix, label="parameter_values")
+        steady_matrix = broadcast_batch(steady_matrix, label="steady_state")
 
         def coerce_batched_state(
             values: Optional[Sequence[Sequence[float]] | Sequence[float]],
@@ -6337,10 +6434,7 @@ class MacroModel:
             label: str,
         ) -> jax.Array:
             if values is None:
-                return jnp.broadcast_to(
-                    jnp.asarray(full_steady_state, dtype=jnp.float64)[None, :],
-                    (batch, self.timings.nVars),
-                )
+                return jnp.asarray(steady_matrix, dtype=jnp.float64)
             array = np.asarray(values, dtype=np.float64)
             if array.shape == (self.timings.nVars,):
                 return jnp.broadcast_to(
@@ -6359,9 +6453,9 @@ class MacroModel:
 
         initial_state_values = coerce_batched_state(initial_state, label="initial_state")
         terminal_state_values = coerce_batched_state(terminal_state, label="terminal_state")
-        parameter_array = jnp.asarray(resolved_parameters, dtype=jnp.float64)
-        steady_reference_values = jnp.asarray(
-            self._steady_reference_values(full_steady_state),
+        parameter_batch_array = jnp.asarray(parameter_matrix, dtype=jnp.float64)
+        steady_reference_batch = jnp.asarray(
+            np.vstack([self._steady_reference_values(row) for row in steady_matrix]),
             dtype=jnp.float64,
         )
 
@@ -6370,15 +6464,16 @@ class MacroModel:
             current_state: jax.Array,
             lead_state: jax.Array,
             current_shock: jax.Array,
-            _params: object,
+            params: object,
         ) -> jax.Array:
+            parameter_values_one, steady_reference_values_one = params
             return self._evaluate_dynamic_residual_with_context(
                 lag_state,
                 current_state,
                 lead_state,
                 current_shock,
-                parameter_values=parameter_array,
-                steady_reference_values=steady_reference_values,
+                parameter_values=parameter_values_one,
+                steady_reference_values=steady_reference_values_one,
             )
 
         solution = solve_batched_stochastic_extended_path_residual_expectation(
@@ -6388,11 +6483,12 @@ class MacroModel:
             shock_dim=self.timings.nExo,
             config=config,
             deterministic_shocks=deterministic_shock_values,
+            params=(parameter_batch_array, steady_reference_batch),
             initial_guess=initial_guess,
         )
         return ParsedModelBatchedSEPResult(
-            steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
-            parameter_values=parameter_array,
+            steady_state=jnp.asarray(steady_matrix, dtype=jnp.float64),
+            parameter_values=parameter_batch_array,
             solution=solution,
         )
 
@@ -8082,8 +8178,8 @@ def solve_stochastic_extended_path_model(
 def solve_batched_stochastic_extended_path_model(
     model: MacroModel,
     *,
-    parameter_values: Optional[Sequence[float]] = None,
-    steady_state: Optional[Sequence[float]] = None,
+    parameter_values: Optional[Sequence[Sequence[float]] | Sequence[float]] = None,
+    steady_state: Optional[Sequence[Sequence[float]] | Sequence[float]] = None,
     steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
     steady_state_tol: float = 1e-12,
     steady_state_max_iter: int = 100,

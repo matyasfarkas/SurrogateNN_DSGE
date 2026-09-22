@@ -41,10 +41,12 @@ from surrogatenn_dsge import (
     build_surrogate_residual_arrays_from_batched_sep_jax,
     build_surrogate_residual_arrays_jax,
     build_surrogate_residual_dataset,
+    fit_surrogate_pipeline_from_batched_sep_jax,
     fit_surrogate_pipeline,
     parse_macro_model,
     predict_frozen_batch,
     resolve_jax_device,
+    solve_batched_stochastic_extended_path_model,
     solve_batched_stochastic_extended_path_residual_expectation,
     solve_stochastic_extended_path_residual_expectation,
     summarize_surrogate_dataset,
@@ -1010,6 +1012,153 @@ def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticH
     }
 
 
+def run_parsed_batched_sep_training_profile(args: argparse.Namespace) -> dict[str, Any]:
+    """Profile parser-backed batched SEP target generation plus training."""
+
+    target_device = None if args.device == "auto" else resolve_jax_device(args.device)
+    model = parse_macro_model(
+        """
+        @model parsed_batched_sep_profile begin
+            y[0] = rho_y * y[-1] + gamma_y * y[1]^2 + u_y[x]
+            z[0] = rho_z * z[-1] + gamma_z * z[1]^2 + cross * y[0] + u_z[x]
+        end
+
+        @parameters parsed_batched_sep_profile begin
+            rho_y = 0.28
+            rho_z = 0.22
+            gamma_y = 0.06
+            gamma_z = 0.04
+            cross = 0.03
+        end
+        """
+    )
+    batch_size = int(args.sep_batch_size)
+    if batch_size < 1:
+        raise ValueError(f"sep_batch_size must be positive, got {batch_size}.")
+    rng = np.random.default_rng(int(args.seed) + 113)
+    base_params = np.asarray(model.parameter_values, dtype=np.float64)
+    parameter_names = tuple(model.parameter_names)
+    name_to_idx = {name: idx for idx, name in enumerate(parameter_names)}
+    draws = np.broadcast_to(base_params[None, :], (batch_size, base_params.size)).copy()
+    grid = np.linspace(-1.0, 1.0, batch_size, dtype=np.float64)
+    draws[:, name_to_idx["rho_y"]] = np.clip(base_params[name_to_idx["rho_y"]] + 0.06 * grid, 0.05, 0.80)
+    draws[:, name_to_idx["rho_z"]] = np.clip(base_params[name_to_idx["rho_z"]] - 0.04 * grid, 0.05, 0.80)
+    draws[:, name_to_idx["gamma_y"]] = base_params[name_to_idx["gamma_y"]] * (1.0 + 0.20 * grid)
+    draws[:, name_to_idx["gamma_z"]] = base_params[name_to_idx["gamma_z"]] * (1.0 - 0.15 * grid)
+    draws[:, name_to_idx["cross"]] = base_params[name_to_idx["cross"]] * (1.0 + 0.10 * np.sin(grid))
+    steady_states = np.zeros((batch_size, model.timings.nVars), dtype=np.float64)
+    deterministic = rng.normal(scale=0.03, size=(batch_size, int(args.sep_periods), model.timings.nExo))
+    if int(args.sep_periods) > 1:
+        deterministic[:, 1:, :] *= 0.35
+
+    def put(values: Any) -> jax.Array:
+        array = jnp.asarray(values, dtype=jnp.float64)
+        return array if target_device is None else jax.device_put(array, target_device)
+
+    config = SEPConfig(
+        periods=int(args.sep_periods),
+        branching_order=int(args.sep_order),
+        nnodes=int(args.sep_nnodes),
+        sparse_tree=bool(args.sep_sparse_tree),
+        max_iter=int(args.sep_max_iter),
+        tol=float(args.sep_tol),
+        accept_tol=float(args.sep_accept_tol),
+        line_search=True,
+        line_search_batch=True,
+        jit=True,
+        vectorize_residual=True,
+    )
+    solve_started = time.perf_counter()
+    parsed_sep = solve_batched_stochastic_extended_path_model(
+        model,
+        parameter_values=put(draws),
+        steady_state=put(steady_states),
+        initial_state=put(steady_states),
+        terminal_state=put(steady_states),
+        config=config,
+        deterministic_shocks=put(deterministic),
+    )
+    _block_until_ready_tree(parsed_sep)
+    solve_s = time.perf_counter() - solve_started
+
+    assemble_train_started = time.perf_counter()
+    theta = jnp.swapaxes(parsed_sep.parameter_values, 0, 1)
+    states = jnp.swapaxes(parsed_sep.solution.mean_path[:, :, :-1], 1, 2)
+    shocks = put(deterministic)
+    rho_y = parsed_sep.parameter_values[:, name_to_idx["rho_y"]]
+    rho_z = parsed_sep.parameter_values[:, name_to_idx["rho_z"]]
+    cross = parsed_sep.parameter_values[:, name_to_idx["cross"]]
+    rom_y = rho_y[:, None] * states[:, :, 0] + shocks[:, :, 0]
+    rom_z = rho_z[:, None] * states[:, :, 1] + cross[:, None] * rom_y + shocks[:, :, 1]
+    rom_state_next = jnp.stack([rom_y, rom_z], axis=2)
+    obs_dim = min(max(1, int(args.obs_dim)), model.timings.nVars)
+    observable_indices = np.arange(obs_dim, dtype=np.int64)
+    rom_obs = jnp.take(rom_state_next, jnp.asarray(observable_indices, dtype=jnp.int32), axis=2)
+    pipeline = fit_surrogate_pipeline_from_batched_sep_jax(
+        states,
+        shocks,
+        theta,
+        rom_obs,
+        rom_state_next,
+        parsed_sep.solution,
+        observable_indices=observable_indices,
+        architecture="resnet",
+        rom_residual=True,
+        d_hidden=int(args.hidden),
+        n_blocks=int(args.blocks),
+        nepoch=int(args.epochs),
+        eta_init=float(args.learning_rate),
+        batch_size=int(args.batch_size),
+        train_seed=int(args.seed),
+        device=target_device,
+    )
+    _block_until_ready_tree(pipeline.training.frozen)
+    assemble_train_s = time.perf_counter() - assemble_train_started
+
+    probe_count = min(int(args.batch_size), int(pipeline.arrays.X.shape[1]))
+
+    @jax.jit
+    def predict_once(x_batch: jax.Array) -> jax.Array:
+        return predict_frozen_batch(pipeline.training.frozen, x_batch)
+
+    predict_started = time.perf_counter()
+    y_probe = predict_once(pipeline.arrays.X[:, :probe_count])
+    y_probe.block_until_ready()
+    predict_first_s = time.perf_counter() - predict_started
+    accepted = np.asarray(parsed_sep.solution.accepted, dtype=bool)
+    converged = np.asarray(parsed_sep.solution.converged, dtype=bool)
+    return {
+        "status": "ok",
+        "kind": "parsed_batched_sep_target_training",
+        "backend": jax.default_backend(),
+        "target_device": None if target_device is None else str(target_device),
+        "batch_size": batch_size,
+        "actual_samples": int(pipeline.arrays.X.shape[1]),
+        "n_vars": int(model.timings.nVars),
+        "n_exo": int(model.timings.nExo),
+        "n_parameters": int(len(parameter_names)),
+        "periods": int(config.periods),
+        "branching_order": int(config.branching_order),
+        "nnodes": int(config.nnodes),
+        "sparse_tree": bool(config.sparse_tree),
+        "sep_solve_s": solve_s,
+        "assemble_train_s": assemble_train_s,
+        "predict_first_s": predict_first_s,
+        "end_to_end_s": solve_s + assemble_train_s + predict_first_s,
+        "sep_accepted_count": int(np.count_nonzero(accepted)),
+        "sep_converged_count": int(np.count_nonzero(converged)),
+        "array_summary": pipeline.array_summary,
+        "train_size": int(pipeline.training.train_size),
+        "masked_sample_count": int(pipeline.training.metadata["masked_sample_count"]),
+        "prediction_output_norm": float(np.linalg.norm(np.asarray(y_probe))),
+        "max_residual_norm": float(np.max(np.asarray(parsed_sep.solution.residual_norm))),
+        "caveat": (
+            "Parser-backed batched nonlinear SEP profile with parameter draws and fixed explicit steady states. "
+            "It does not include parameter-specific steady-state solving or auxiliary OBC shock reinjection."
+        ),
+    }
+
+
 def _load_hlt_payload_case(args: argparse.Namespace) -> dict[str, Any]:
     payload_path = Path(args.hlt_payload)
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
@@ -1561,6 +1710,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "sep-micro",
             "batched-sep-micro",
             "batched-sep-training",
+            "parsed-batched-sep-training",
             "callback-dataset",
             "hlt-fixed-ss-smoke",
         ),
@@ -1671,6 +1821,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         payload["results"]["batched_sep_micro"] = run_batched_sep_micro_profile(args)
     elif args.mode == "batched-sep-training":
         payload["results"]["batched_sep_training"] = run_batched_sep_training_profile(args, shape)
+    elif args.mode == "parsed-batched-sep-training":
+        payload["results"]["parsed_batched_sep_training"] = run_parsed_batched_sep_training_profile(args)
     elif args.mode == "callback-dataset":
         payload["results"]["callback_dataset"] = run_callback_dataset_profile(args, shape)
     elif args.mode == "hlt-fixed-ss-smoke":
