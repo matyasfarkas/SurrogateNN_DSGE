@@ -9697,7 +9697,7 @@ def _parse_block_options(options_text: str) -> dict[str, object]:
         return {}
 
     assignment_re = re.compile(
-        rf"(?P<name>{_IDENTIFIER_PATTERN})\s*=\s*",
+        rf"(?P<name>{_IDENTIFIER_PATTERN})\s*(?<![<>=])=(?![=>])\s*",
         re.UNICODE,
     )
     parsed: dict[str, object] = {}
@@ -9723,10 +9723,21 @@ def _parse_block_option_value(text: str) -> object:
         return True
     if lowered == "false":
         return False
+    if lowered in {"nothing", "missing"}:
+        return None
+    if lowered in {"inf", "+inf", "infinity", "+infinity"}:
+        return np.inf
+    if lowered in {"-inf", "-infinity"}:
+        return -np.inf
+    if lowered == "nan":
+        return np.nan
     if token.startswith(":") and len(token) > 1:
         return token[1:]
     if len(token) >= 2 and token[0] == token[-1] == '"':
         return token[1:-1]
+    literal = _parse_julia_option_literal(token)
+    if literal is not None:
+        return literal
     try:
         value = parse_expr(
             token,
@@ -9749,6 +9760,72 @@ def _parse_block_option_value(text: str) -> object:
     if isinstance(value, sp.Symbol):
         return str(value)
     return token
+
+
+def _parse_julia_option_literal(text: str) -> object:
+    token = text.strip()
+    if not token:
+        return None
+
+    range_parts = _split_top_level(token, ":")
+    if len(range_parts) == 2:
+        try:
+            start = _evaluate_integer_expression(range_parts[0])
+            stop = _evaluate_integer_expression(range_parts[1])
+        except Exception:
+            pass
+        else:
+            step = 1 if stop >= start else -1
+            return tuple(range(start, stop + step, step))
+
+    if token.startswith("[") and token.endswith("]"):
+        body = token[1:-1].strip()
+        if not body:
+            return tuple()
+        values: list[object] = []
+        for entry in _split_top_level(body, ","):
+            if not entry:
+                continue
+            entry_text = entry.strip()
+            splat = entry_text.endswith("...")
+            if splat:
+                entry_text = entry_text[:-3].strip()
+            value = _parse_block_option_value(entry_text)
+            if splat:
+                if not isinstance(value, tuple):
+                    raise ValueError(
+                        "Only tuple/range option literals can be splatted with `...`, "
+                        f"got `{entry}`."
+                    )
+                values.extend(value)
+            else:
+                values.append(value)
+        return tuple(values)
+
+    if token.startswith("(") and token.endswith(")"):
+        body = token[1:-1].strip()
+        if not body:
+            return tuple()
+        if len(_split_top_level(body, ",")) > 1 or body.endswith(","):
+            return tuple(
+                _parse_block_option_value(entry)
+                for entry in _split_top_level(body, ",")
+                if entry.strip()
+            )
+
+    if token.startswith("Dict(") and token.endswith(")"):
+        body = token[len("Dict(") : -1].strip()
+        parsed: dict[str, object] = {}
+        if not body:
+            return parsed
+        for entry in _split_top_level(body, ","):
+            if not entry:
+                continue
+            key_text, value_text = _split_top_level_operator(entry, "=>")
+            parsed[_parse_guess_key(key_text)] = _parse_block_option_value(value_text)
+        return parsed
+
+    return None
 
 
 def _parse_guess_key(text: str) -> str:

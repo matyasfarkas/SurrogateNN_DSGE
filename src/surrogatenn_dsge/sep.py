@@ -552,6 +552,12 @@ def _precompute_sep_tree_array_metadata(
     periods: int,
     shock_dim: int,
 ) -> _SEPTreeArrayMetadata:
+    _validate_sep_tree_metadata(
+        metadata=metadata,
+        counts=counts,
+        periods=periods,
+        shock_dim=shock_dim,
+    )
     parent_indices: list[jax.Array] = []
     child_indices_by_time: list[Optional[jax.Array]] = []
     child_weights_by_time: list[Optional[jax.Array]] = []
@@ -611,6 +617,138 @@ def _precompute_sep_tree_array_metadata(
         child_weights=tuple(child_weights_by_time),
         child_shocks=tuple(child_shocks_by_time),
     )
+
+
+def _validate_sep_tree_metadata(
+    *,
+    metadata: _SEPTreeMetadata,
+    counts: tuple[int, ...],
+    periods: int,
+    shock_dim: int,
+) -> None:
+    if len(counts) != periods + 1:
+        raise ValueError(
+            "SEP tree metadata counts must have length "
+            f"{periods + 1}, got {len(counts)}."
+        )
+    if counts[0] != 1:
+        raise ValueError(
+            f"SEP tree metadata requires exactly one initial group, got {counts[0]}."
+        )
+
+    collections = {
+        "parent_indices": metadata.parent_indices,
+        "current_shocks": metadata.current_shocks,
+        "child_groups": metadata.child_groups,
+        "child_shocks": metadata.child_shocks,
+    }
+    for name, values in collections.items():
+        if len(values) != periods:
+            raise ValueError(
+                f"SEP tree metadata {name} must have length {periods}, "
+                f"got {len(values)}."
+            )
+
+    for t in range(1, periods + 1):
+        group_count = counts[t]
+        current_shocks = np.asarray(metadata.current_shocks[t - 1], dtype=np.float64)
+        if current_shocks.shape != (group_count, shock_dim):
+            raise ValueError(
+                "SEP tree metadata current_shocks for period "
+                f"{t} must have shape {(group_count, shock_dim)}, "
+                f"got {current_shocks.shape}."
+            )
+        if not np.isfinite(current_shocks).all():
+            raise ValueError(
+                f"SEP tree metadata current_shocks for period {t} must be finite."
+            )
+
+        parent_indices = metadata.parent_indices[t - 1]
+        if t == 1:
+            if parent_indices is not None:
+                raise ValueError(
+                    "SEP tree metadata parent_indices for period 1 must be None."
+                )
+        else:
+            if parent_indices is None:
+                raise ValueError(
+                    f"SEP tree metadata parent_indices for period {t} is missing."
+                )
+            parent_array = np.asarray(parent_indices)
+            if parent_array.shape != (group_count,):
+                raise ValueError(
+                    "SEP tree metadata parent_indices for period "
+                    f"{t} must have shape {(group_count,)}, got {parent_array.shape}."
+                )
+            if not np.issubdtype(parent_array.dtype, np.integer):
+                raise ValueError(
+                    f"SEP tree metadata parent_indices for period {t} must be integers."
+                )
+            if (
+                parent_array.size > 0
+                and (
+                    np.min(parent_array) < 0
+                    or np.max(parent_array) >= counts[t - 1]
+                )
+            ):
+                raise ValueError(
+                    "SEP tree metadata parent_indices for period "
+                    f"{t} must be in [0, {counts[t - 1]})."
+                )
+
+        child_groups = metadata.child_groups[t - 1]
+        child_shocks = metadata.child_shocks[t - 1]
+        if t == periods:
+            if child_groups is not None or child_shocks is not None:
+                raise ValueError(
+                    "SEP tree metadata terminal period must not contain children."
+                )
+            continue
+
+        if child_groups is None or child_shocks is None:
+            raise ValueError(
+                f"SEP tree metadata children for period {t} are incomplete."
+            )
+        if len(child_groups) != group_count or len(child_shocks) != group_count:
+            raise ValueError(
+                "SEP tree metadata children for period "
+                f"{t} must have {group_count} groups."
+            )
+        for group_index, groups in enumerate(child_groups):
+            group_array = np.asarray(groups)
+            if group_array.shape != (len(groups),):
+                raise ValueError(
+                    "SEP tree metadata child groups for period "
+                    f"{t}, group {group_index} must be one-dimensional."
+                )
+            if len(groups) == 0:
+                raise ValueError(
+                    "SEP tree metadata child groups for period "
+                    f"{t}, group {group_index} are empty."
+                )
+            if not np.issubdtype(group_array.dtype, np.integer):
+                raise ValueError(
+                    "SEP tree metadata child groups for period "
+                    f"{t}, group {group_index} must be integers."
+                )
+            if np.min(group_array) < 0 or np.max(group_array) >= counts[t + 1]:
+                raise ValueError(
+                    "SEP tree metadata child index for period "
+                    f"{t}, group {group_index} must be in [0, {counts[t + 1]})."
+                )
+
+            shocks = np.asarray(child_shocks[group_index], dtype=np.float64)
+            if shocks.shape != (len(groups), shock_dim):
+                raise ValueError(
+                    "SEP tree metadata child_shocks for period "
+                    f"{t}, group {group_index} must have shape "
+                    f"{(len(groups), shock_dim)}, got {shocks.shape}."
+                )
+            if not np.isfinite(shocks).all():
+                raise ValueError(
+                    "SEP tree metadata child_shocks for period "
+                    f"{t}, group {group_index} must be finite."
+                )
 
 
 def _hmc_step(
@@ -774,6 +912,22 @@ def _finite_difference_jacobian(
         )
         jacobian[:, idx] = (shifted - base) / step_size
     return jnp.asarray(jacobian, dtype=jnp.float64)
+
+
+def _validate_sep_custom_jacobian(
+    jacobian: jax.Array,
+    *,
+    expected_shape: tuple[int, int],
+) -> jax.Array:
+    jacobian_arr = jnp.asarray(jacobian, dtype=jnp.float64)
+    if jacobian_arr.ndim != 2 or jacobian_arr.shape != expected_shape:
+        raise ValueError(
+            "SEP custom jacobian must have shape "
+            f"{expected_shape}, got {jacobian_arr.shape}."
+        )
+    if not bool(np.asarray(jnp.all(jnp.isfinite(jacobian_arr)))):
+        raise ValueError("SEP custom jacobian must contain only finite values.")
+    return jacobian_arr
 
 
 def solve_stochastic_extended_path(
@@ -1350,7 +1504,10 @@ def _solve_stochastic_extended_path_impl(
         if jacobian_method_used == "finite_difference":
             jacobian = _finite_difference_jacobian(residual_eval, current)
         elif jacobian_method_used == "subgradient":
-            jacobian = jnp.asarray(jacobian_fn(current), dtype=jnp.float64)
+            jacobian = _validate_sep_custom_jacobian(
+                jacobian_fn(current),
+                expected_shape=(int(residual.shape[0]), int(current.shape[0])),
+            )
         elif jacobian_eval is not None:
             jacobian = jacobian_eval(current)
         else:

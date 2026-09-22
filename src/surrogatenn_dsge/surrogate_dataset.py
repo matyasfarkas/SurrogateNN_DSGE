@@ -9,6 +9,7 @@ from .parameter_sampling import ParameterDesign
 
 
 PredictTupleFn = Callable[[Any, Any, Any], tuple[Any, Any]]
+_TARGET_MODES = ("residual_obs", "residual_full", "fom_obs", "fom_full")
 
 
 @dataclass(frozen=True)
@@ -152,6 +153,63 @@ def _coerce_initial_states(initial_state: Any, *, n_theta: int) -> np.ndarray:
     return np.asarray(out, dtype=np.float64).copy()
 
 
+def _normalize_target_mode(target_mode: str) -> str:
+    target_mode_norm = str(target_mode).strip().lower()
+    if target_mode_norm not in _TARGET_MODES:
+        raise ValueError(
+            "target_mode must be one of 'residual_obs', 'residual_full', "
+            f"'fom_obs', or 'fom_full', got {target_mode!r}."
+        )
+    return target_mode_norm
+
+
+def _as_batched_rollout_tensor(
+    values: Any,
+    *,
+    label: str,
+    n_theta: int,
+    periods: Optional[int] = None,
+    dim: Optional[int] = None,
+) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float64)
+    if array.ndim != 3:
+        raise ValueError(f"{label} must have shape (n_theta, periods, dim), got {array.shape}.")
+    if array.shape[0] != int(n_theta):
+        raise ValueError(
+            f"{label} theta-axis mismatch: expected {int(n_theta)} theta draws on axis 0, "
+            f"got shape {array.shape}."
+        )
+    if periods is not None and array.shape[1] != int(periods):
+        raise ValueError(
+            f"{label} period-axis mismatch: expected {int(periods)} periods on axis 1, "
+            f"got shape {array.shape}."
+        )
+    if dim is not None and array.shape[2] != int(dim):
+        raise ValueError(
+            f"{label} feature-axis mismatch: expected dimension {int(dim)} on axis 2, "
+            f"got shape {array.shape}."
+        )
+    return array
+
+
+def _finite_period_mask(*arrays: np.ndarray) -> np.ndarray:
+    if not arrays:
+        raise ValueError("At least one rollout tensor is required.")
+    mask = np.ones(arrays[0].shape[:2], dtype=bool)
+    for array in arrays:
+        mask &= np.isfinite(array).all(axis=2)
+    return mask
+
+
+def _stable_prefix_lengths(finite_by_period: np.ndarray) -> np.ndarray:
+    stable_periods = np.zeros((finite_by_period.shape[0],), dtype=np.int64)
+    total_periods = int(finite_by_period.shape[1])
+    for theta_idx, theta_finite in enumerate(finite_by_period):
+        first_bad = np.flatnonzero(~theta_finite)
+        stable_periods[theta_idx] = total_periods if first_bad.size == 0 else int(first_bad[0])
+    return stable_periods
+
+
 def _target_vector(
     target_mode: str,
     fom_obs: np.ndarray,
@@ -172,10 +230,8 @@ def _target_vector(
         y = np.concatenate([fom_obs, fom_state_next])
         y_rom = np.concatenate([rom_obs, rom_state_next])
     else:
-        raise ValueError(
-            "target_mode must be one of 'residual_obs', 'residual_full', "
-            f"'fom_obs', or 'fom_full', got {target_mode!r}."
-        )
+        _normalize_target_mode(target_mode)
+        raise AssertionError("unreachable target_mode branch")
     return y, y_rom
 
 
@@ -230,7 +286,7 @@ def build_surrogate_residual_dataset(
     theta_stable_periods = np.zeros((theta.shape[1],), dtype=np.int64)
     rng = np.random.default_rng(int(seed))
 
-    target_mode_norm = str(target_mode).strip().lower()
+    target_mode_norm = _normalize_target_mode(target_mode)
     for theta_idx in range(theta.shape[1]):
         theta_t = theta[:, theta_idx]
         shock_matrix = shock_cube[theta_idx]
@@ -289,6 +345,127 @@ def build_surrogate_residual_dataset(
         X=X,
         Y=Y,
         Y_rom=Y_rom,
+        theta=theta,
+        theta_ids=np.asarray(theta_ids, dtype=np.int64),
+        period_ids=np.asarray(period_ids, dtype=np.int64),
+        theta_success=theta_success,
+        theta_stable_periods=theta_stable_periods,
+        target_mode=target_mode_norm,
+        input_names=tuple(input_names),
+        output_names=tuple(output_names),
+        theta_names=theta_names,
+    )
+
+
+def build_surrogate_residual_dataset_from_batched_rollouts(
+    states: Any,
+    shocks: Any,
+    theta_design: ParameterDesign | np.ndarray,
+    rom_obs: Any,
+    rom_state_next: Any,
+    fom_obs: Any,
+    fom_state_next: Any,
+    *,
+    target_mode: str = "residual_full",
+    samples_per_theta: Optional[int] = None,
+    sample_replace: bool = True,
+    seed: int = 0,
+    min_stable_periods: int = 1,
+    input_names: Sequence[str] = (),
+    output_names: Sequence[str] = (),
+) -> SurrogateDataset:
+    """Build a surrogate dataset from batched rollout tensors.
+
+    All rollout tensors must use explicit shape ``(n_theta, periods, dim)``.
+    This matches JAX ``vmap`` over theta draws plus ``lax.scan`` over time
+    after moving the scan axis behind the theta axis. Non-finite rollout rows
+    terminate only that theta draw's stable prefix, mirroring the sequential
+    builder's exception-driven prefix behavior without per-period Python calls.
+    """
+
+    theta, theta_names = _theta_matrix(theta_design)
+    if theta.shape[1] < 1:
+        raise ValueError("theta_design must contain at least one theta draw.")
+    if not np.isfinite(theta).all():
+        raise ValueError("theta_design contains non-finite values.")
+    if int(min_stable_periods) < 0:
+        raise ValueError(f"min_stable_periods must be nonnegative, got {min_stable_periods}.")
+
+    n_theta = int(theta.shape[1])
+    states_array = _as_batched_rollout_tensor(states, label="states", n_theta=n_theta)
+    periods = int(states_array.shape[1])
+    state_dim = int(states_array.shape[2])
+    shocks_array = _as_batched_rollout_tensor(shocks, label="shocks", n_theta=n_theta, periods=periods)
+    rom_obs_array = _as_batched_rollout_tensor(rom_obs, label="rom_obs", n_theta=n_theta, periods=periods)
+    fom_obs_array = _as_batched_rollout_tensor(
+        fom_obs,
+        label="fom_obs",
+        n_theta=n_theta,
+        periods=periods,
+        dim=int(rom_obs_array.shape[2]),
+    )
+    rom_state_next_array = _as_batched_rollout_tensor(
+        rom_state_next,
+        label="rom_state_next",
+        n_theta=n_theta,
+        periods=periods,
+        dim=state_dim,
+    )
+    fom_state_next_array = _as_batched_rollout_tensor(
+        fom_state_next,
+        label="fom_state_next",
+        n_theta=n_theta,
+        periods=periods,
+        dim=state_dim,
+    )
+
+    target_mode_norm = _normalize_target_mode(target_mode)
+    finite_by_period = _finite_period_mask(
+        states_array,
+        shocks_array,
+        rom_obs_array,
+        rom_state_next_array,
+        fom_obs_array,
+        fom_state_next_array,
+    )
+    theta_stable_periods = _stable_prefix_lengths(finite_by_period)
+    theta_success = (theta_stable_periods >= int(min_stable_periods)) & (theta_stable_periods == periods)
+
+    X_columns: list[np.ndarray] = []
+    Y_columns: list[np.ndarray] = []
+    Y_rom_columns: list[np.ndarray] = []
+    theta_ids: list[int] = []
+    period_ids: list[int] = []
+    rng = np.random.default_rng(int(seed))
+
+    for theta_idx in range(n_theta):
+        stable = int(theta_stable_periods[theta_idx])
+        if stable < int(min_stable_periods):
+            continue
+        selected = _sample_periods(stable, samples_per_theta, rng, replace=bool(sample_replace))
+        theta_t = theta[:, theta_idx]
+        for period in selected:
+            period_idx = int(period)
+            y, y_rom = _target_vector(
+                target_mode_norm,
+                fom_obs_array[theta_idx, period_idx],
+                fom_state_next_array[theta_idx, period_idx],
+                rom_obs_array[theta_idx, period_idx],
+                rom_state_next_array[theta_idx, period_idx],
+            )
+            x = np.concatenate([states_array[theta_idx, period_idx], shocks_array[theta_idx, period_idx], theta_t])
+            X_columns.append(x)
+            Y_columns.append(y)
+            Y_rom_columns.append(y_rom)
+            theta_ids.append(theta_idx)
+            period_ids.append(period_idx)
+
+    if not X_columns:
+        raise ValueError("No stable surrogate-dataset samples were generated.")
+    return SurrogateDataset(
+        X=np.column_stack(X_columns),
+        Y=np.column_stack(Y_columns),
+        Y_rom=np.column_stack(Y_rom_columns),
         theta=theta,
         theta_ids=np.asarray(theta_ids, dtype=np.int64),
         period_ids=np.asarray(period_ids, dtype=np.int64),

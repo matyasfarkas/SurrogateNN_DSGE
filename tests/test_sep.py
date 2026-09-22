@@ -246,6 +246,46 @@ def test_sep_sparse_tree_precomputes_tree_metadata_consistently() -> None:
             assert metadata.child_groups[t - 1][g] == expected_groups
 
 
+def test_sep_sparse_tree_metadata_validation_rejects_bad_child_index() -> None:
+    periods = 3
+    branching_order = 2
+    shock_dim = 2
+    rule = sep_module._gauss_hermite_sparse_rule(3, shock_dim, 1.0)
+    counts = sep_module._group_counts(
+        periods,
+        branching_order,
+        int(rule.weights.shape[0]),
+        sparse_tree=True,
+    )
+    metadata = sep_module._precompute_sep_tree_metadata(
+        rule=rule,
+        deterministic=jnp.zeros((periods, shock_dim), dtype=jnp.float64),
+        counts=counts,
+        periods=periods,
+        branching_order=branching_order,
+        num_nodes=int(rule.weights.shape[0]),
+        shock_dim=shock_dim,
+        sparse_tree=True,
+        use_hmc=False,
+    )
+
+    child_groups = list(metadata.child_groups)
+    assert child_groups[0] is not None
+    first_period_child_groups = list(child_groups[0])
+    first_period_child_groups[0] = (counts[2],)
+    child_groups[0] = tuple(first_period_child_groups)
+    bad_metadata = metadata._replace(child_groups=tuple(child_groups))
+
+    with np.testing.assert_raises_regex(ValueError, "child index"):
+        sep_module._precompute_sep_tree_array_metadata(
+            rule=rule,
+            metadata=bad_metadata,
+            counts=counts,
+            periods=periods,
+            shock_dim=shock_dim,
+        )
+
+
 def test_sep_sparse_tree_matches_full_tree_mean_path_for_linear_zero_mean_shocks() -> None:
     deterministic_shocks = jnp.asarray(
         [[0.4, -0.2], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]],
@@ -880,6 +920,120 @@ def test_sep_subgradient_requires_custom_jacobian() -> None:
                 periods=3,
                 branching_order=1,
                 jacobian_method="subgradient",
+            ),
+        )
+
+
+def test_sep_sparse_tree_subgradient_solves_nonsmooth_projection_like_finite_difference() -> None:
+    deterministic_shocks = jnp.asarray(
+        [[0.20, 0.00], [0.00, 0.00], [0.00, 0.00]],
+        dtype=jnp.float64,
+    )
+
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        del y_prev, expected_next, params
+        return y_curr - jnp.maximum(0.0, shock[0] - 0.25 * shock[1] - 0.05)
+
+    def identity_subgradient(stacked):
+        return jnp.eye(int(stacked.shape[0]), dtype=jnp.float64)
+
+    subgradient_solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=2,
+        config=SEPConfig(
+            periods=3,
+            branching_order=2,
+            nnodes=3,
+            sparse_tree=True,
+            jacobian_method="subgradient",
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+        jacobian_fn=identity_subgradient,
+    )
+    finite_difference_solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[0.0],
+        terminal_state=[0.0],
+        shock_dim=2,
+        config=SEPConfig(
+            periods=3,
+            branching_order=2,
+            nnodes=3,
+            sparse_tree=True,
+            jacobian_method="finite_difference",
+            tol=1e-10,
+        ),
+        deterministic_shocks=deterministic_shocks,
+    )
+
+    assert subgradient_solution.converged
+    assert finite_difference_solution.converged
+    assert subgradient_solution.jacobian_method == "subgradient"
+    np.testing.assert_allclose(
+        subgradient_solution.stacked_states,
+        finite_difference_solution.stacked_states,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        subgradient_solution.mean_path,
+        finite_difference_solution.mean_path,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_sep_subgradient_validates_custom_jacobian_on_sparse_tree() -> None:
+    deterministic_shocks = jnp.asarray(
+        [[0.20, 0.00], [0.00, 0.00]],
+        dtype=jnp.float64,
+    )
+
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        del y_prev, expected_next, params
+        return y_curr - jnp.maximum(0.0, shock[0] - 0.05)
+
+    with np.testing.assert_raises_regex(ValueError, "custom jacobian must have shape"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=2,
+            config=SEPConfig(
+                periods=2,
+                branching_order=1,
+                nnodes=3,
+                sparse_tree=True,
+                jacobian_method="subgradient",
+            ),
+            deterministic_shocks=deterministic_shocks,
+            jacobian_fn=lambda stacked: jnp.eye(
+                int(stacked.shape[0]) + 1,
+                dtype=jnp.float64,
+            ),
+        )
+
+    with np.testing.assert_raises_regex(ValueError, "finite values"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=2,
+            config=SEPConfig(
+                periods=2,
+                branching_order=1,
+                nnodes=3,
+                sparse_tree=True,
+                jacobian_method="subgradient",
+            ),
+            deterministic_shocks=deterministic_shocks,
+            jacobian_fn=lambda stacked: jnp.full(
+                (int(stacked.shape[0]), int(stacked.shape[0])),
+                jnp.nan,
+                dtype=jnp.float64,
             ),
         )
 

@@ -49,6 +49,16 @@ end
 end
 """
 
+_JULIA_LITERAL_OPTION_SOURCE = """
+@model literal_option_model observables = [:y, :pi_ann, "i_ann"] windows = (1, 4, 8) maybe = nothing cutoff = Inf begin
+    y[0] = rho * y[-1] + eps_y[x]
+end
+
+@parameters literal_option_model selectors = Dict(:states => [:y], "periods" => [1:3..., 8]) filter = (:kalman, :inversion) begin
+    rho = 0.8
+end
+"""
+
 
 def test_parser_records_model_and_parameter_options() -> None:
     model = parse_macro_model(_OPTION_SOURCE)
@@ -66,6 +76,20 @@ def test_parser_records_remaining_parameter_directives() -> None:
     assert model.parameter_options["silent"] is True
     assert model.parameter_options["symbolic"] is True
     assert model.parameter_options["perturbation_order"] == 1
+
+
+def test_parser_records_julia_literal_option_values() -> None:
+    model = parse_macro_model(_JULIA_LITERAL_OPTION_SOURCE)
+
+    assert model.model_options["observables"] == ("y", "pi_ann", "i_ann")
+    assert model.model_options["windows"] == (1, 4, 8)
+    assert model.model_options["maybe"] is None
+    assert np.isposinf(model.model_options["cutoff"])
+    assert model.parameter_options["filter"] == ("kalman", "inversion")
+    assert model.parameter_options["selectors"] == {
+        "states": ("y",),
+        "periods": (1, 2, 3, 8),
+    }
 
 
 def test_parser_precompile_option_eagerly_builds_cached_symbolic_objects() -> None:

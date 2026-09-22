@@ -238,6 +238,7 @@ from .surrogate import (
 )
 from .surrogate_dataset import (
     SurrogateDataset,
+    build_surrogate_residual_dataset_from_batched_rollouts,
     build_surrogate_residual_dataset,
     summarize_surrogate_dataset,
 )
@@ -374,6 +375,7 @@ __all__ = [
     "build_numpyro_surrogate_inversion_model_jax",
     "build_numpyro_switching_filter_model_jax",
     "build_numpyro_switching_model_jax",
+    "build_surrogate_residual_dataset_from_batched_rollouts",
     "build_surrogate_residual_dataset",
     "baseline_parameter_vector",
     "bounded_log_abs_det_jacobian",
