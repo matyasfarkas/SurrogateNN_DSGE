@@ -15,9 +15,11 @@ from surrogatenn_dsge import (
     fit_surrogate_pipeline_from_batched_sep_jax,
     fit_surrogate_pipeline,
     load_surrogate_bundle,
+    parse_macro_model,
     predict_frozen_batch,
     resolve_jax_device,
     save_surrogate_bundle,
+    solve_batched_stochastic_extended_path_model,
     solve_batched_stochastic_extended_path_residual_expectation,
     split_surrogate_dataset,
     surrogate_inversion_loglikelihood_jax,
@@ -320,6 +322,67 @@ def test_fit_surrogate_pipeline_from_batched_sep_jax_supports_jitted_likelihood_
     value, grad = jax.jit(jax.value_and_grad(loglik))(theta[:, 0])
     assert np.isfinite(float(value))
     np.testing.assert_array_equal(np.isfinite(np.asarray(grad)), np.ones((1,), dtype=bool))
+
+
+def test_parsed_batched_sep_feeds_fixed_shape_surrogate_pipeline() -> None:
+    model = parse_macro_model(
+        """
+        @model parsed_surrogate_sep begin
+            y[0] = rho * y[-1] + gamma * y[1]^2 + u[x]
+        end
+
+        @parameters parsed_surrogate_sep begin
+            gamma = 0.10
+            rho = 0.30
+        end
+        """
+    )
+    shocks = jnp.asarray(
+        [
+            [[0.10], [0.00], [0.00]],
+            [[-0.05], [0.03], [0.00]],
+        ],
+        dtype=jnp.float64,
+    )
+    parsed_sep = solve_batched_stochastic_extended_path_model(
+        model,
+        config=SEPConfig(periods=3, branching_order=1, nnodes=3, tol=1e-10, max_iter=20),
+        deterministic_shocks=shocks,
+    )
+    theta = jnp.broadcast_to(
+        jnp.asarray(model.parameter_values, dtype=jnp.float64)[:, None],
+        (len(model.parameter_names), shocks.shape[0]),
+    )
+    states = jnp.swapaxes(parsed_sep.solution.mean_path[:, :, :-1], 1, 2)
+    rom_state_next = theta[1, :, None, None] * states + shocks
+    rom_obs = rom_state_next
+
+    result = fit_surrogate_pipeline_from_batched_sep_jax(
+        states,
+        shocks,
+        theta,
+        rom_obs,
+        rom_state_next,
+        parsed_sep.solution,
+        observable_indices=[0],
+        architecture="resnet",
+        rom_residual=True,
+        d_hidden=8,
+        n_blocks=0,
+        nepoch=2,
+        batch_size=2,
+        train_seed=29,
+        device="cpu",
+    )
+
+    assert result.array_summary["n_samples_total"] == 6
+    assert result.array_summary["n_samples_valid"] == 6
+    assert result.training.metadata["jax_device_platform"] == "cpu"
+    prediction = np.asarray(
+        predict_frozen_batch(result.training.frozen, result.arrays.X[:, :2]),
+        dtype=np.float64,
+    )
+    assert np.isfinite(prediction).all()
 
 
 def test_save_and_load_surrogate_training_result_bundle_round_trips_predictions(tmp_path) -> None:

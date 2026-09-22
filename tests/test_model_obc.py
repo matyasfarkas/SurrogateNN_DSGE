@@ -12,6 +12,7 @@ from surrogatenn_dsge import (
     evaluate_obc_violations,
     evaluate_obc_violations_along_path,
     parse_macro_model,
+    solve_batched_stochastic_extended_path_model,
     solve_first_order_model,
     solve_steady_state,
     solve_stochastic_extended_path_model,
@@ -269,6 +270,23 @@ def test_obc_model_sep_subgradient_matches_finite_difference() -> None:
         rtol=1e-8,
         atol=1e-8,
     )
+
+
+def test_batched_parsed_sep_rejects_auxiliary_obc_reinjection_gap() -> None:
+    model = parse_macro_model(OBC_SEP_AUX_SHOCK_SOURCE)
+
+    with pytest.raises(NotImplementedError, match="OBC-shock reinjection"):
+        solve_batched_stochastic_extended_path_model(
+            model,
+            steady_state=[1.2, 1.2],
+            initial_state=[1.2, 1.2],
+            terminal_state=[1.2, 1.2],
+            config=SEPConfig(periods=3, branching_order=0, tol=1e-8),
+            deterministic_shocks={
+                "eps_r": [[-2.0, 0.0, 0.0]],
+                "eps_zlbᵒᵇᶜ": [[0.0, 0.0, 0.0]],
+            },
+        )
 
 
 def test_first_order_obc_violation_path_detects_linear_constraint_breach() -> None:

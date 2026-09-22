@@ -9,6 +9,7 @@ from surrogatenn_dsge import (
     evaluate_dynamic_residual,
     homotopy_sep,
     parse_macro_model,
+    solve_batched_stochastic_extended_path_model,
     solve_sep_at_noise_level,
     solve_stochastic_extended_path_model,
     solve_stochastic_extended_path_residual_expectation,
@@ -93,6 +94,66 @@ def test_parsed_model_sep_matches_manual_conditional_residual_solver() -> None:
         parsed.solution.mean_path,
         manual.mean_path,
         rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_batched_parsed_model_sep_matches_repeated_sequential_solves() -> None:
+    model = parse_macro_model(NONLINEAR_SEP_SOURCE)
+    config = SEPConfig(periods=3, branching_order=1, nnodes=3, tol=1e-10, max_iter=30)
+    deterministic = np.asarray(
+        [
+            [[0.20], [0.00], [0.00]],
+            [[-0.10], [0.05], [0.00]],
+            [[0.05], [-0.02], [0.01]],
+        ],
+        dtype=np.float64,
+    )
+
+    batched = solve_batched_stochastic_extended_path_model(
+        model,
+        config=config,
+        deterministic_shocks=deterministic,
+    )
+
+    assert batched.solution.converged.shape == (3,)
+    assert np.all(np.asarray(batched.solution.accepted, dtype=bool))
+    assert batched.solution.mean_path.shape == (3, 1, 4)
+    for draw in range(deterministic.shape[0]):
+        sequential = solve_stochastic_extended_path_model(
+            model,
+            config=config,
+            deterministic_shocks={"u": deterministic[draw, :, 0]},
+        )
+        assert sequential.solution.accepted
+        np.testing.assert_allclose(
+            np.asarray(batched.solution.mean_path[draw], dtype=np.float64),
+            np.asarray(sequential.solution.mean_path, dtype=np.float64),
+            rtol=1e-9,
+            atol=1e-10,
+        )
+
+
+def test_batched_parsed_model_sep_accepts_named_shock_batches() -> None:
+    model = parse_macro_model(NONLINEAR_SEP_SOURCE)
+    config = SEPConfig(periods=3, branching_order=0, nnodes=3, tol=1e-10, max_iter=20)
+
+    batched = solve_batched_stochastic_extended_path_model(
+        model,
+        config=config,
+        deterministic_shocks={"u": [[0.20, 0.00, 0.00], [-0.10, 0.05, 0.00]]},
+    )
+    sequential = solve_stochastic_extended_path_model(
+        model,
+        config=config,
+        deterministic_shocks={"u": [0.20, 0.00, 0.00]},
+    )
+
+    assert np.all(np.asarray(batched.solution.accepted, dtype=bool))
+    np.testing.assert_allclose(
+        np.asarray(batched.solution.mean_path[0], dtype=np.float64),
+        np.asarray(sequential.solution.mean_path, dtype=np.float64),
+        rtol=1e-9,
         atol=1e-10,
     )
 

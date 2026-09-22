@@ -50,6 +50,7 @@ from .inversion import (
     sep_inversion_loglikelihood_per_period,
 )
 from .sep import (
+    BatchedSEPSolution,
     _child_groups,
     _gauss_hermite_sparse_rule,
     _group_counts,
@@ -58,6 +59,7 @@ from .sep import (
     SEPConfig,
     SEPSolution,
     gauss_hermite_rule,
+    solve_batched_stochastic_extended_path_residual_expectation,
     solve_stochastic_extended_path_residual_expectation,
 )
 from .statespace import (
@@ -230,6 +232,12 @@ class ParsedModelSEPResult(NamedTuple):
     steady_state: jax.Array
     parameter_values: jax.Array
     solution: SEPSolution
+
+
+class ParsedModelBatchedSEPResult(NamedTuple):
+    steady_state: jax.Array
+    parameter_values: jax.Array
+    solution: BatchedSEPSolution
 
 
 class _SEPPathSimulationResult(NamedTuple):
@@ -1361,6 +1369,92 @@ class MacroModel:
                 f"({periods}, {self.timings.nExo}) or ({self.timings.nExo}, {periods}), got {values.shape}."
             )
         return jnp.asarray(values, dtype=jnp.float64)
+
+    def _coerce_batched_sep_deterministic_shocks(
+        self,
+        deterministic_shocks: Optional[
+            Sequence[Sequence[Sequence[float]]] | Mapping[str, Sequence[Sequence[float]]]
+        ],
+        *,
+        periods: int,
+        batch_size: Optional[int] = None,
+    ) -> jax.Array:
+        if deterministic_shocks is None:
+            if batch_size is None:
+                batch = 1
+            else:
+                batch = int(batch_size)
+                if batch < 1:
+                    raise ValueError(f"batch_size must be positive, got {batch_size}.")
+            return jnp.zeros((batch, periods, self.timings.nExo), dtype=jnp.float64)
+        if isinstance(deterministic_shocks, Mapping):
+            unexpected = sorted(
+                set(deterministic_shocks).difference(self.timings.exo)
+            )
+            if unexpected:
+                raise ValueError(
+                    "Unknown deterministic shock names: "
+                    + ", ".join(unexpected)
+                )
+            inferred_batch = batch_size
+            series_by_name: dict[str, np.ndarray] = {}
+            for name, series_raw in deterministic_shocks.items():
+                series = np.asarray(series_raw, dtype=np.float64)
+                if series.shape == (periods,):
+                    series = series[None, :]
+                if series.ndim != 2 or series.shape[1] != periods:
+                    raise ValueError(
+                        f"Batched deterministic shock `{name}` must have shape "
+                        f"({periods},) or (batch, {periods}), got {series.shape}."
+                    )
+                if inferred_batch is None:
+                    inferred_batch = int(series.shape[0])
+                elif int(series.shape[0]) not in {1, int(inferred_batch)}:
+                    raise ValueError(
+                        "Batched deterministic shock series must share a batch size; "
+                        f"`{name}` has {series.shape[0]}, expected {inferred_batch}."
+                    )
+                series_by_name[str(name)] = series
+            batch = 1 if inferred_batch is None else int(inferred_batch)
+            if batch < 1:
+                raise ValueError(f"batch_size must be positive, got {batch_size}.")
+            values = np.zeros((batch, periods, self.timings.nExo), dtype=np.float64)
+            for idx, name in enumerate(self.timings.exo):
+                if name not in series_by_name:
+                    continue
+                series = series_by_name[name]
+                values[:, :, idx] = (
+                    np.broadcast_to(series, (batch, periods))
+                    if series.shape[0] == 1
+                    else series
+                )
+            return jnp.asarray(values, dtype=jnp.float64)
+        values = np.asarray(deterministic_shocks, dtype=np.float64)
+        if values.ndim != 3:
+            raise ValueError(
+                "batched deterministic_shocks must have shape "
+                f"(batch, {periods}, {self.timings.nExo}) or "
+                f"(batch, {self.timings.nExo}, {periods}), got {values.shape}."
+            )
+        if values.shape[1:] == (periods, self.timings.nExo):
+            batch = int(values.shape[0])
+            if batch_size is not None and batch != int(batch_size):
+                raise ValueError(
+                    f"deterministic_shocks batch mismatch: got {batch}, expected {batch_size}."
+                )
+            return jnp.asarray(values, dtype=jnp.float64)
+        if values.shape[1:] == (self.timings.nExo, periods):
+            batch = int(values.shape[0])
+            if batch_size is not None and batch != int(batch_size):
+                raise ValueError(
+                    f"deterministic_shocks batch mismatch: got {batch}, expected {batch_size}."
+                )
+            return jnp.asarray(np.swapaxes(values, 1, 2), dtype=jnp.float64)
+        raise ValueError(
+            "batched deterministic_shocks must have shape "
+            f"(batch, {periods}, {self.timings.nExo}) or "
+            f"(batch, {self.timings.nExo}, {periods}), got {values.shape}."
+        )
 
     def _resolve_variable_selection(
         self,
@@ -6164,6 +6258,144 @@ class MacroModel:
         )
         return sep_result
 
+    def solve_batched_stochastic_extended_path(
+        self,
+        *,
+        parameter_values: Optional[Sequence[float]] = None,
+        steady_state: Optional[Sequence[float]] = None,
+        steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+        steady_state_tol: float = 1e-12,
+        steady_state_max_iter: int = 100,
+        initial_state: Optional[Sequence[Sequence[float]] | Sequence[float]] = None,
+        terminal_state: Optional[Sequence[Sequence[float]] | Sequence[float]] = None,
+        config: SEPConfig = SEPConfig(),
+        deterministic_shocks: Optional[
+            Sequence[Sequence[Sequence[float]]] | Mapping[str, Sequence[Sequence[float]]]
+        ] = None,
+        initial_guess: Optional[Sequence[Sequence[float]]] = None,
+        batch_size: Optional[int] = None,
+    ) -> ParsedModelBatchedSEPResult:
+        """Solve a fixed-shape batch of parsed-model SEP problems with JAX.
+
+        This keeps the MacroModelling-style parser and symbolic residuals, but
+        executes independent shock/initial-state draws through the batched JAX
+        SEP solver. Parameter values and steady state are fixed across the
+        batch in this first GPU target-generation bridge.
+        """
+
+        if len(self._dynamic_expressions) != self.timings.nVars:
+            raise ValueError(
+                "Batched SEP solution requires as many dynamic equations as present variables. "
+                f"Got {len(self._dynamic_expressions)} equations and {self.timings.nVars} variables."
+            )
+        if self.has_obc and self._obc_shock_indices.size:
+            raise NotImplementedError(
+                "Batched parsed-model SEP currently evaluates OBC residuals but does not "
+                "perform auxiliary OBC-shock reinjection. Use the sequential parsed SEP "
+                "path for models with OBC shock variables for now."
+            )
+
+        deterministic_shock_values = self._coerce_batched_sep_deterministic_shocks(
+            deterministic_shocks,
+            periods=config.periods,
+            batch_size=batch_size,
+        )
+        batch = int(deterministic_shock_values.shape[0])
+
+        if steady_state is None:
+            steady_state_result = self.solve_steady_state(
+                parameter_values=parameter_values,
+                initial_guess=steady_state_initial_guess,
+                tol=steady_state_tol,
+                max_iter=steady_state_max_iter,
+            )
+            full_steady_state = np.asarray(
+                steady_state_result.steady_state,
+                dtype=np.float64,
+            )
+            resolved_parameters = np.asarray(
+                steady_state_result.parameter_values,
+                dtype=np.float64,
+            )
+        else:
+            full_steady_state = self._coerce_full_steady_state(
+                steady_state,
+                parameter_values=parameter_values,
+            )
+            resolved_parameters = (
+                self._coerce_parameter_values(parameter_values)
+                if parameter_values is not None
+                else np.asarray(
+                    self.resolve_parameter_values(steady_state=full_steady_state),
+                    dtype=np.float64,
+                )
+            )
+
+        def coerce_batched_state(
+            values: Optional[Sequence[Sequence[float]] | Sequence[float]],
+            *,
+            label: str,
+        ) -> jax.Array:
+            if values is None:
+                return jnp.broadcast_to(
+                    jnp.asarray(full_steady_state, dtype=jnp.float64)[None, :],
+                    (batch, self.timings.nVars),
+                )
+            array = np.asarray(values, dtype=np.float64)
+            if array.shape == (self.timings.nVars,):
+                return jnp.broadcast_to(
+                    jnp.asarray(array, dtype=jnp.float64)[None, :],
+                    (batch, self.timings.nVars),
+                )
+            if array.shape == (batch, self.timings.nVars):
+                return jnp.asarray(array, dtype=jnp.float64)
+            if array.shape == (self.timings.nVars, batch):
+                return jnp.asarray(array.T, dtype=jnp.float64)
+            raise ValueError(
+                f"{label} must have shape ({self.timings.nVars},), "
+                f"({batch}, {self.timings.nVars}), or "
+                f"({self.timings.nVars}, {batch}), got {array.shape}."
+            )
+
+        initial_state_values = coerce_batched_state(initial_state, label="initial_state")
+        terminal_state_values = coerce_batched_state(terminal_state, label="terminal_state")
+        parameter_array = jnp.asarray(resolved_parameters, dtype=jnp.float64)
+        steady_reference_values = jnp.asarray(
+            self._steady_reference_values(full_steady_state),
+            dtype=jnp.float64,
+        )
+
+        def conditional_residual(
+            lag_state: jax.Array,
+            current_state: jax.Array,
+            lead_state: jax.Array,
+            current_shock: jax.Array,
+            _params: object,
+        ) -> jax.Array:
+            return self._evaluate_dynamic_residual_with_context(
+                lag_state,
+                current_state,
+                lead_state,
+                current_shock,
+                parameter_values=parameter_array,
+                steady_reference_values=steady_reference_values,
+            )
+
+        solution = solve_batched_stochastic_extended_path_residual_expectation(
+            conditional_residual,
+            initial_state=initial_state_values,
+            terminal_state=terminal_state_values,
+            shock_dim=self.timings.nExo,
+            config=config,
+            deterministic_shocks=deterministic_shock_values,
+            initial_guess=initial_guess,
+        )
+        return ParsedModelBatchedSEPResult(
+            steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+            parameter_values=parameter_array,
+            solution=solution,
+        )
+
     def solve_first_order(
         self,
         *,
@@ -7844,6 +8076,38 @@ def solve_stochastic_extended_path_model(
         config=config,
         deterministic_shocks=deterministic_shocks,
         initial_guess=initial_guess,
+    )
+
+
+def solve_batched_stochastic_extended_path_model(
+    model: MacroModel,
+    *,
+    parameter_values: Optional[Sequence[float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    initial_state: Optional[Sequence[Sequence[float]] | Sequence[float]] = None,
+    terminal_state: Optional[Sequence[Sequence[float]] | Sequence[float]] = None,
+    config: SEPConfig = SEPConfig(),
+    deterministic_shocks: Optional[
+        Sequence[Sequence[Sequence[float]]] | Mapping[str, Sequence[Sequence[float]]]
+    ] = None,
+    initial_guess: Optional[Sequence[Sequence[float]]] = None,
+    batch_size: Optional[int] = None,
+) -> ParsedModelBatchedSEPResult:
+    return model.solve_batched_stochastic_extended_path(
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+        steady_state_initial_guess=steady_state_initial_guess,
+        steady_state_tol=steady_state_tol,
+        steady_state_max_iter=steady_state_max_iter,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        config=config,
+        deterministic_shocks=deterministic_shocks,
+        initial_guess=initial_guess,
+        batch_size=batch_size,
     )
 
 
