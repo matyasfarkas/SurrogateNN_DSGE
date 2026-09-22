@@ -38,6 +38,7 @@ import jax.numpy as jnp
 from surrogatenn_dsge import (
     SEPConfig,
     SurrogateDataset,
+    build_surrogate_residual_arrays_jax,
     build_surrogate_residual_dataset,
     fit_surrogate_pipeline,
     parse_macro_model,
@@ -47,6 +48,7 @@ from surrogatenn_dsge import (
     summarize_surrogate_dataset,
     surrogate_inversion_loglik_per_period,
     surrogate_inversion_loglikelihood_jax,
+    train_surrogate_from_batched_arrays_jax,
     train_surrogate_from_dataset,
 )
 
@@ -238,6 +240,105 @@ def make_synthetic_hlt_surrogate_dataset(
     )
 
 
+def make_synthetic_hlt_batched_rollout_arrays(
+    *,
+    samples: int,
+    theta_draws: int,
+    shape: SyntheticHLTShape = SyntheticHLTShape(),
+    seed: int = 1234,
+    mask_fraction: float = 0.0,
+    device: Any = None,
+):
+    """Build fixed-shape HLT-like rollout tensors and assemble JAX arrays.
+
+    This synthetic path profiles the GPU-compatible layout expected from a future
+    batched SEP FOM generator: arrays are shaped ``(theta_draw, period, dim)``
+    and failed branches are represented by non-finite suffixes plus a mask.
+    """
+
+    if samples < 2:
+        raise ValueError(f"samples must be at least 2, got {samples}.")
+    if theta_draws < 2:
+        raise ValueError(f"theta_draws must be at least 2, got {theta_draws}.")
+    if mask_fraction < 0.0 or mask_fraction >= 1.0:
+        raise ValueError(f"mask_fraction must be in [0, 1), got {mask_fraction}.")
+
+    periods = max(1, int(math.ceil(int(samples) / int(theta_draws))))
+    rng = np.random.default_rng(int(seed))
+    theta = rng.uniform(low=-0.8, high=0.8, size=(shape.theta_dim, theta_draws))
+    states = rng.normal(scale=0.75, size=(theta_draws, periods, shape.state_dim))
+    shocks = rng.normal(scale=0.45, size=(theta_draws, periods, shape.shock_dim))
+
+    obs_state = rng.normal(scale=0.08, size=(shape.obs_dim, shape.state_dim))
+    obs_shock = rng.normal(scale=0.15, size=(shape.obs_dim, shape.shock_dim))
+    state_transition = _stable_transition_matrix(rng, shape.state_dim)
+    state_shock = rng.normal(scale=0.08, size=(shape.state_dim, shape.shock_dim))
+    obs_theta = rng.normal(scale=0.04, size=(shape.obs_dim, shape.theta_dim))
+    state_theta = rng.normal(scale=0.02, size=(shape.state_dim, shape.theta_dim))
+
+    theta_by_draw = theta.T[:, None, :]
+    theta_by_period = np.broadcast_to(theta_by_draw, (theta_draws, periods, shape.theta_dim))
+    rom_obs = np.einsum("os,tps->tpo", obs_state, states, optimize=True) + np.einsum(
+        "oe,tpe->tpo", obs_shock, shocks, optimize=True
+    )
+    rom_state_next = np.einsum("ij,tpj->tpi", state_transition, states, optimize=True) + np.einsum(
+        "ie,tpe->tpi", state_shock, shocks, optimize=True
+    )
+    shared_nl = np.tanh(
+        0.25 * np.sum(theta_by_draw[:, :, : min(6, shape.theta_dim)], axis=2, keepdims=True)
+        + 0.15 * np.sum(states[:, :, : min(6, shape.state_dim)], axis=2, keepdims=True)
+        + 0.20 * np.sum(shocks[:, :, : min(6, shape.shock_dim)], axis=2, keepdims=True)
+    )
+    obs_resid = (
+        0.05 * np.tanh(
+            np.einsum(
+                "oq,tpq->tpo",
+                obs_theta,
+                theta_by_period,
+                optimize=True,
+            )
+        )
+        + 0.03 * shared_nl
+        + 0.015 * np.sin(rom_obs)
+    )
+    state_resid = (
+        0.04 * np.tanh(
+            np.einsum(
+                "iq,tpq->tpi",
+                state_theta,
+                theta_by_period,
+                optimize=True,
+            )
+        )
+        + 0.02 * shared_nl
+        + 0.01 * np.sin(rom_state_next)
+    )
+    fom_obs = rom_obs + obs_resid
+    fom_state_next = rom_state_next + state_resid
+
+    if mask_fraction > 0.0 and periods > 1:
+        n_fail = min(theta_draws - 1, max(1, int(round(theta_draws * float(mask_fraction)))))
+        fail_ids = np.arange(theta_draws - n_fail, theta_draws, dtype=np.int64)
+        fail_from = max(1, periods // 2)
+        fom_obs[fail_ids, fail_from:, 0] = np.nan
+
+    def maybe_put(values: Any) -> Any:
+        array = jnp.asarray(values, dtype=jnp.float64)
+        return array if device is None else jax.device_put(array, device)
+
+    return build_surrogate_residual_arrays_jax(
+        maybe_put(states),
+        maybe_put(shocks),
+        maybe_put(theta),
+        maybe_put(rom_obs),
+        maybe_put(rom_state_next),
+        maybe_put(fom_obs),
+        maybe_put(fom_state_next),
+        target_mode="fom_full",
+        min_stable_periods=1,
+    )
+
+
 def _block_until_ready_tree(value: Any) -> None:
     leaves = jax.tree_util.tree_leaves(value)
     for leaf in leaves:
@@ -304,6 +405,87 @@ def run_training_profile(args: argparse.Namespace, shape: SyntheticHLTShape) -> 
             shape=shape,
             samples=args.samples,
             dtype=np.float64,
+        ),
+    }
+
+
+def run_batched_training_profile(args: argparse.Namespace, shape: SyntheticHLTShape) -> dict[str, Any]:
+    target_device = None if args.device == "auto" else resolve_jax_device(args.device)
+    started = time.perf_counter()
+    arrays = make_synthetic_hlt_batched_rollout_arrays(
+        samples=args.samples,
+        theta_draws=args.theta_draws,
+        shape=shape,
+        seed=args.seed,
+        mask_fraction=float(args.batched_mask_fraction),
+        device=target_device,
+    )
+    _block_until_ready_tree(arrays)
+    dataset_s = time.perf_counter() - started
+
+    train_started = time.perf_counter()
+    result = train_surrogate_from_batched_arrays_jax(
+        arrays,
+        architecture="resnet",
+        rom_residual=True,
+        only_full_success=bool(args.only_full_success),
+        seed=args.seed,
+        d_hidden=args.hidden,
+        n_blocks=args.blocks,
+        nepoch=args.epochs,
+        eta_init=args.learning_rate,
+        batch_size=args.batch_size,
+        device=target_device,
+    )
+    _block_until_ready_tree(result.frozen)
+    train_s = time.perf_counter() - train_started
+
+    probe_count = min(int(args.batch_size), int(arrays.X.shape[1]))
+    probe = arrays.X[:, :probe_count]
+
+    @jax.jit
+    def predict_once(x_batch: jax.Array) -> jax.Array:
+        return predict_frozen_batch(result.frozen, x_batch)
+
+    predict_started = time.perf_counter()
+    y0 = predict_once(probe)
+    y0.block_until_ready()
+    predict_first_s = time.perf_counter() - predict_started
+    mask = np.asarray(arrays.sample_mask, dtype=bool)
+    touched_samples = int(result.train_size) * int(args.epochs)
+    return {
+        "status": "ok",
+        "kind": "synthetic_hlt_fixed_shape_batched_training",
+        "backend": jax.default_backend(),
+        "target_device": None if target_device is None else str(target_device),
+        "shape": shape.__dict__,
+        "requested_samples": int(args.samples),
+        "actual_samples": int(arrays.X.shape[1]),
+        "theta_draws": int(args.theta_draws),
+        "periods": int(arrays.X.shape[1] // args.theta_draws),
+        "epochs": int(args.epochs),
+        "hidden": int(args.hidden),
+        "blocks": int(args.blocks),
+        "batch_size": int(args.batch_size),
+        "mask_fraction_requested": float(args.batched_mask_fraction),
+        "sample_mask_true_count": int(np.count_nonzero(mask)),
+        "sample_mask_false_count": int(mask.size - np.count_nonzero(mask)),
+        "theta_success_count": int(np.count_nonzero(np.asarray(arrays.theta_success, dtype=bool))),
+        "dataset_build_s": dataset_s,
+        "train_s": train_s,
+        "predict_first_s": predict_first_s,
+        "train_size": int(result.train_size),
+        "val_size": int(result.val_size),
+        "train_sample_updates_per_s": touched_samples / train_s if train_s > 0 else math.inf,
+        "masked_sample_count": int(result.metadata["masked_sample_count"]),
+        "memory_estimate_bytes": estimate_dataset_memory_bytes(
+            shape=shape,
+            samples=int(arrays.X.shape[1]),
+            dtype=np.float64,
+        ),
+        "caveat": (
+            "Synthetic fixed-shape rollout tensors profile the GPU-compatible training path. "
+            "They do not replace actual HLT SEP target-generation parity tests."
         ),
     }
 
@@ -1014,7 +1196,8 @@ def build_plan(args: argparse.Namespace, shape: SyntheticHLTShape) -> dict[str, 
         ),
         "caveats": [
             "The current surrogate training implementation stores and trains in float64.",
-            "The current SEP dataset-generation API is callback/Python-loop based, not a batched JAX SEP kernel.",
+            "Synthetic fixed-shape batched rollout training can be profiled with --mode batched-training.",
+            "Actual HLT SEP target generation is still callback/Python-loop based, not a batched JAX SEP kernel.",
             "This profiler can validate GPU training throughput now; it cannot certify full HLT SEP generation speedup yet.",
         ],
     }
@@ -1029,6 +1212,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "calibration",
             "training-scale",
             "full-scout",
+            "batched-training",
             "sep-micro",
             "callback-dataset",
             "hlt-fixed-ss-smoke",
@@ -1048,6 +1232,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--split-by-theta", action="store_true")
     parser.add_argument("--seed", type=int, default=20260918)
     parser.add_argument("--predict-reps", type=int)
+    parser.add_argument("--batched-mask-fraction", type=float, default=0.0)
+    parser.add_argument("--only-full-success", action="store_true")
     parser.add_argument("--state-dim", type=int, default=40)
     parser.add_argument("--shock-dim", type=int, default=7)
     parser.add_argument("--theta-dim", type=int, default=18)
@@ -1129,6 +1315,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         payload["results"]["callback_dataset"] = run_callback_dataset_profile(args, shape)
         if args.mode == "calibration":
             payload["results"]["sep_micro"] = run_sep_micro_profile(args)
+    elif args.mode == "batched-training":
+        payload["results"]["batched_training"] = run_batched_training_profile(args, shape)
     elif args.mode == "sep-micro":
         payload["results"]["sep_micro"] = run_sep_micro_profile(args)
     elif args.mode == "callback-dataset":

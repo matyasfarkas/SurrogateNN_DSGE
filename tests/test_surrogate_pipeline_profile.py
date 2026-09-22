@@ -89,3 +89,66 @@ def test_training_profile_tiny_cpu_smoke() -> None:
     assert result["samples"] == 32
     assert result["train_size"] > 0
     assert result["train_s"] >= 0.0
+
+
+def test_synthetic_batched_hlt_rollout_arrays_include_masked_failures() -> None:
+    mod = _load_profile_module()
+    shape = mod.SyntheticHLTShape(state_dim=4, shock_dim=2, theta_dim=3, obs_dim=2)
+    arrays = mod.make_synthetic_hlt_batched_rollout_arrays(
+        samples=20,
+        theta_draws=4,
+        shape=shape,
+        seed=456,
+        mask_fraction=0.25,
+    )
+
+    assert arrays.X.shape == (9, 20)
+    assert arrays.Y.shape == (6, 20)
+    assert arrays.Y_rom.shape == (6, 20)
+    assert arrays.theta.shape == (3, 4)
+    assert int(np.count_nonzero(np.asarray(arrays.sample_mask, dtype=bool))) < arrays.X.shape[1]
+    assert int(np.count_nonzero(np.asarray(arrays.theta_success, dtype=bool))) == 3
+
+
+def test_batched_training_profile_tiny_cpu_smoke() -> None:
+    mod = _load_profile_module()
+    args = mod.parse_args(
+        [
+            "--mode",
+            "batched-training",
+            "--device",
+            "cpu",
+            "--samples",
+            "16",
+            "--theta-draws",
+            "4",
+            "--epochs",
+            "1",
+            "--batch-size",
+            "4",
+            "--hidden",
+            "8",
+            "--blocks",
+            "0",
+            "--state-dim",
+            "4",
+            "--shock-dim",
+            "2",
+            "--theta-dim",
+            "3",
+            "--obs-dim",
+            "2",
+            "--batched-mask-fraction",
+            "0.25",
+        ]
+    )
+    shape = mod.SyntheticHLTShape(state_dim=4, shock_dim=2, theta_dim=3, obs_dim=2)
+    result = mod.run_batched_training_profile(args, shape)
+
+    assert result["status"] == "ok"
+    assert result["kind"] == "synthetic_hlt_fixed_shape_batched_training"
+    assert result["actual_samples"] == 16
+    assert result["train_size"] > 0
+    assert result["sample_mask_false_count"] > 0
+    assert result["masked_sample_count"] == result["sample_mask_false_count"]
+    assert result["train_s"] >= 0.0
