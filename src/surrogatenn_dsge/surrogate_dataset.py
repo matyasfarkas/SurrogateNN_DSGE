@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .parameter_sampling import ParameterDesign
+from .sep import BatchedSEPSolution
 
 
 PredictTupleFn = Callable[[Any, Any, Any], tuple[Any, Any]]
@@ -450,6 +451,104 @@ def build_surrogate_residual_arrays_jax(
         sample_mask=jnp.reshape(sample_mask, (n_theta * periods,)),
         theta_success=theta_success,
         theta_stable_periods=theta_stable_periods,
+    )
+
+
+def build_surrogate_residual_arrays_from_batched_sep_jax(
+    states: Any,
+    shocks: Any,
+    theta_design: ParameterDesign | jax.Array | np.ndarray,
+    rom_obs: Any,
+    rom_state_next: Any,
+    sep_solution: BatchedSEPSolution,
+    observable_indices: Sequence[int],
+    *,
+    target_mode: str = "residual_full",
+    min_stable_periods: int = 1,
+    require_accepted: bool = True,
+) -> BatchedSurrogateRolloutArrays:
+    """Assemble GPU-friendly surrogate targets from a batched SEP solve.
+
+    ``sep_solution.mean_path`` is expected to have shape
+    ``(n_theta, state_dim, periods + 1)``. The FOM next-state target for period
+    ``t`` is the SEP mean state at ``t + 1``; FOM observables are selected from
+    that next-state path using ``observable_indices``. Failed SEP draws are
+    masked out by default instead of being silently used for training.
+    """
+
+    theta = _theta_array_jax(theta_design)
+    if theta.shape[1] < 1:
+        raise ValueError("theta_design must contain at least one theta draw.")
+    if int(min_stable_periods) < 0:
+        raise ValueError(f"min_stable_periods must be nonnegative, got {min_stable_periods}.")
+    n_theta = int(theta.shape[1])
+
+    states_array = _as_batched_rollout_array_jax(states, label="states", n_theta=n_theta)
+    periods = int(states_array.shape[1])
+    state_dim = int(states_array.shape[2])
+    shocks_array = _as_batched_rollout_array_jax(shocks, label="shocks", n_theta=n_theta, periods=periods)
+    rom_obs_array = _as_batched_rollout_array_jax(rom_obs, label="rom_obs", n_theta=n_theta, periods=periods)
+    rom_state_next_array = _as_batched_rollout_array_jax(
+        rom_state_next,
+        label="rom_state_next",
+        n_theta=n_theta,
+        periods=periods,
+        dim=state_dim,
+    )
+
+    mean_path = jnp.asarray(sep_solution.mean_path, dtype=jnp.float64)
+    if mean_path.ndim != 3:
+        raise ValueError(
+            "sep_solution.mean_path must have shape (n_theta, state_dim, periods + 1), "
+            f"got {mean_path.shape}."
+        )
+    if mean_path.shape[0] != n_theta:
+        raise ValueError(
+            f"sep_solution.mean_path theta-axis mismatch: expected {n_theta}, got {mean_path.shape[0]}."
+        )
+    if mean_path.shape[1] != state_dim:
+        raise ValueError(
+            "sep_solution.mean_path state-axis mismatch: expected "
+            f"{state_dim}, got {mean_path.shape[1]}."
+        )
+    if mean_path.shape[2] < periods + 1:
+        raise ValueError(
+            "sep_solution.mean_path must contain at least periods + 1 states; "
+            f"expected {periods + 1}, got {mean_path.shape[2]}."
+        )
+
+    obs_idx_np = np.asarray(observable_indices, dtype=np.int64).reshape(-1)
+    if obs_idx_np.size < 1:
+        raise ValueError("observable_indices must contain at least one state index.")
+    if np.any(obs_idx_np < 0) or np.any(obs_idx_np >= state_dim):
+        raise ValueError(
+            "observable_indices out of bounds for SEP state dimension "
+            f"{state_dim}: {obs_idx_np.tolist()}."
+        )
+
+    fom_state_next = jnp.swapaxes(mean_path[:, :, 1 : periods + 1], 1, 2)
+    fom_obs = jnp.take(fom_state_next, jnp.asarray(obs_idx_np, dtype=jnp.int32), axis=2)
+
+    if bool(require_accepted):
+        accepted = jnp.asarray(sep_solution.accepted, dtype=bool).reshape(-1)
+        if accepted.shape[0] != n_theta:
+            raise ValueError(
+                "sep_solution.accepted must have one entry per theta draw; "
+                f"expected {n_theta}, got {accepted.shape[0]}."
+            )
+        fom_state_next = jnp.where(accepted[:, None, None], fom_state_next, jnp.nan)
+        fom_obs = jnp.where(accepted[:, None, None], fom_obs, jnp.nan)
+
+    return build_surrogate_residual_arrays_jax(
+        states_array,
+        shocks_array,
+        theta,
+        rom_obs_array,
+        rom_state_next_array,
+        fom_obs,
+        fom_state_next,
+        target_mode=target_mode,
+        min_stable_periods=min_stable_periods,
     )
 
 

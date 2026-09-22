@@ -188,3 +188,52 @@ def test_batched_sep_micro_profile_tiny_cpu_smoke() -> None:
     assert result["accepted_count"] == 3
     assert result["converged_count"] == 3
     assert result["median_s"] >= 0.0
+
+
+def test_batched_sep_training_profile_tiny_cpu_smoke() -> None:
+    mod = _load_profile_module()
+    args = mod.parse_args(
+        [
+            "--mode",
+            "batched-sep-training",
+            "--device",
+            "cpu",
+            "--sep-batch-size",
+            "3",
+            "--sep-state-dim",
+            "2",
+            "--sep-shock-dim",
+            "1",
+            "--sep-periods",
+            "3",
+            "--sep-order",
+            "1",
+            "--sep-nnodes",
+            "3",
+            "--sep-max-iter",
+            "10",
+            "--epochs",
+            "1",
+            "--batch-size",
+            "4",
+            "--hidden",
+            "8",
+            "--blocks",
+            "0",
+            "--theta-dim",
+            "3",
+            "--obs-dim",
+            "1",
+        ]
+    )
+    shape = mod.SyntheticHLTShape(state_dim=4, shock_dim=2, theta_dim=3, obs_dim=1)
+    result = mod.run_batched_sep_training_profile(args, shape)
+
+    assert result["status"] == "ok"
+    assert result["kind"] == "synthetic_batched_sep_target_training"
+    assert result["batch_size"] == 3
+    assert result["actual_samples"] == 9
+    assert result["sep_accepted_count"] == 3
+    assert result["sep_converged_count"] == 3
+    assert result["train_size"] > 0
+    assert result["end_to_end_s"] >= 0.0

@@ -4,11 +4,15 @@ import numpy as np
 import pytest
 
 from surrogatenn_dsge import (
+    SEPConfig,
+    BatchedSEPSolution,
     BatchedSurrogateRolloutArrays,
     ParameterDesign,
+    build_surrogate_residual_arrays_from_batched_sep_jax,
     build_surrogate_residual_arrays_jax,
     build_surrogate_residual_dataset,
     build_surrogate_residual_dataset_from_batched_rollouts,
+    solve_batched_stochastic_extended_path_residual_expectation,
     summarize_surrogate_dataset,
 )
 
@@ -224,6 +228,100 @@ def test_jax_rollout_arrays_keep_fixed_shape_and_mask_matches_sequential_dataset
     np.testing.assert_array_equal(np.asarray(arrays.period_ids), sequential.period_ids)
     np.testing.assert_array_equal(np.asarray(arrays.theta_success), sequential.theta_success)
     np.testing.assert_array_equal(np.asarray(arrays.theta_stable_periods), sequential.theta_stable_periods)
+
+
+def test_batched_sep_solution_builds_jax_rollout_arrays_like_manual_targets() -> None:
+    theta = jnp.asarray([[0.15, 0.25]], dtype=jnp.float64)
+    initial_state = jnp.asarray([[0.0], [0.1]], dtype=jnp.float64)
+    terminal_state = jnp.asarray([0.0], dtype=jnp.float64)
+    shocks = jnp.asarray(
+        [
+            [[0.10], [-0.04], [0.02]],
+            [[-0.03], [0.05], [0.01]],
+        ],
+        dtype=jnp.float64,
+    )
+
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        return y_curr - (params[0] + 0.35 * y_prev + 0.10 * y_next + shock)
+
+    sep_solution = solve_batched_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        shock_dim=1,
+        deterministic_shocks=shocks,
+        config=SEPConfig(periods=3, branching_order=1, nnodes=3, max_iter=20, tol=1e-10),
+        params=theta.T,
+    )
+    assert np.all(np.asarray(sep_solution.accepted))
+
+    states = jnp.swapaxes(sep_solution.mean_path[:, :, :-1], 1, 2)
+    fom_state_next = jnp.swapaxes(sep_solution.mean_path[:, :, 1:], 1, 2)
+    rom_state_next = 0.7 * states + shocks
+    rom_obs = rom_state_next
+
+    from_sep = build_surrogate_residual_arrays_from_batched_sep_jax(
+        states,
+        shocks,
+        theta,
+        rom_obs,
+        rom_state_next,
+        sep_solution,
+        observable_indices=[0],
+        target_mode="fom_full",
+    )
+    manual = build_surrogate_residual_arrays_jax(
+        states,
+        shocks,
+        theta,
+        rom_obs,
+        rom_state_next,
+        fom_state_next,
+        fom_state_next,
+        target_mode="fom_full",
+    )
+
+    np.testing.assert_allclose(np.asarray(from_sep.X), np.asarray(manual.X), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(from_sep.Y), np.asarray(manual.Y), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(from_sep.Y_rom), np.asarray(manual.Y_rom), rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(np.asarray(from_sep.sample_mask), np.asarray(manual.sample_mask))
+    np.testing.assert_array_equal(np.asarray(from_sep.theta_success), np.asarray([True, True]))
+
+
+def test_batched_sep_rejected_draws_are_masked_from_jax_rollout_arrays() -> None:
+    theta, _, _, _, rollouts = _batched_fixture()
+    states, shocks_by_period, rom_obs, rom_state_next, _, fom_state_next = rollouts
+    path_by_time = jnp.concatenate([states[:, :1, :], fom_state_next], axis=1)
+    sep_solution = BatchedSEPSolution(
+        stacked_states=jnp.zeros((theta.shape[1], 1), dtype=jnp.float64),
+        mean_path=jnp.swapaxes(path_by_time, 1, 2),
+        residual_norm=jnp.asarray([1e-12, 1.0, 1e-12], dtype=jnp.float64),
+        converged=jnp.asarray([True, False, True]),
+        accepted=jnp.asarray([True, False, True]),
+        iterations=jnp.asarray([1, 1, 1], dtype=jnp.int32),
+        group_counts=(1, 1, 1, 1),
+        jacobian_method="autodiff",
+    )
+
+    arrays = build_surrogate_residual_arrays_from_batched_sep_jax(
+        states,
+        shocks_by_period,
+        theta,
+        rom_obs,
+        rom_state_next,
+        sep_solution,
+        observable_indices=[0],
+        target_mode="residual_obs",
+        min_stable_periods=1,
+    )
+    mask_by_draw = np.asarray(arrays.sample_mask, dtype=bool).reshape(theta.shape[1], -1)
+
+    np.testing.assert_array_equal(mask_by_draw[0], np.ones((states.shape[1],), dtype=bool))
+    np.testing.assert_array_equal(mask_by_draw[1], np.zeros((states.shape[1],), dtype=bool))
+    np.testing.assert_array_equal(mask_by_draw[2], np.ones((states.shape[1],), dtype=bool))
+    np.testing.assert_array_equal(np.asarray(arrays.theta_success), np.asarray([True, False, True]))
+    np.testing.assert_array_equal(np.asarray(arrays.theta_stable_periods), np.asarray([4, 0, 4]))
 
 
 def test_jax_rollout_arrays_jit_and_mask_nonfinite_stable_prefix() -> None:

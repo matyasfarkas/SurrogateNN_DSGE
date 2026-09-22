@@ -38,6 +38,7 @@ import jax.numpy as jnp
 from surrogatenn_dsge import (
     SEPConfig,
     SurrogateDataset,
+    build_surrogate_residual_arrays_from_batched_sep_jax,
     build_surrogate_residual_arrays_jax,
     build_surrogate_residual_dataset,
     fit_surrogate_pipeline,
@@ -767,6 +768,186 @@ def run_batched_sep_micro_profile(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticHLTShape) -> dict[str, Any]:
+    """Profile the GPU-native SEP-solve -> target-array -> ResNet path.
+
+    This remains a synthetic conditional-residual benchmark. It is the fixed
+    shape path needed for GPU target generation, but it does not yet represent
+    parsed HLT equations or OBC enforcement.
+    """
+
+    target_device = None if args.device == "auto" else resolve_jax_device(args.device)
+    state_dim = int(args.sep_state_dim)
+    shock_dim = int(args.sep_shock_dim)
+    batch_size = int(args.sep_batch_size)
+    theta_dim = int(shape.theta_dim)
+    obs_dim = min(int(shape.obs_dim), state_dim)
+    if state_dim < 1:
+        raise ValueError(f"sep_state_dim must be positive, got {state_dim}.")
+    if shock_dim < 1:
+        raise ValueError(f"sep_shock_dim must be positive, got {shock_dim}.")
+    if batch_size < 1:
+        raise ValueError(f"sep_batch_size must be positive, got {batch_size}.")
+    if theta_dim < 1:
+        raise ValueError(f"theta_dim must be positive, got {theta_dim}.")
+    if obs_dim < 1:
+        raise ValueError("obs_dim must be positive and no larger than sep_state_dim for this profile.")
+
+    rng = np.random.default_rng(int(args.seed) + 97)
+    theta_np = rng.normal(scale=0.20, size=(theta_dim, batch_size))
+    initial_np = rng.normal(scale=0.04, size=(batch_size, state_dim))
+    terminal_np = np.zeros((state_dim,), dtype=np.float64)
+    deterministic_np = rng.normal(scale=0.02, size=(batch_size, int(args.sep_periods), shock_dim))
+    if int(args.sep_periods) > 1:
+        deterministic_np[:, 1:, :] *= 0.25
+    sep_shock_np = rng.normal(scale=0.06, size=(state_dim, shock_dim))
+    theta_state_np = rng.normal(scale=0.015, size=(state_dim, theta_dim))
+    rom_transition_np = _stable_transition_matrix(rng, state_dim)
+    rom_shock_np = rng.normal(scale=0.05, size=(state_dim, shock_dim))
+    rom_theta_np = rng.normal(scale=0.01, size=(state_dim, theta_dim))
+    observable_idx = np.arange(obs_dim, dtype=np.int64)
+
+    def put(values: Any) -> jax.Array:
+        array = jnp.asarray(values, dtype=jnp.float64)
+        return array if target_device is None else jax.device_put(array, target_device)
+
+    theta = put(theta_np)
+    params = jnp.swapaxes(theta, 0, 1)
+    initial = put(initial_np)
+    terminal = put(terminal_np)
+    deterministic = put(deterministic_np)
+    sep_shock = put(sep_shock_np)
+    theta_state = put(theta_state_np)
+    rom_transition = put(rom_transition_np)
+    rom_shock = put(rom_shock_np)
+    rom_theta = put(rom_theta_np)
+    gamma = jnp.asarray(0.04, dtype=jnp.float64)
+
+    def conditional_residual(
+        prev_state: jax.Array,
+        current_state: jax.Array,
+        next_state: jax.Array,
+        current_shock: jax.Array,
+        theta_one: jax.Array,
+    ) -> jax.Array:
+        rho = 0.76 + 0.08 * jax.nn.sigmoid(theta_one[0])
+        theta_push = theta_state @ theta_one
+        target = rho * prev_state + gamma * jnp.tanh(next_state) + sep_shock @ current_shock
+        return current_state - (target + jnp.tanh(theta_push))
+
+    config = SEPConfig(
+        periods=int(args.sep_periods),
+        branching_order=int(args.sep_order),
+        nnodes=int(args.sep_nnodes),
+        sparse_tree=bool(args.sep_sparse_tree),
+        max_iter=int(args.sep_max_iter),
+        tol=float(args.sep_tol),
+        accept_tol=float(args.sep_accept_tol),
+        line_search=True,
+        line_search_batch=True,
+        jit=True,
+        vectorize_residual=True,
+    )
+
+    solve_started = time.perf_counter()
+    sep_solution = solve_batched_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=initial,
+        terminal_state=terminal,
+        shock_dim=shock_dim,
+        deterministic_shocks=deterministic,
+        config=config,
+        params=params,
+    )
+    _block_until_ready_tree(sep_solution)
+    solve_s = time.perf_counter() - solve_started
+
+    assemble_started = time.perf_counter()
+    states = jnp.swapaxes(sep_solution.mean_path[:, :, :-1], 1, 2)
+    theta_effect = jnp.einsum("ij,bj->bi", rom_theta, params)
+    rom_state_next = (
+        jnp.einsum("ij,bpj->bpi", rom_transition, states)
+        + jnp.einsum("ij,bpj->bpi", rom_shock, deterministic)
+        + theta_effect[:, None, :]
+    )
+    rom_obs = jnp.take(rom_state_next, jnp.asarray(observable_idx, dtype=jnp.int32), axis=2)
+    arrays = build_surrogate_residual_arrays_from_batched_sep_jax(
+        states,
+        deterministic,
+        theta,
+        rom_obs,
+        rom_state_next,
+        sep_solution,
+        observable_indices=observable_idx,
+        target_mode="fom_full",
+        min_stable_periods=1,
+    )
+    _block_until_ready_tree(arrays)
+    assemble_s = time.perf_counter() - assemble_started
+
+    train_started = time.perf_counter()
+    result = train_surrogate_from_batched_arrays_jax(
+        arrays,
+        architecture="resnet",
+        rom_residual=True,
+        only_full_success=bool(args.only_full_success),
+        seed=args.seed,
+        d_hidden=args.hidden,
+        n_blocks=args.blocks,
+        nepoch=args.epochs,
+        eta_init=args.learning_rate,
+        batch_size=args.batch_size,
+        device=target_device,
+    )
+    _block_until_ready_tree(result.frozen)
+    train_s = time.perf_counter() - train_started
+
+    mask = np.asarray(arrays.sample_mask, dtype=bool)
+    accepted = np.asarray(sep_solution.accepted, dtype=bool)
+    converged = np.asarray(sep_solution.converged, dtype=bool)
+    touched_samples = int(result.train_size) * int(args.epochs)
+    return {
+        "status": "ok",
+        "kind": "synthetic_batched_sep_target_training",
+        "backend": jax.default_backend(),
+        "target_device": None if target_device is None else str(target_device),
+        "batch_size": batch_size,
+        "actual_samples": int(arrays.X.shape[1]),
+        "state_dim": state_dim,
+        "shock_dim": shock_dim,
+        "theta_dim": theta_dim,
+        "obs_dim": obs_dim,
+        "periods": int(config.periods),
+        "branching_order": int(config.branching_order),
+        "nnodes": int(config.nnodes),
+        "sparse_tree": bool(config.sparse_tree),
+        "epochs": int(args.epochs),
+        "hidden": int(args.hidden),
+        "blocks": int(args.blocks),
+        "training_batch_size": int(args.batch_size),
+        "sep_solve_s": solve_s,
+        "target_assemble_s": assemble_s,
+        "train_s": train_s,
+        "end_to_end_s": solve_s + assemble_s + train_s,
+        "sep_accepted_count": int(np.count_nonzero(accepted)),
+        "sep_converged_count": int(np.count_nonzero(converged)),
+        "sample_mask_true_count": int(np.count_nonzero(mask)),
+        "sample_mask_false_count": int(mask.size - np.count_nonzero(mask)),
+        "train_size": int(result.train_size),
+        "val_size": int(result.val_size),
+        "train_sample_updates_per_s": touched_samples / train_s if train_s > 0 else math.inf,
+        "target_samples_per_s": int(arrays.X.shape[1]) / (solve_s + assemble_s)
+        if solve_s + assemble_s > 0
+        else math.inf,
+        "max_residual_norm": float(np.max(np.asarray(sep_solution.residual_norm))),
+        "masked_sample_count": int(result.metadata["masked_sample_count"]),
+        "caveat": (
+            "Synthetic batched conditional-residual SEP target-generation and training. "
+            "This exercises the GPU-native shape and masking path, not parsed HLT equations or OBC enforcement."
+        ),
+    }
+
+
 def _load_hlt_payload_case(args: argparse.Namespace) -> dict[str, Any]:
     payload_path = Path(args.hlt_payload)
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
@@ -1298,7 +1479,8 @@ def build_plan(args: argparse.Namespace, shape: SyntheticHLTShape) -> dict[str, 
         "caveats": [
             "The current surrogate training implementation stores and trains in float64.",
             "Synthetic fixed-shape batched rollout training can be profiled with --mode batched-training.",
-            "Actual HLT SEP target generation is still callback/Python-loop based, not a batched JAX SEP kernel.",
+            "Synthetic batched SEP target generation plus training can be profiled with --mode batched-sep-training.",
+            "Actual parsed HLT SEP target generation is still callback/Python-loop based, not a fully batched JAX kernel.",
             "This profiler can validate GPU training throughput now; it cannot certify full HLT SEP generation speedup yet.",
         ],
     }
@@ -1316,6 +1498,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "batched-training",
             "sep-micro",
             "batched-sep-micro",
+            "batched-sep-training",
             "callback-dataset",
             "hlt-fixed-ss-smoke",
         ),
@@ -1424,6 +1607,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         payload["results"]["sep_micro"] = run_sep_micro_profile(args)
     elif args.mode == "batched-sep-micro":
         payload["results"]["batched_sep_micro"] = run_batched_sep_micro_profile(args)
+    elif args.mode == "batched-sep-training":
+        payload["results"]["batched_sep_training"] = run_batched_sep_training_profile(args, shape)
     elif args.mode == "callback-dataset":
         payload["results"]["callback_dataset"] = run_callback_dataset_profile(args, shape)
     elif args.mode == "hlt-fixed-ss-smoke":
