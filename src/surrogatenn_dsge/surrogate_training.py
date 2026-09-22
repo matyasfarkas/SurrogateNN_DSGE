@@ -25,9 +25,12 @@ from .surrogate_dataset import (
     BatchedSurrogateRolloutArrays,
     PredictTupleFn,
     SurrogateDataset,
+    build_surrogate_residual_arrays_from_batched_sep_jax,
     build_surrogate_residual_dataset,
+    summarize_batched_surrogate_arrays,
     summarize_surrogate_dataset,
 )
+from .sep import BatchedSEPSolution
 
 
 SURROGATE_BUNDLE_VERSION = 1
@@ -146,6 +149,19 @@ class SurrogatePipelineResult:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "dataset_summary", dict(self.dataset_summary))
+        if self.bundle_path is not None:
+            object.__setattr__(self, "bundle_path", Path(self.bundle_path))
+
+
+@dataclass(frozen=True)
+class BatchedSurrogatePipelineResult:
+    arrays: BatchedSurrogateRolloutArrays
+    array_summary: dict[str, object]
+    training: SurrogateTrainingResult
+    bundle_path: Optional[Path] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "array_summary", dict(self.array_summary))
         if self.bundle_path is not None:
             object.__setattr__(self, "bundle_path", Path(self.bundle_path))
 
@@ -833,6 +849,140 @@ def train_surrogate_from_batched_arrays_jax(
         target_is_residual=bool(rom_residual),
         output_indices=out_idx,
         metadata=metadata,
+    )
+
+
+def fit_surrogate_pipeline_from_batched_arrays_jax(
+    arrays: BatchedSurrogateRolloutArrays,
+    *,
+    architecture: str = "resnet",
+    rom_residual: bool = True,
+    output_indices: Optional[Sequence[int] | np.ndarray] = None,
+    only_full_success: bool = False,
+    train_seed: int = 1,
+    sample_weights: Optional[Any] = None,
+    d_hidden: int = 128,
+    d_hidden2: Optional[int] = 64,
+    n_blocks: int = 3,
+    nepoch: Optional[int] = None,
+    eta_init: float = 1e-3,
+    batch_size: Optional[int] = None,
+    weight_decay: float = 1e-5,
+    clip_norm: float = 5.0,
+    activation: str = "silu",
+    device: Optional[Any] = None,
+    bundle_path: Optional[str | Path] = None,
+    bundle_metadata: Optional[dict[str, object]] = None,
+) -> BatchedSurrogatePipelineResult:
+    """Train a surrogate from fixed-shape JAX arrays without CPU compaction."""
+
+    array_summary = summarize_batched_surrogate_arrays(arrays)
+    training = train_surrogate_from_batched_arrays_jax(
+        arrays,
+        architecture=architecture,
+        rom_residual=rom_residual,
+        output_indices=output_indices,
+        only_full_success=only_full_success,
+        seed=train_seed,
+        sample_weights=sample_weights,
+        d_hidden=d_hidden,
+        d_hidden2=d_hidden2,
+        n_blocks=n_blocks,
+        nepoch=nepoch,
+        eta_init=eta_init,
+        batch_size=batch_size,
+        weight_decay=weight_decay,
+        clip_norm=clip_norm,
+        activation=activation,
+        device=device,
+    )
+    saved_path: Optional[Path] = None
+    if bundle_path is not None:
+        metadata = {
+            "pipeline": "fit_surrogate_pipeline_from_batched_arrays_jax",
+            "array_summary": array_summary,
+        }
+        if bundle_metadata is not None:
+            metadata.update(bundle_metadata)
+        saved_path = save_surrogate_bundle(bundle_path, training, metadata=metadata)
+    return BatchedSurrogatePipelineResult(
+        arrays=arrays,
+        array_summary=array_summary,
+        training=training,
+        bundle_path=saved_path,
+    )
+
+
+def fit_surrogate_pipeline_from_batched_sep_jax(
+    states: Any,
+    shocks: Any,
+    theta_design: Any,
+    rom_obs: Any,
+    rom_state_next: Any,
+    sep_solution: BatchedSEPSolution,
+    observable_indices: Sequence[int],
+    *,
+    target_mode: str = "fom_full",
+    min_stable_periods: int = 1,
+    require_accepted: bool = True,
+    architecture: str = "resnet",
+    rom_residual: bool = True,
+    output_indices: Optional[Sequence[int] | np.ndarray] = None,
+    only_full_success: bool = False,
+    train_seed: int = 1,
+    sample_weights: Optional[Any] = None,
+    d_hidden: int = 128,
+    d_hidden2: Optional[int] = 64,
+    n_blocks: int = 3,
+    nepoch: Optional[int] = None,
+    eta_init: float = 1e-3,
+    batch_size: Optional[int] = None,
+    weight_decay: float = 1e-5,
+    clip_norm: float = 5.0,
+    activation: str = "silu",
+    device: Optional[Any] = None,
+    bundle_path: Optional[str | Path] = None,
+    bundle_metadata: Optional[dict[str, object]] = None,
+) -> BatchedSurrogatePipelineResult:
+    """Build SEP FOM targets and train a surrogate on a JAX device.
+
+    This is the GPU-oriented pipeline for fixed-shape batched SEP output. It
+    does not compact valid samples to a host ``SurrogateDataset``; rejected SEP
+    draws and non-finite stable suffixes remain represented by masks.
+    """
+
+    arrays = build_surrogate_residual_arrays_from_batched_sep_jax(
+        states,
+        shocks,
+        theta_design,
+        rom_obs,
+        rom_state_next,
+        sep_solution,
+        observable_indices,
+        target_mode=target_mode,
+        min_stable_periods=min_stable_periods,
+        require_accepted=require_accepted,
+    )
+    return fit_surrogate_pipeline_from_batched_arrays_jax(
+        arrays,
+        architecture=architecture,
+        rom_residual=rom_residual,
+        output_indices=output_indices,
+        only_full_success=only_full_success,
+        train_seed=train_seed,
+        sample_weights=sample_weights,
+        d_hidden=d_hidden,
+        d_hidden2=d_hidden2,
+        n_blocks=n_blocks,
+        nepoch=nepoch,
+        eta_init=eta_init,
+        batch_size=batch_size,
+        weight_decay=weight_decay,
+        clip_norm=clip_norm,
+        activation=activation,
+        device=device,
+        bundle_path=bundle_path,
+        bundle_metadata=bundle_metadata,
     )
 
 

@@ -790,3 +790,39 @@ def summarize_surrogate_dataset(dataset: SurrogateDataset) -> dict[str, object]:
         "samples_per_theta": dict(zip(range(dataset.n_theta), theta_counts.astype(int))),
         "Y_rmse_vs_rom": float(np.sqrt(np.mean((dataset.Y - dataset.Y_rom) ** 2))) if dataset.Y_rom is not None else None,
     }
+
+
+def summarize_batched_surrogate_arrays(arrays: BatchedSurrogateRolloutArrays) -> dict[str, object]:
+    """Summarize fixed-shape JAX rollout arrays without compacting samples."""
+
+    mask = np.asarray(arrays.sample_mask, dtype=bool).reshape(-1)
+    theta_success = np.asarray(arrays.theta_success, dtype=bool).reshape(-1)
+    theta_stable_periods = np.asarray(arrays.theta_stable_periods, dtype=np.int64).reshape(-1)
+    theta_ids = np.asarray(arrays.theta_ids, dtype=np.int64).reshape(-1)
+    n_theta = int(arrays.theta.shape[1])
+    theta_counts = np.bincount(theta_ids[mask], minlength=n_theta)
+    return {
+        "n_samples_total": int(arrays.X.shape[1]),
+        "n_samples_valid": int(np.count_nonzero(mask)),
+        "n_samples_masked": int(mask.size - np.count_nonzero(mask)),
+        "n_theta": n_theta,
+        "input_dim": int(arrays.X.shape[0]),
+        "output_dim": int(arrays.Y.shape[0]),
+        "theta_success_rate": float(np.mean(theta_success)) if theta_success.size else 0.0,
+        "min_stable_periods": int(np.min(theta_stable_periods)) if theta_stable_periods.size else 0,
+        "max_stable_periods": int(np.max(theta_stable_periods)) if theta_stable_periods.size else 0,
+        "valid_samples_per_theta": dict(zip(range(n_theta), theta_counts.astype(int))),
+        "Y_rmse_vs_rom_valid": float(
+            np.sqrt(
+                np.mean(
+                    (
+                        np.asarray(arrays.Y[:, mask], dtype=np.float64)
+                        - np.asarray(arrays.Y_rom[:, mask], dtype=np.float64)
+                    )
+                    ** 2
+                )
+            )
+        )
+        if np.count_nonzero(mask)
+        else None,
+    }

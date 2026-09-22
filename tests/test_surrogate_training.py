@@ -1,19 +1,26 @@
 from __future__ import annotations
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from surrogatenn_dsge import (
+    SEPConfig,
+    BatchedSurrogatePipelineResult,
     FrozenResNet,
     SurrogateDataset,
     build_surrogate_residual_arrays_jax,
+    fit_surrogate_pipeline_from_batched_arrays_jax,
+    fit_surrogate_pipeline_from_batched_sep_jax,
     fit_surrogate_pipeline,
     load_surrogate_bundle,
     predict_frozen_batch,
     resolve_jax_device,
     save_surrogate_bundle,
+    solve_batched_stochastic_extended_path_residual_expectation,
     split_surrogate_dataset,
+    surrogate_inversion_loglikelihood_jax,
     surrogate_sample_weights_from_residuals,
     train_surrogate_from_batched_arrays_jax,
     train_surrogate_from_dataset,
@@ -190,6 +197,129 @@ def test_train_surrogate_from_batched_arrays_uses_masked_jax_rollouts() -> None:
     assert _array_platform(result.frozen.W1) == "cpu"
     prediction = np.asarray(predict_frozen_batch(result.frozen, np.asarray(arrays.X)[:, :2]), dtype=np.float64)
     assert np.isfinite(prediction).all()
+
+
+def test_fit_surrogate_pipeline_from_batched_arrays_jax_runs_without_compaction() -> None:
+    theta = np.asarray([[0.1, 0.2], [1.0, 1.2]], dtype=np.float64)
+    states = np.asarray(
+        [
+            [[0.0, 0.1], [0.2, 0.0], [0.3, -0.1]],
+            [[-0.1, 0.0], [0.1, 0.2], [0.2, 0.3]],
+        ],
+        dtype=np.float64,
+    )
+    shocks = np.asarray([[[0.05], [0.10], [-0.02]], [[0.02], [-0.01], [0.04]]], dtype=np.float64)
+    rom_obs = 0.4 * states[:, :, :1] + shocks
+    rom_state_next = states + np.concatenate([shocks, -shocks], axis=2)
+    fom_obs = rom_obs + 0.1 * states[:, :, :1] ** 2 + theta.T[:, None, :1]
+    fom_state_next = rom_state_next + 0.05 * np.concatenate([shocks**2, shocks**2], axis=2)
+    arrays = build_surrogate_residual_arrays_jax(
+        states,
+        shocks,
+        theta,
+        rom_obs,
+        rom_state_next,
+        fom_obs,
+        fom_state_next,
+        target_mode="fom_full",
+    )
+
+    result = fit_surrogate_pipeline_from_batched_arrays_jax(
+        arrays,
+        architecture="resnet",
+        rom_residual=True,
+        d_hidden=8,
+        n_blocks=0,
+        nepoch=2,
+        batch_size=2,
+        train_seed=19,
+        device="cpu",
+    )
+
+    assert isinstance(result, BatchedSurrogatePipelineResult)
+    assert result.array_summary["n_samples_total"] == 6
+    assert result.array_summary["n_samples_valid"] == 6
+    assert result.training.metadata["jax_device_platform"] == "cpu"
+    assert _array_platform(result.training.frozen.W_embed) == "cpu"
+
+
+def test_fit_surrogate_pipeline_from_batched_sep_jax_supports_jitted_likelihood_smoke() -> None:
+    theta = jnp.asarray([[0.10, 0.20]], dtype=jnp.float64)
+    initial_state = jnp.asarray([[0.0], [0.05]], dtype=jnp.float64)
+    terminal_state = jnp.asarray([0.0], dtype=jnp.float64)
+    shocks = jnp.asarray(
+        [
+            [[0.08], [-0.03], [0.02]],
+            [[-0.02], [0.04], [0.01]],
+        ],
+        dtype=jnp.float64,
+    )
+
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        return y_curr - (params[0] + 0.30 * y_prev + 0.05 * y_next + shock)
+
+    sep_solution = solve_batched_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=initial_state,
+        terminal_state=terminal_state,
+        shock_dim=1,
+        deterministic_shocks=shocks,
+        config=SEPConfig(periods=3, branching_order=1, nnodes=3, max_iter=20, tol=1e-10),
+        params=theta.T,
+    )
+    states = jnp.swapaxes(sep_solution.mean_path[:, :, :-1], 1, 2)
+    rom_state_next = 0.75 * states + shocks
+    rom_obs = rom_state_next
+
+    result = fit_surrogate_pipeline_from_batched_sep_jax(
+        states,
+        shocks,
+        theta,
+        rom_obs,
+        rom_state_next,
+        sep_solution,
+        observable_indices=[0],
+        architecture="resnet",
+        rom_residual=True,
+        d_hidden=8,
+        n_blocks=0,
+        nepoch=2,
+        batch_size=2,
+        train_seed=23,
+        device="cpu",
+    )
+    assert result.array_summary["n_samples_valid"] == 6
+    assert result.training.train_size == 6
+
+    def rom_predict(state, shock_t, theta_t):
+        del theta_t
+        state_vec = jnp.asarray(state, dtype=jnp.float64).reshape(-1)
+        shock_vec = jnp.asarray(shock_t, dtype=jnp.float64).reshape(-1)
+        next_state = 0.75 * state_vec + shock_vec
+        return next_state, next_state
+
+    fom_state_next = jnp.swapaxes(sep_solution.mean_path[:, :, 1:], 1, 2)
+    obs_data = fom_state_next[0].T
+    obs_sigma = jnp.asarray([0.10], dtype=jnp.float64)
+    shock_sigma = jnp.asarray([0.15], dtype=jnp.float64)
+
+    def loglik(theta_local):
+        return surrogate_inversion_loglikelihood_jax(
+            rom_predict,
+            result.training.frozen,
+            initial_state[0],
+            theta_local,
+            obs_data,
+            obs_sigma,
+            shock_sigma,
+            maxit=2,
+            tol=1e-5,
+            lambda_=1e-4,
+        )
+
+    value, grad = jax.jit(jax.value_and_grad(loglik))(theta[:, 0])
+    assert np.isfinite(float(value))
+    np.testing.assert_array_equal(np.isfinite(np.asarray(grad)), np.ones((1,), dtype=bool))
 
 
 def test_save_and_load_surrogate_training_result_bundle_round_trips_predictions(tmp_path) -> None:

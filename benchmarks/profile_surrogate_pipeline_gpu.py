@@ -822,6 +822,7 @@ def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticH
     rom_shock = put(rom_shock_np)
     rom_theta = put(rom_theta_np)
     gamma = jnp.asarray(0.04, dtype=jnp.float64)
+    observable_idx_jax = jnp.asarray(observable_idx, dtype=jnp.int32)
 
     def conditional_residual(
         prev_state: jax.Array,
@@ -834,6 +835,17 @@ def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticH
         theta_push = theta_state @ theta_one
         target = rho * prev_state + gamma * jnp.tanh(next_state) + sep_shock @ current_shock
         return current_state - (target + jnp.tanh(theta_push))
+
+    def rom_predict_jax(
+        state: jax.Array,
+        shock_t: jax.Array,
+        theta_local: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+        state_vec = jnp.asarray(state, dtype=jnp.float64).reshape(-1)
+        shock_vec = jnp.asarray(shock_t, dtype=jnp.float64).reshape(-1)
+        theta_vec = jnp.asarray(theta_local, dtype=jnp.float64).reshape(-1)
+        state_next = rom_transition @ state_vec + rom_shock @ shock_vec + rom_theta @ theta_vec
+        return jnp.take(state_next, observable_idx_jax, axis=0), state_next
 
     config = SEPConfig(
         periods=int(args.sep_periods),
@@ -902,9 +914,50 @@ def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticH
     _block_until_ready_tree(result.frozen)
     train_s = time.perf_counter() - train_started
 
+    predict_count = min(int(args.batch_size), int(arrays.X.shape[1]))
+    predict_probe = arrays.X[:, :predict_count]
+
+    @jax.jit
+    def predict_once(x_batch: jax.Array) -> jax.Array:
+        return predict_frozen_batch(result.frozen, x_batch)
+
+    predict_started = time.perf_counter()
+    y_probe = predict_once(predict_probe)
+    y_probe.block_until_ready()
+    predict_first_s = time.perf_counter() - predict_started
+
+    likelihood_started = time.perf_counter()
+    fom_state_next = jnp.swapaxes(sep_solution.mean_path[:, :, 1 : int(config.periods) + 1], 1, 2)
+    obs_data = jnp.take(fom_state_next[0], observable_idx_jax, axis=1).T
+    obs_sigma = jnp.full((obs_dim,), 0.10, dtype=jnp.float64)
+    shock_sigmas = jnp.full((shock_dim,), 0.15, dtype=jnp.float64)
+
+    def loglikelihood(theta_local: jax.Array) -> jax.Array:
+        return surrogate_inversion_loglikelihood_jax(
+            rom_predict_jax,
+            result.frozen,
+            initial[0],
+            theta_local,
+            obs_data,
+            obs_sigma,
+            shock_sigmas,
+            maxit=int(args.hlt_surrogate_inversion_maxit),
+            tol=float(args.hlt_surrogate_inversion_tol),
+            lambda_=float(args.hlt_surrogate_inversion_lambda),
+            shock_solver=str(args.hlt_jax_shock_solver),
+            batch_replay=bool(args.hlt_jax_batch_replay),
+            differentiate_shocks=bool(args.hlt_jax_differentiate_shocks),
+        )
+
+    value_and_grad = jax.jit(jax.value_and_grad(loglikelihood))
+    loglikelihood_value, loglikelihood_grad = value_and_grad(theta[:, 0])
+    _block_until_ready_tree((loglikelihood_value, loglikelihood_grad))
+    likelihood_s = time.perf_counter() - likelihood_started
+
     mask = np.asarray(arrays.sample_mask, dtype=bool)
     accepted = np.asarray(sep_solution.accepted, dtype=bool)
     converged = np.asarray(sep_solution.converged, dtype=bool)
+    loglikelihood_grad_np = np.asarray(loglikelihood_grad, dtype=np.float64)
     touched_samples = int(result.train_size) * int(args.epochs)
     return {
         "status": "ok",
@@ -928,7 +981,9 @@ def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticH
         "sep_solve_s": solve_s,
         "target_assemble_s": assemble_s,
         "train_s": train_s,
-        "end_to_end_s": solve_s + assemble_s + train_s,
+        "predict_first_s": predict_first_s,
+        "jax_likelihood_first_s": likelihood_s,
+        "end_to_end_s": solve_s + assemble_s + train_s + predict_first_s + likelihood_s,
         "sep_accepted_count": int(np.count_nonzero(accepted)),
         "sep_converged_count": int(np.count_nonzero(converged)),
         "sample_mask_true_count": int(np.count_nonzero(mask)),
@@ -941,6 +996,13 @@ def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticH
         else math.inf,
         "max_residual_norm": float(np.max(np.asarray(sep_solution.residual_norm))),
         "masked_sample_count": int(result.metadata["masked_sample_count"]),
+        "jax_likelihood_status": "ok"
+        if bool(np.isfinite(float(loglikelihood_value))) and bool(np.isfinite(loglikelihood_grad_np).all())
+        else "nonfinite",
+        "jax_likelihood_value": float(loglikelihood_value),
+        "jax_likelihood_grad_norm": float(np.linalg.norm(loglikelihood_grad_np)),
+        "jax_likelihood_grad_finite": bool(np.isfinite(loglikelihood_grad_np).all()),
+        "prediction_output_norm": float(np.linalg.norm(np.asarray(y_probe))),
         "caveat": (
             "Synthetic batched conditional-residual SEP target-generation and training. "
             "This exercises the GPU-native shape and masking path, not parsed HLT equations or OBC enforcement."

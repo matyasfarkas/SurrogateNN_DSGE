@@ -236,4 +236,6 @@ def test_batched_sep_training_profile_tiny_cpu_smoke() -> None:
     assert result["sep_accepted_count"] == 3
     assert result["sep_converged_count"] == 3
     assert result["train_size"] > 0
+    assert result["jax_likelihood_status"] == "ok"
+    assert result["jax_likelihood_grad_finite"]
     assert result["end_to_end_s"] >= 0.0
