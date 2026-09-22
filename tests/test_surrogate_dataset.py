@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 
 from surrogatenn_dsge import (
+    BatchedSurrogateRolloutArrays,
     ParameterDesign,
+    build_surrogate_residual_arrays_jax,
     build_surrogate_residual_dataset,
     build_surrogate_residual_dataset_from_batched_rollouts,
     summarize_surrogate_dataset,
@@ -187,6 +189,103 @@ def test_batched_jax_rollouts_match_sequential_dataset_with_theta_specific_shock
     np.testing.assert_array_equal(batched.period_ids, sequential.period_ids)
     np.testing.assert_array_equal(batched.theta_success, sequential.theta_success)
     np.testing.assert_array_equal(batched.theta_stable_periods, sequential.theta_stable_periods)
+
+
+def test_jax_rollout_arrays_keep_fixed_shape_and_mask_matches_sequential_dataset() -> None:
+    theta, initial_states, shocks_theta_feature_period, _, rollouts = _batched_fixture()
+    states, shocks_by_period, rom_obs, rom_state_next, fom_obs, fom_state_next = rollouts
+    sequential = build_surrogate_residual_dataset(
+        _rom_predict,
+        _fom_predict,
+        initial_state=initial_states,
+        shocks=shocks_theta_feature_period,
+        theta_design=theta,
+        target_mode="residual_full",
+    )
+
+    arrays = build_surrogate_residual_arrays_jax(
+        states,
+        shocks_by_period,
+        theta,
+        rom_obs,
+        rom_state_next,
+        fom_obs,
+        fom_state_next,
+        target_mode="residual_full",
+    )
+
+    assert isinstance(arrays, BatchedSurrogateRolloutArrays)
+    assert arrays.X.shape[1] == theta.shape[1] * shocks_theta_feature_period.shape[2]
+    np.testing.assert_array_equal(np.asarray(arrays.sample_mask), np.ones((arrays.X.shape[1],), dtype=bool))
+    np.testing.assert_allclose(np.asarray(arrays.X), sequential.X, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(arrays.Y), sequential.Y, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(arrays.Y_rom), sequential.Y_rom, rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(np.asarray(arrays.theta_ids), sequential.theta_ids)
+    np.testing.assert_array_equal(np.asarray(arrays.period_ids), sequential.period_ids)
+    np.testing.assert_array_equal(np.asarray(arrays.theta_success), sequential.theta_success)
+    np.testing.assert_array_equal(np.asarray(arrays.theta_stable_periods), sequential.theta_stable_periods)
+
+
+def test_jax_rollout_arrays_jit_and_mask_nonfinite_stable_prefix() -> None:
+    theta, initial_states, shocks_theta_feature_period, _, rollouts = _batched_fixture()
+    states, shocks_by_period, rom_obs, rom_state_next, fom_obs, fom_state_next = rollouts
+    fom_obs_nonfinite = np.asarray(fom_obs, dtype=np.float64).copy()
+    fom_obs_nonfinite[1, 2, 0] = np.nan
+
+    def failing_fom(state, shock, theta_values):
+        if np.isclose(float(np.asarray(theta_values)[0]), 0.2) and np.isclose(float(np.asarray(shock)[0]), 0.73):
+            raise RuntimeError("synthetic batched non-finite path")
+        return _fom_predict(state, shock, theta_values)
+
+    sequential = build_surrogate_residual_dataset(
+        _rom_predict,
+        failing_fom,
+        initial_state=initial_states,
+        shocks=shocks_theta_feature_period,
+        theta_design=theta,
+        target_mode="residual_obs",
+        min_stable_periods=2,
+    )
+
+    @jax.jit
+    def assemble(
+        states_arg,
+        shocks_arg,
+        theta_arg,
+        rom_obs_arg,
+        rom_state_next_arg,
+        fom_obs_arg,
+        fom_state_next_arg,
+    ):
+        return build_surrogate_residual_arrays_jax(
+            states_arg,
+            shocks_arg,
+            theta_arg,
+            rom_obs_arg,
+            rom_state_next_arg,
+            fom_obs_arg,
+            fom_state_next_arg,
+            target_mode="residual_obs",
+            min_stable_periods=2,
+        )
+
+    arrays = assemble(
+        states,
+        shocks_by_period,
+        jnp.asarray(theta, dtype=jnp.float64),
+        rom_obs,
+        rom_state_next,
+        jnp.asarray(fom_obs_nonfinite, dtype=jnp.float64),
+        fom_state_next,
+    )
+    mask = np.asarray(arrays.sample_mask, dtype=bool)
+
+    np.testing.assert_allclose(np.asarray(arrays.X)[:, mask], sequential.X, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(arrays.Y)[:, mask], sequential.Y, rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(np.asarray(arrays.theta_ids)[mask], sequential.theta_ids)
+    np.testing.assert_array_equal(np.asarray(arrays.period_ids)[mask], sequential.period_ids)
+    np.testing.assert_array_equal(np.asarray(arrays.theta_success), np.asarray([True, False, True]))
+    np.testing.assert_array_equal(np.asarray(arrays.theta_stable_periods), np.asarray([4, 2, 4]))
 
 
 def test_batched_rollouts_match_sequential_stable_prefix_when_one_theta_turns_nonfinite() -> None:

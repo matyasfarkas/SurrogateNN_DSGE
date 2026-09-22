@@ -7,6 +7,7 @@ import pytest
 from surrogatenn_dsge import (
     FrozenResNet,
     SurrogateDataset,
+    build_surrogate_residual_arrays_jax,
     fit_surrogate_pipeline,
     load_surrogate_bundle,
     predict_frozen_batch,
@@ -14,6 +15,7 @@ from surrogatenn_dsge import (
     save_surrogate_bundle,
     split_surrogate_dataset,
     surrogate_sample_weights_from_residuals,
+    train_surrogate_from_batched_arrays_jax,
     train_surrogate_from_dataset,
 )
 
@@ -140,6 +142,54 @@ def test_train_surrogate_from_dataset_resnet_dispatch_accepts_device_selector() 
     assert result.val_size == 0
     assert result.metadata["jax_device_platform"] == "cpu"
     assert _array_platform(result.frozen.W_embed) == "cpu"
+
+
+def test_train_surrogate_from_batched_arrays_uses_masked_jax_rollouts() -> None:
+    theta = np.asarray([[0.1, 0.2], [1.0, 1.2]], dtype=np.float64)
+    states = np.asarray(
+        [
+            [[0.0, 0.1], [0.2, 0.0], [0.3, -0.1], [0.4, 0.2]],
+            [[-0.1, 0.0], [0.1, 0.2], [0.2, 0.3], [0.3, 0.4]],
+        ],
+        dtype=np.float64,
+    )
+    shocks = np.asarray([[[0.05], [0.10], [-0.02], [0.03]], [[0.02], [-0.01], [0.04], [0.06]]], dtype=np.float64)
+    rom_obs = 0.4 * states[:, :, :1] + shocks
+    rom_state_next = states + np.concatenate([shocks, -shocks], axis=2)
+    fom_obs = rom_obs + 0.1 * states[:, :, :1] ** 2 + theta.T[:, None, :1]
+    fom_state_next = rom_state_next + 0.05 * np.concatenate([shocks**2, shocks**2], axis=2)
+    fom_obs[1, 2, 0] = np.nan
+
+    arrays = build_surrogate_residual_arrays_jax(
+        states,
+        shocks,
+        theta,
+        rom_obs,
+        rom_state_next,
+        fom_obs,
+        fom_state_next,
+        target_mode="fom_obs",
+        min_stable_periods=2,
+    )
+    result = train_surrogate_from_batched_arrays_jax(
+        arrays,
+        architecture="mlp",
+        rom_residual=True,
+        d_hidden=8,
+        d_hidden2=None,
+        nepoch=4,
+        batch_size=1,
+        seed=14,
+        device="cpu",
+    )
+
+    assert result.train_size == 6
+    assert result.val_size == 0
+    assert result.metadata["masked_sample_count"] == 2
+    assert result.metadata["jax_device_platform"] == "cpu"
+    assert _array_platform(result.frozen.W1) == "cpu"
+    prediction = np.asarray(predict_frozen_batch(result.frozen, np.asarray(arrays.X)[:, :2]), dtype=np.float64)
+    assert np.isfinite(prediction).all()
 
 
 def test_save_and_load_surrogate_training_result_bundle_round_trips_predictions(tmp_path) -> None:

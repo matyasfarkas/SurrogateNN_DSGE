@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, NamedTuple, Optional, Sequence
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 
 from .parameter_sampling import ParameterDesign
@@ -10,6 +12,22 @@ from .parameter_sampling import ParameterDesign
 
 PredictTupleFn = Callable[[Any, Any, Any], tuple[Any, Any]]
 _TARGET_MODES = ("residual_obs", "residual_full", "fom_obs", "fom_full")
+
+
+class BatchedSurrogateRolloutArrays(NamedTuple):
+    X: jax.Array
+    Y: jax.Array
+    Y_rom: jax.Array
+    theta: jax.Array
+    theta_ids: jax.Array
+    period_ids: jax.Array
+    sample_mask: jax.Array
+    theta_success: jax.Array
+    theta_stable_periods: jax.Array
+
+    @property
+    def n_samples_total(self) -> int:
+        return int(self.X.shape[1])
 
 
 @dataclass(frozen=True)
@@ -107,6 +125,14 @@ def _theta_matrix(theta_design: ParameterDesign | np.ndarray) -> tuple[np.ndarra
     return theta, tuple(f"theta_{i}" for i in range(theta.shape[0]))
 
 
+def _theta_array_jax(theta_design: ParameterDesign | jax.Array | np.ndarray) -> jax.Array:
+    theta_source = theta_design.theta if isinstance(theta_design, ParameterDesign) else theta_design
+    theta = jnp.asarray(theta_source, dtype=jnp.float64)
+    if theta.ndim != 2:
+        raise ValueError(f"theta_design must be rank-2, got shape {theta.shape}.")
+    return theta
+
+
 def _coerce_shocks(shocks: Any, *, n_theta: int) -> np.ndarray:
     array = np.asarray(shocks, dtype=np.float64)
     if array.ndim == 2:
@@ -192,6 +218,35 @@ def _as_batched_rollout_tensor(
     return array
 
 
+def _as_batched_rollout_array_jax(
+    values: Any,
+    *,
+    label: str,
+    n_theta: int,
+    periods: Optional[int] = None,
+    dim: Optional[int] = None,
+) -> jax.Array:
+    array = jnp.asarray(values, dtype=jnp.float64)
+    if array.ndim != 3:
+        raise ValueError(f"{label} must have shape (n_theta, periods, dim), got {array.shape}.")
+    if array.shape[0] != int(n_theta):
+        raise ValueError(
+            f"{label} theta-axis mismatch: expected {int(n_theta)} theta draws on axis 0, "
+            f"got shape {array.shape}."
+        )
+    if periods is not None and array.shape[1] != int(periods):
+        raise ValueError(
+            f"{label} period-axis mismatch: expected {int(periods)} periods on axis 1, "
+            f"got shape {array.shape}."
+        )
+    if dim is not None and array.shape[2] != int(dim):
+        raise ValueError(
+            f"{label} feature-axis mismatch: expected dimension {int(dim)} on axis 2, "
+            f"got shape {array.shape}."
+        )
+    return array
+
+
 def _finite_period_mask(*arrays: np.ndarray) -> np.ndarray:
     if not arrays:
         raise ValueError("At least one rollout tensor is required.")
@@ -208,6 +263,20 @@ def _stable_prefix_lengths(finite_by_period: np.ndarray) -> np.ndarray:
         first_bad = np.flatnonzero(~theta_finite)
         stable_periods[theta_idx] = total_periods if first_bad.size == 0 else int(first_bad[0])
     return stable_periods
+
+
+def _finite_period_mask_jax(*arrays: jax.Array) -> jax.Array:
+    if not arrays:
+        raise ValueError("At least one rollout tensor is required.")
+    mask = jnp.ones(arrays[0].shape[:2], dtype=bool)
+    for array in arrays:
+        mask = mask & jnp.all(jnp.isfinite(array), axis=2)
+    return mask
+
+
+def _stable_prefix_lengths_jax(finite_by_period: jax.Array) -> jax.Array:
+    finite_int = finite_by_period.astype(jnp.int32)
+    return jnp.sum(jnp.cumprod(finite_int, axis=1), axis=1).astype(jnp.int32)
 
 
 def _target_vector(
@@ -235,6 +304,31 @@ def _target_vector(
     return y, y_rom
 
 
+def _target_arrays_jax(
+    target_mode: str,
+    fom_obs: jax.Array,
+    fom_state_next: jax.Array,
+    rom_obs: jax.Array,
+    rom_state_next: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    if target_mode == "residual_obs":
+        y = fom_obs - rom_obs
+        y_rom = jnp.zeros_like(y)
+    elif target_mode == "residual_full":
+        y = jnp.concatenate([fom_obs - rom_obs, fom_state_next - rom_state_next], axis=2)
+        y_rom = jnp.zeros_like(y)
+    elif target_mode == "fom_obs":
+        y = fom_obs
+        y_rom = rom_obs
+    elif target_mode == "fom_full":
+        y = jnp.concatenate([fom_obs, fom_state_next], axis=2)
+        y_rom = jnp.concatenate([rom_obs, rom_state_next], axis=2)
+    else:
+        _normalize_target_mode(target_mode)
+        raise AssertionError("unreachable target_mode branch")
+    return y, y_rom
+
+
 def _sample_periods(
     available: int,
     samples_per_theta: Optional[int],
@@ -252,6 +346,111 @@ def _sample_periods(
     if replace:
         return rng.integers(0, available, size=n_samples, endpoint=False, dtype=np.int64)
     return np.sort(rng.choice(available, size=n_samples, replace=False)).astype(np.int64)
+
+
+def build_surrogate_residual_arrays_jax(
+    states: Any,
+    shocks: Any,
+    theta_design: ParameterDesign | jax.Array | np.ndarray,
+    rom_obs: Any,
+    rom_state_next: Any,
+    fom_obs: Any,
+    fom_state_next: Any,
+    *,
+    target_mode: str = "residual_full",
+    min_stable_periods: int = 1,
+) -> BatchedSurrogateRolloutArrays:
+    """Assemble fixed-shape surrogate arrays on a JAX device.
+
+    Inputs use shape ``(n_theta, periods, dim)``. The returned matrices keep all
+    theta-period columns and provide ``sample_mask`` for valid stable-prefix
+    samples, avoiding host-side compaction in GPU profiling/training pipelines.
+    """
+
+    theta = _theta_array_jax(theta_design)
+    if theta.shape[1] < 1:
+        raise ValueError("theta_design must contain at least one theta draw.")
+    if int(min_stable_periods) < 0:
+        raise ValueError(f"min_stable_periods must be nonnegative, got {min_stable_periods}.")
+    n_theta = int(theta.shape[1])
+
+    states_array = _as_batched_rollout_array_jax(states, label="states", n_theta=n_theta)
+    periods = int(states_array.shape[1])
+    state_dim = int(states_array.shape[2])
+    shocks_array = _as_batched_rollout_array_jax(shocks, label="shocks", n_theta=n_theta, periods=periods)
+    rom_obs_array = _as_batched_rollout_array_jax(rom_obs, label="rom_obs", n_theta=n_theta, periods=periods)
+    fom_obs_array = _as_batched_rollout_array_jax(
+        fom_obs,
+        label="fom_obs",
+        n_theta=n_theta,
+        periods=periods,
+        dim=int(rom_obs_array.shape[2]),
+    )
+    rom_state_next_array = _as_batched_rollout_array_jax(
+        rom_state_next,
+        label="rom_state_next",
+        n_theta=n_theta,
+        periods=periods,
+        dim=state_dim,
+    )
+    fom_state_next_array = _as_batched_rollout_array_jax(
+        fom_state_next,
+        label="fom_state_next",
+        n_theta=n_theta,
+        periods=periods,
+        dim=state_dim,
+    )
+
+    target_mode_norm = _normalize_target_mode(target_mode)
+    finite_by_period = _finite_period_mask_jax(
+        states_array,
+        shocks_array,
+        rom_obs_array,
+        rom_state_next_array,
+        fom_obs_array,
+        fom_state_next_array,
+    )
+    theta_stable_periods = _stable_prefix_lengths_jax(finite_by_period)
+    period_grid = jnp.broadcast_to(
+        jnp.arange(periods, dtype=jnp.int32)[None, :],
+        (n_theta, periods),
+    )
+    sample_mask = (period_grid < theta_stable_periods[:, None]) & (
+        theta_stable_periods[:, None] >= int(min_stable_periods)
+    )
+    theta_success = (theta_stable_periods >= int(min_stable_periods)) & (
+        theta_stable_periods == periods
+    )
+
+    theta_by_period = jnp.broadcast_to(
+        theta.T[:, None, :],
+        (n_theta, periods, int(theta.shape[0])),
+    )
+    x = jnp.concatenate([states_array, shocks_array, theta_by_period], axis=2)
+    y, y_rom = _target_arrays_jax(
+        target_mode_norm,
+        fom_obs_array,
+        fom_state_next_array,
+        rom_obs_array,
+        rom_state_next_array,
+    )
+    theta_ids = jnp.broadcast_to(
+        jnp.arange(n_theta, dtype=jnp.int32)[:, None],
+        (n_theta, periods),
+    )
+    period_ids = period_grid
+
+    return BatchedSurrogateRolloutArrays(
+        X=jnp.reshape(x, (n_theta * periods, x.shape[2])).T,
+        Y=jnp.reshape(y, (n_theta * periods, y.shape[2])).T,
+        Y_rom=jnp.reshape(y_rom, (n_theta * periods, y_rom.shape[2])).T,
+        theta=theta,
+        theta_ids=jnp.reshape(theta_ids, (n_theta * periods,)),
+        period_ids=jnp.reshape(period_ids, (n_theta * periods,)),
+        sample_mask=jnp.reshape(sample_mask, (n_theta * periods,)),
+        theta_success=theta_success,
+        theta_stable_periods=theta_stable_periods,
+    )
 
 
 def build_surrogate_residual_dataset(

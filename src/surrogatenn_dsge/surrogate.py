@@ -28,13 +28,28 @@ def _as_jax_array(values: Any, *, label: str, ndim: Optional[int] = None) -> jax
     return array
 
 
-def _as_numpy_matrix(values: Any, *, label: str, copy: bool) -> np.ndarray:
+def _as_numpy_matrix(
+    values: Any,
+    *,
+    label: str,
+    copy: bool,
+    allow_nonfinite: bool = False,
+) -> np.ndarray:
     array = np.array(values, dtype=np.float64, copy=copy)
     if array.ndim != 2:
         raise ValueError(f"{label} must be rank-2 with shape (dim, samples), got {array.shape}.")
-    if not np.isfinite(array).all():
+    if not allow_nonfinite and not np.isfinite(array).all():
         raise ValueError(f"{label} contains non-finite values.")
     return array
+
+
+def _as_sample_weights(sample_weights: Any, n_samples: int) -> np.ndarray:
+    weights = np.asarray(sample_weights, dtype=np.float64).reshape(-1)
+    if weights.shape[0] != n_samples:
+        raise ValueError(f"sample_weights length mismatch: {weights.shape[0]} vs {n_samples}.")
+    if not np.isfinite(weights).all() or np.any(weights < 0.0) or not np.sum(weights) > 0.0:
+        raise ValueError("sample_weights must be finite, nonnegative, and have positive sum.")
+    return weights
 
 
 def _safe_std(std_values: np.ndarray) -> np.ndarray:
@@ -277,17 +292,42 @@ def standardize_xy(
     Y: Any,
     *,
     copy: bool = True,
+    sample_weights: Optional[ArrayLike] = None,
 ) -> tuple[np.ndarray, np.ndarray, NormStats]:
-    X_arr = _as_numpy_matrix(X, label="X", copy=copy)
-    Y_arr = _as_numpy_matrix(Y, label="Y", copy=copy)
+    allow_nonfinite = sample_weights is not None
+    X_arr = _as_numpy_matrix(X, label="X", copy=copy, allow_nonfinite=allow_nonfinite)
+    Y_arr = _as_numpy_matrix(Y, label="Y", copy=copy, allow_nonfinite=allow_nonfinite)
     if X_arr.shape[1] != Y_arr.shape[1]:
         raise ValueError(f"X/Y sample count mismatch: {X_arr.shape[1]} vs {Y_arr.shape[1]}.")
-    mu_x = np.mean(X_arr, axis=1)
-    sigma_x = _safe_std(np.std(X_arr, axis=1, ddof=0))
-    X_arr[...] = (X_arr - mu_x[:, None]) / sigma_x[:, None]
-    mu_y = np.mean(Y_arr, axis=1)
-    sigma_y = _safe_std(np.std(Y_arr, axis=1, ddof=0))
-    Y_arr[...] = (Y_arr - mu_y[:, None]) / sigma_y[:, None]
+    if sample_weights is None:
+        mu_x = np.mean(X_arr, axis=1)
+        sigma_x = _safe_std(np.std(X_arr, axis=1, ddof=0))
+        X_arr[...] = (X_arr - mu_x[:, None]) / sigma_x[:, None]
+        mu_y = np.mean(Y_arr, axis=1)
+        sigma_y = _safe_std(np.std(Y_arr, axis=1, ddof=0))
+        Y_arr[...] = (Y_arr - mu_y[:, None]) / sigma_y[:, None]
+        return X_arr, Y_arr, NormStats(mu_x, sigma_x, mu_y, sigma_y)
+
+    weights = _as_sample_weights(sample_weights, X_arr.shape[1])
+    finite_cols = np.isfinite(X_arr).all(axis=0) & np.isfinite(Y_arr).all(axis=0)
+    if np.any((weights > 0.0) & ~finite_cols):
+        raise ValueError("Positive-weight samples must be finite.")
+    effective_weights = np.where(finite_cols, weights, 0.0)
+    total_weight = float(np.sum(effective_weights))
+    if not total_weight > 0.0:
+        raise ValueError("sample_weights must assign positive mass to at least one finite sample.")
+
+    X_clean = np.where(np.isfinite(X_arr), X_arr, 0.0)
+    Y_clean = np.where(np.isfinite(Y_arr), Y_arr, 0.0)
+    w = effective_weights[None, :]
+    mu_x = np.sum(X_clean * w, axis=1) / total_weight
+    sigma_x = _safe_std(np.sqrt(np.sum(((X_clean - mu_x[:, None]) ** 2) * w, axis=1) / total_weight))
+    mu_y = np.sum(Y_clean * w, axis=1) / total_weight
+    sigma_y = _safe_std(np.sqrt(np.sum(((Y_clean - mu_y[:, None]) ** 2) * w, axis=1) / total_weight))
+    X_arr[...] = (X_clean - mu_x[:, None]) / sigma_x[:, None]
+    Y_arr[...] = (Y_clean - mu_y[:, None]) / sigma_y[:, None]
+    X_arr[:, ~finite_cols] = 0.0
+    Y_arr[:, ~finite_cols] = 0.0
     return X_arr, Y_arr, NormStats(mu_x, sigma_x, mu_y, sigma_y)
 
 
@@ -577,7 +617,7 @@ def train_mlp(
     activation = str(activation).lower()
     _activation_fn(activation)
 
-    X_std, Y_std, norm = standardize_xy(X, Y, copy=True)
+    X_std, Y_std, norm = standardize_xy(X, Y, copy=True, sample_weights=sample_weights)
     d_in, n_samples = X_std.shape
     d_out = Y_std.shape[0]
     if batch_size is None:
@@ -591,11 +631,7 @@ def train_mlp(
     if sample_weights is None:
         weights_np = np.ones((n_samples,), dtype=np.float64)
     else:
-        weights_np = np.asarray(sample_weights, dtype=np.float64).reshape(-1)
-        if weights_np.shape[0] != n_samples:
-            raise ValueError(f"sample_weights length mismatch: {weights_np.shape[0]} vs {n_samples}.")
-        if not np.isfinite(weights_np).all() or np.any(weights_np < 0.0) or not np.sum(weights_np) > 0.0:
-            raise ValueError("sample_weights must be finite, nonnegative, and have positive sum.")
+        weights_np = _as_sample_weights(sample_weights, n_samples)
 
     target_device = resolve_jax_device(device)
     key = _device_put(jax.random.PRNGKey(int(seed)), target_device)
@@ -631,7 +667,8 @@ def train_mlp(
     def loss_fn(params_local: Mapping[str, jax.Array], X_batch: jax.Array, Y_batch: jax.Array, w_batch: jax.Array) -> jax.Array:
         pred = forward(params_local, X_batch)
         diff_sq = jnp.sum((pred - Y_batch) ** 2, axis=0)
-        return jnp.sum(diff_sq * w_batch) / jnp.sum(w_batch)
+        weight_sum = jnp.sum(w_batch)
+        return jnp.sum(diff_sq * w_batch) / jnp.maximum(weight_sum, 1.0)
 
     value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 
@@ -671,6 +708,8 @@ def train_mlp(
             indices = np.arange(n_samples)
         for start in range(0, n_samples, batch):
             batch_idx = indices[start : start + batch]
+            if not np.sum(weights_np[batch_idx]) > 0.0:
+                continue
             batch_idx_jax = _device_put(jnp.asarray(batch_idx, dtype=jnp.int64), target_device)
             X_batch = jnp.take(X_jax, batch_idx_jax, axis=1)
             Y_batch = jnp.take(Y_jax, batch_idx_jax, axis=1)
@@ -744,7 +783,7 @@ def train_resnet(
     if clip_norm < 0.0:
         raise ValueError(f"clip_norm must be nonnegative, got {clip_norm}.")
 
-    X_std, Y_std, norm = standardize_xy(X, Y, copy=True)
+    X_std, Y_std, norm = standardize_xy(X, Y, copy=True, sample_weights=sample_weights)
     d_in, n_samples = X_std.shape
     d_out = Y_std.shape[0]
     if theta_dim >= d_in:
@@ -762,11 +801,7 @@ def train_resnet(
     if sample_weights is None:
         weights_np = np.ones((n_samples,), dtype=np.float64)
     else:
-        weights_np = np.asarray(sample_weights, dtype=np.float64).reshape(-1)
-        if weights_np.shape[0] != n_samples:
-            raise ValueError(f"sample_weights length mismatch: {weights_np.shape[0]} vs {n_samples}.")
-        if not np.isfinite(weights_np).all() or np.any(weights_np < 0.0) or not np.sum(weights_np) > 0.0:
-            raise ValueError("sample_weights must be finite, nonnegative, and have positive sum.")
+        weights_np = _as_sample_weights(sample_weights, n_samples)
 
     target_device = resolve_jax_device(device)
     key = _device_put(jax.random.PRNGKey(int(seed)), target_device)
@@ -815,7 +850,8 @@ def train_resnet(
     def loss_fn(params_local: Mapping[str, Any], X_batch: jax.Array, Y_batch: jax.Array, w_batch: jax.Array) -> jax.Array:
         pred = forward(params_local, X_batch)
         diff_sq = jnp.sum((pred - Y_batch) ** 2, axis=0)
-        return jnp.sum(diff_sq * w_batch) / jnp.sum(w_batch)
+        weight_sum = jnp.sum(w_batch)
+        return jnp.sum(diff_sq * w_batch) / jnp.maximum(weight_sum, 1.0)
 
     value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
 
@@ -855,6 +891,8 @@ def train_resnet(
             indices = np.arange(n_samples)
         for start in range(0, n_samples, batch):
             batch_idx = indices[start : start + batch]
+            if not np.sum(weights_np[batch_idx]) > 0.0:
+                continue
             batch_idx_jax = _device_put(jnp.asarray(batch_idx, dtype=jnp.int64), target_device)
             X_batch = jnp.take(X_jax, batch_idx_jax, axis=1)
             Y_batch = jnp.take(Y_jax, batch_idx_jax, axis=1)

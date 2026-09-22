@@ -18,6 +18,7 @@ from surrogatenn_dsge import (
     predict_frozen,
     predict_frozen_batch,
     predict_frozen_safe,
+    standardize_xy,
     surrogate_additive_residual_loglik_per_period,
     surrogate_inversion_loglik_per_period,
     surrogate_inversion_loglik_per_period_jax,
@@ -188,6 +189,32 @@ def test_ood_weighted_mse_and_validation_diagnostics() -> None:
     np.testing.assert_allclose(result.improvement_vs_rom, np.ones((2,)), rtol=1e-12, atol=1e-12)
 
 
+def test_weighted_standardization_ignores_zero_weight_nonfinite_samples() -> None:
+    X = np.asarray(
+        [
+            [1.0, 3.0, np.nan],
+            [2.0, 4.0, np.inf],
+        ],
+        dtype=np.float64,
+    )
+    Y = np.asarray([[2.0, 6.0, np.nan]], dtype=np.float64)
+    weights = np.asarray([1.0, 1.0, 0.0], dtype=np.float64)
+
+    X_std, Y_std, norm = standardize_xy(X, Y, sample_weights=weights)
+
+    np.testing.assert_allclose(np.asarray(norm.mu_x), np.asarray([2.0, 3.0]), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(norm.sigma_x), np.asarray([1.0, 1.0]), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(norm.mu_y), np.asarray([4.0]), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(norm.sigma_y), np.asarray([2.0]), rtol=0, atol=1e-12)
+    assert np.isfinite(X_std).all()
+    assert np.isfinite(Y_std).all()
+    np.testing.assert_allclose(X_std[:, 2], np.zeros((2,)), rtol=0, atol=0)
+    np.testing.assert_allclose(Y_std[:, 2], np.zeros((1,)), rtol=0, atol=0)
+
+    with pytest.raises(ValueError, match="Positive-weight samples must be finite"):
+        standardize_xy(X, Y, sample_weights=np.asarray([1.0, 0.0, 1.0], dtype=np.float64))
+
+
 def test_train_mlp_learns_simple_map_with_jax_backend() -> None:
     rng = np.random.default_rng(123)
     X = rng.normal(size=(3, 96))
@@ -210,6 +237,61 @@ def test_train_mlp_learns_simple_map_with_jax_backend() -> None:
     rmse = float(np.sqrt(np.mean((Y_pred - Y) ** 2)))
     baseline_rmse = float(np.sqrt(np.mean((Y - Y.mean(axis=1, keepdims=True)) ** 2)))
     assert rmse < 0.35 * baseline_rmse
+
+
+def test_train_mlp_accepts_zero_weight_masked_nonfinite_columns() -> None:
+    rng = np.random.default_rng(124)
+    X_good = rng.normal(size=(3, 24))
+    A = np.asarray([[0.5, -0.2, 0.1]], dtype=np.float64)
+    Y_good = A @ X_good
+    X = np.column_stack([X_good, np.asarray([np.nan, np.inf, -np.inf], dtype=np.float64)])
+    Y = np.column_stack([Y_good, np.asarray([np.nan], dtype=np.float64)])
+    weights = np.concatenate([np.ones((X_good.shape[1],), dtype=np.float64), np.zeros((1,), dtype=np.float64)])
+
+    frozen = train_mlp(
+        X,
+        Y,
+        d_hidden=8,
+        d_hidden2=None,
+        nepoch=4,
+        eta_init=1e-3,
+        batch_size=1,
+        seed=8,
+        sample_weights=weights,
+    )
+
+    Y_pred = np.asarray(predict_frozen_batch(frozen, X_good[:, :3]), dtype=np.float64)
+    assert np.isfinite(Y_pred).all()
+
+
+def test_train_resnet_accepts_zero_weight_masked_nonfinite_columns() -> None:
+    rng = np.random.default_rng(125)
+    X_good = rng.normal(size=(5, 24))
+    Y_good = np.vstack(
+        [
+            0.2 * X_good[0, :] - 0.1 * X_good[1, :] + 0.3 * X_good[3, :],
+            -0.4 * X_good[2, :] + 0.2 * X_good[4, :],
+        ]
+    )
+    X = np.column_stack([X_good, np.full((5,), np.nan, dtype=np.float64)])
+    Y = np.column_stack([Y_good, np.asarray([np.nan, np.inf], dtype=np.float64)])
+    weights = np.concatenate([np.ones((X_good.shape[1],), dtype=np.float64), np.zeros((1,), dtype=np.float64)])
+
+    frozen = train_resnet(
+        X,
+        Y,
+        d_theta=2,
+        d_hidden=8,
+        n_blocks=1,
+        nepoch=4,
+        eta_init=1e-3,
+        batch_size=1,
+        seed=9,
+        sample_weights=weights,
+    )
+
+    Y_pred = np.asarray(predict_frozen_batch(frozen, X_good[:, :3]), dtype=np.float64)
+    assert np.isfinite(Y_pred).all()
 
 
 def test_train_resnet_learns_theta_conditioned_residual_map_with_jax_backend() -> None:

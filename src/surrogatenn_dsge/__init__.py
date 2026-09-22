@@ -237,7 +237,9 @@ from .surrogate import (
     weighted_mse,
 )
 from .surrogate_dataset import (
+    BatchedSurrogateRolloutArrays,
     SurrogateDataset,
+    build_surrogate_residual_arrays_jax,
     build_surrogate_residual_dataset_from_batched_rollouts,
     build_surrogate_residual_dataset,
     summarize_surrogate_dataset,
@@ -252,6 +254,7 @@ from .surrogate_training import (
     save_surrogate_bundle,
     split_surrogate_dataset,
     surrogate_sample_weights_from_residuals,
+    train_surrogate_from_batched_arrays_jax,
     train_surrogate_from_dataset,
 )
 from .static_hmc import (
@@ -333,6 +336,7 @@ __all__ = [
     "ParameterDesign",
     "ParameterSpec",
     "QuadraticMatrixEquationResult",
+    "BatchedSurrogateRolloutArrays",
     "RegimeSwitchConfig",
     "ResBlock",
     "SEPConfig",
@@ -375,6 +379,7 @@ __all__ = [
     "build_numpyro_surrogate_inversion_model_jax",
     "build_numpyro_switching_filter_model_jax",
     "build_numpyro_switching_model_jax",
+    "build_surrogate_residual_arrays_jax",
     "build_surrogate_residual_dataset_from_batched_rollouts",
     "build_surrogate_residual_dataset",
     "baseline_parameter_vector",
@@ -565,6 +570,7 @@ __all__ = [
     "theta_within_bounds_jax",
     "train_mlp",
     "train_resnet",
+    "train_surrogate_from_batched_arrays_jax",
     "train_surrogate_from_dataset",
     "unconstrained_to_bounded",
     "validate_surrogate",

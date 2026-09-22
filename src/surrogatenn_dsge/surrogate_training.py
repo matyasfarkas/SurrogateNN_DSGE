@@ -22,6 +22,7 @@ from .surrogate import (
     validate_surrogate,
 )
 from .surrogate_dataset import (
+    BatchedSurrogateRolloutArrays,
     PredictTupleFn,
     SurrogateDataset,
     build_surrogate_residual_dataset,
@@ -689,6 +690,146 @@ def train_surrogate_from_dataset(
         validation_rmse_residual=validation_rmse_residual,
         validation_rmse_rom=validation_rmse_rom,
         validation_improvement=validation_improvement,
+        target_is_residual=bool(rom_residual),
+        output_indices=out_idx,
+        metadata=metadata,
+    )
+
+
+def train_surrogate_from_batched_arrays_jax(
+    arrays: BatchedSurrogateRolloutArrays,
+    *,
+    architecture: str = "resnet",
+    rom_residual: bool = False,
+    output_indices: Optional[Sequence[int] | np.ndarray] = None,
+    only_full_success: bool = False,
+    seed: int = 1,
+    sample_weights: Optional[Any] = None,
+    d_hidden: int = 128,
+    d_hidden2: Optional[int] = 64,
+    n_blocks: int = 3,
+    nepoch: Optional[int] = None,
+    eta_init: float = 1e-3,
+    batch_size: Optional[int] = None,
+    weight_decay: float = 1e-5,
+    clip_norm: float = 5.0,
+    activation: str = "silu",
+    device: Optional[Any] = None,
+) -> SurrogateTrainingResult:
+    """Train directly from fixed-shape JAX rollout arrays.
+
+    Failed SEP branches are represented by ``arrays.sample_mask=False`` and are
+    assigned zero weight. This avoids variable-size compaction before training
+    while preserving the same MLP/ResNet trainer and device-placement controls.
+    Validation is intentionally disabled for this fixed-shape path; compact to
+    ``SurrogateDataset`` first when held-out validation diagnostics are needed.
+    """
+
+    arch = str(architecture).strip().lower()
+    if arch not in {"mlp", "resnet"}:
+        raise ValueError(f"architecture must be 'mlp' or 'resnet', got {architecture!r}.")
+
+    n_samples_total = int(arrays.X.shape[1])
+    if int(arrays.Y.shape[1]) != n_samples_total or int(arrays.Y_rom.shape[1]) != n_samples_total:
+        raise ValueError("Batched rollout X/Y/Y_rom arrays must have the same sample count.")
+    if int(arrays.sample_mask.shape[0]) != n_samples_total:
+        raise ValueError("Batched rollout sample_mask must have one entry per sample.")
+    if int(arrays.theta_ids.shape[0]) != n_samples_total or int(arrays.period_ids.shape[0]) != n_samples_total:
+        raise ValueError("Batched rollout theta_ids and period_ids must have one entry per sample.")
+
+    out_idx = _output_index_array(output_indices, int(arrays.Y.shape[0]))
+    y_full = arrays.Y if out_idx is None else jnp.take(arrays.Y, jnp.asarray(out_idx, dtype=jnp.int32), axis=0)
+    y_rom = arrays.Y_rom if out_idx is None else jnp.take(arrays.Y_rom, jnp.asarray(out_idx, dtype=jnp.int32), axis=0)
+    y_target = y_full - y_rom if rom_residual else y_full
+
+    mask = np.asarray(arrays.sample_mask, dtype=bool).reshape(-1)
+    theta_ids = np.asarray(arrays.theta_ids, dtype=np.int64).reshape(-1)
+    if only_full_success:
+        theta_success = np.asarray(arrays.theta_success, dtype=bool).reshape(-1)
+        if theta_success.shape[0] != int(arrays.theta.shape[1]):
+            raise ValueError("Batched rollout theta_success must have one entry per theta draw.")
+        mask &= theta_success[theta_ids]
+    weights = mask.astype(np.float64)
+    if sample_weights is not None:
+        weights *= _validate_sample_weights(sample_weights, n_samples_total)
+    if not np.sum(weights) > 0.0:
+        raise ValueError("No positive-weight samples remain after applying the batched rollout mask.")
+
+    epochs = int(nepoch) if nepoch is not None else (600 if arch == "resnet" else 400)
+    target_device = resolve_jax_device(device)
+    if arch == "resnet":
+        d_theta = int(arrays.theta.shape[0])
+        if d_theta <= 0:
+            raise ValueError("ResNet architecture requires at least one theta parameter.")
+        frozen: FrozenMLP | FrozenResNet = train_resnet(
+            arrays.X,
+            y_target,
+            d_theta=d_theta,
+            d_hidden=d_hidden,
+            n_blocks=n_blocks,
+            nepoch=epochs,
+            eta_init=eta_init,
+            batch_size=batch_size,
+            seed=seed,
+            weight_decay=weight_decay,
+            clip_norm=clip_norm,
+            sample_weights=weights,
+            device=target_device,
+        )
+    else:
+        frozen = train_mlp(
+            arrays.X,
+            y_target,
+            d_hidden=d_hidden,
+            d_hidden2=d_hidden2,
+            nepoch=epochs,
+            eta_init=eta_init,
+            batch_size=batch_size,
+            seed=seed,
+            weight_decay=weight_decay,
+            clip_norm=clip_norm,
+            activation=activation,
+            sample_weights=weights,
+            device=target_device,
+        )
+
+    train_idx = np.flatnonzero(weights > 0.0).astype(np.int64)
+    split = SurrogateTrainValidationSplit(
+        train_idx=train_idx,
+        val_idx=np.zeros((0,), dtype=np.int64),
+        split_by_theta=False,
+        validation_fraction=0.0,
+        only_full_success=only_full_success,
+        train_theta_ids=np.unique(theta_ids[train_idx]),
+        val_theta_ids=np.zeros((0,), dtype=np.int64),
+    )
+    metadata: dict[str, object] = {
+        "architecture": arch,
+        "target_mode": "batched_jax",
+        "rom_residual": bool(rom_residual),
+        "validation_split": "disabled for fixed-shape batched arrays",
+        "train_size": split.train_size,
+        "val_size": 0,
+        "n_samples_total": n_samples_total,
+        "masked_sample_count": int(np.count_nonzero(weights <= 0.0)),
+        "jax_backend": jax.default_backend(),
+        "jax_device": None if target_device is None else str(target_device),
+        "jax_device_platform": None if target_device is None else str(target_device.platform),
+        "output_indices": None if out_idx is None else out_idx.copy(),
+    }
+    if arch == "resnet":
+        metadata["d_theta"] = int(arrays.theta.shape[0])
+        metadata["n_blocks"] = int(n_blocks)
+
+    return SurrogateTrainingResult(
+        frozen=frozen,
+        architecture=arch,
+        split=split,
+        validation=None,
+        validation_rmse=None,
+        validation_rmse_residual=None,
+        validation_rmse_rom=None,
+        validation_improvement=None,
         target_is_residual=bool(rom_residual),
         output_indices=out_idx,
         metadata=metadata,
