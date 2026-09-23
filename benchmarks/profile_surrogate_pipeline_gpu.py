@@ -928,38 +928,49 @@ def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticH
     y_probe.block_until_ready()
     predict_first_s = time.perf_counter() - predict_started
 
-    likelihood_started = time.perf_counter()
-    fom_state_next = jnp.swapaxes(sep_solution.mean_path[:, :, 1 : int(config.periods) + 1], 1, 2)
-    obs_data = jnp.take(fom_state_next[0], observable_idx_jax, axis=1).T
-    obs_sigma = jnp.full((obs_dim,), 0.10, dtype=jnp.float64)
-    shock_sigmas = jnp.full((shock_dim,), 0.15, dtype=jnp.float64)
+    if bool(args.skip_batched_sep_likelihood):
+        likelihood_s = 0.0
+        loglikelihood_value = jnp.asarray(np.nan, dtype=jnp.float64)
+        loglikelihood_grad_np = np.full((theta_dim,), np.nan, dtype=np.float64)
+        likelihood_status = "skipped"
+    else:
+        likelihood_started = time.perf_counter()
+        fom_state_next = jnp.swapaxes(sep_solution.mean_path[:, :, 1 : int(config.periods) + 1], 1, 2)
+        obs_data = jnp.take(fom_state_next[0], observable_idx_jax, axis=1).T
+        obs_sigma = jnp.full((obs_dim,), 0.10, dtype=jnp.float64)
+        shock_sigmas = jnp.full((shock_dim,), 0.15, dtype=jnp.float64)
 
-    def loglikelihood(theta_local: jax.Array) -> jax.Array:
-        return surrogate_inversion_loglikelihood_jax(
-            rom_predict_jax,
-            result.frozen,
-            initial[0],
-            theta_local,
-            obs_data,
-            obs_sigma,
-            shock_sigmas,
-            maxit=int(args.hlt_surrogate_inversion_maxit),
-            tol=float(args.hlt_surrogate_inversion_tol),
-            lambda_=float(args.hlt_surrogate_inversion_lambda),
-            shock_solver=str(args.hlt_jax_shock_solver),
-            batch_replay=bool(args.hlt_jax_batch_replay),
-            differentiate_shocks=bool(args.hlt_jax_differentiate_shocks),
+        def loglikelihood(theta_local: jax.Array) -> jax.Array:
+            return surrogate_inversion_loglikelihood_jax(
+                rom_predict_jax,
+                result.frozen,
+                initial[0],
+                theta_local,
+                obs_data,
+                obs_sigma,
+                shock_sigmas,
+                maxit=int(args.hlt_surrogate_inversion_maxit),
+                tol=float(args.hlt_surrogate_inversion_tol),
+                lambda_=float(args.hlt_surrogate_inversion_lambda),
+                shock_solver=str(args.hlt_jax_shock_solver),
+                batch_replay=bool(args.hlt_jax_batch_replay),
+                differentiate_shocks=bool(args.hlt_jax_differentiate_shocks),
+            )
+
+        value_and_grad = jax.jit(jax.value_and_grad(loglikelihood))
+        loglikelihood_value, loglikelihood_grad = value_and_grad(theta[:, 0])
+        _block_until_ready_tree((loglikelihood_value, loglikelihood_grad))
+        likelihood_s = time.perf_counter() - likelihood_started
+        loglikelihood_grad_np = np.asarray(loglikelihood_grad, dtype=np.float64)
+        likelihood_status = (
+            "ok"
+            if bool(np.isfinite(float(loglikelihood_value))) and bool(np.isfinite(loglikelihood_grad_np).all())
+            else "nonfinite"
         )
-
-    value_and_grad = jax.jit(jax.value_and_grad(loglikelihood))
-    loglikelihood_value, loglikelihood_grad = value_and_grad(theta[:, 0])
-    _block_until_ready_tree((loglikelihood_value, loglikelihood_grad))
-    likelihood_s = time.perf_counter() - likelihood_started
 
     mask = np.asarray(arrays.sample_mask, dtype=bool)
     accepted = np.asarray(sep_solution.accepted, dtype=bool)
     converged = np.asarray(sep_solution.converged, dtype=bool)
-    loglikelihood_grad_np = np.asarray(loglikelihood_grad, dtype=np.float64)
     touched_samples = int(result.train_size) * int(args.epochs)
     return {
         "status": "ok",
@@ -998,11 +1009,9 @@ def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticH
         else math.inf,
         "max_residual_norm": float(np.max(np.asarray(sep_solution.residual_norm))),
         "masked_sample_count": int(result.metadata["masked_sample_count"]),
-        "jax_likelihood_status": "ok"
-        if bool(np.isfinite(float(loglikelihood_value))) and bool(np.isfinite(loglikelihood_grad_np).all())
-        else "nonfinite",
-        "jax_likelihood_value": float(loglikelihood_value),
-        "jax_likelihood_grad_norm": float(np.linalg.norm(loglikelihood_grad_np)),
+        "jax_likelihood_status": likelihood_status,
+        "jax_likelihood_value": _finite_float_or_none(loglikelihood_value),
+        "jax_likelihood_grad_norm": _finite_float_or_none(np.linalg.norm(loglikelihood_grad_np)),
         "jax_likelihood_grad_finite": bool(np.isfinite(loglikelihood_grad_np).all()),
         "prediction_output_norm": float(np.linalg.norm(np.asarray(y_probe))),
         "caveat": (
@@ -1748,6 +1757,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sep-accept-tol", type=float, default=1e-5)
     parser.add_argument("--sep-reps", type=int, default=3)
     parser.add_argument("--sep-batch-size", type=int, default=64)
+    parser.add_argument(
+        "--skip-batched-sep-likelihood",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Skip the JAX likelihood-gradient smoke in --mode batched-sep-training. "
+            "Use this for large target-generation throughput profiles where shock "
+            "inversion/AD compilation would otherwise dominate the timing."
+        ),
+    )
     parser.add_argument(
         "--hlt-model-source",
         type=Path,

@@ -241,6 +241,55 @@ def test_batched_sep_training_profile_tiny_cpu_smoke() -> None:
     assert result["end_to_end_s"] >= 0.0
 
 
+def test_batched_sep_training_profile_can_skip_likelihood_smoke() -> None:
+    mod = _load_profile_module()
+    args = mod.parse_args(
+        [
+            "--mode",
+            "batched-sep-training",
+            "--device",
+            "cpu",
+            "--sep-batch-size",
+            "3",
+            "--sep-state-dim",
+            "2",
+            "--sep-shock-dim",
+            "1",
+            "--sep-periods",
+            "3",
+            "--sep-order",
+            "1",
+            "--sep-nnodes",
+            "3",
+            "--sep-max-iter",
+            "10",
+            "--epochs",
+            "1",
+            "--batch-size",
+            "4",
+            "--hidden",
+            "8",
+            "--blocks",
+            "0",
+            "--theta-dim",
+            "3",
+            "--obs-dim",
+            "1",
+            "--skip-batched-sep-likelihood",
+        ]
+    )
+    shape = mod.SyntheticHLTShape(state_dim=4, shock_dim=2, theta_dim=3, obs_dim=1)
+    result = mod.run_batched_sep_training_profile(args, shape)
+
+    assert result["status"] == "ok"
+    assert result["sep_accepted_count"] == 3
+    assert result["sep_converged_count"] == 3
+    assert result["jax_likelihood_status"] == "skipped"
+    assert result["jax_likelihood_value"] is None
+    assert result["jax_likelihood_grad_norm"] is None
+    assert not result["jax_likelihood_grad_finite"]
+
+
 def test_parsed_batched_sep_training_profile_tiny_cpu_smoke() -> None:
     mod = _load_profile_module()
     args = mod.parse_args(
