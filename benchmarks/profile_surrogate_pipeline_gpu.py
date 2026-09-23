@@ -63,6 +63,54 @@ from surrogatenn_dsge import (
 
 DEFAULT_RESULTS_DIR = ROOT / "benchmarks" / "results" / "surrogate_pipeline_gpu"
 
+SW07_SAFE_15_PARAMETERS = (
+    "calfa",
+    "cg",
+    "cgy",
+    "cindw",
+    "crdy",
+    "crhob",
+    "crhoqs",
+    "crpi",
+    "crr",
+    "cry",
+    "csigl",
+    "z_ea",
+    "z_eg",
+    "z_em",
+    "z_ew",
+)
+
+SW07_SAFE_27_PARAMETERS = (
+    "calfa",
+    "cg",
+    "cgy",
+    "cindw",
+    "cmap",
+    "cmaw",
+    "constelab",
+    "crdy",
+    "crhoa",
+    "crhob",
+    "crhog",
+    "crhoms",
+    "crhopinf",
+    "crhoqs",
+    "crhow",
+    "crpi",
+    "crr",
+    "cry",
+    "csigl",
+    "ctou",
+    "z_ea",
+    "z_eb",
+    "z_eg",
+    "z_em",
+    "z_epinf",
+    "z_eqs",
+    "z_ew",
+)
+
 
 @dataclass(frozen=True)
 class SyntheticHLTShape:
@@ -118,7 +166,8 @@ def _hlt_uniform_prior_interval(
     width = max(abs(float(center)) * float(width_scale), float(width_floor))
     lower = float(center) - width
     upper = float(center) + width
-    if name.startswith(("crho", "cprob", "cind")) or name in {"calfa"}:
+    bounded_unit_parameter = name.startswith(("crho", "cprob", "cind")) or name in {"calfa"}
+    if bounded_unit_parameter and center > 0.0:
         lower = max(1.0e-4, lower)
         upper = min(0.9999, upper)
     if center > 0.0 and lower <= 0.0 and name not in {"cry"}:
@@ -128,6 +177,32 @@ def _hlt_uniform_prior_interval(
             f"Invalid HLT prior interval for {name}: center={center}, lower={lower}, upper={upper}."
         )
     return lower, upper
+
+
+def _select_hlt_parameter_subset(
+    model: Any,
+    case: dict[str, Any],
+    spec: str,
+) -> tuple[str, ...]:
+    """Resolve HLT parameter-set aliases used by GPU estimation profiles."""
+
+    normalized = str(spec).strip()
+    if normalized == "payload":
+        names = tuple(str(name) for name in case["parameter_subset"])
+    elif normalized == "sw07_safe_15":
+        names = SW07_SAFE_15_PARAMETERS
+    elif normalized == "sw07_safe_27":
+        names = SW07_SAFE_27_PARAMETERS
+    elif normalized == "all":
+        names = tuple(str(name) for name in model.parameter_names)
+    else:
+        names = tuple(part.strip() for part in normalized.split(",") if part.strip())
+        if not names:
+            raise ValueError("hlt_parameter_set must not be empty.")
+    unknown = tuple(name for name in names if name not in model.parameter_names)
+    if unknown:
+        raise ValueError("Unknown HLT parameter names: " + ", ".join(unknown))
+    return tuple(names)
 
 
 def _hlt_uniform_prior_arrays(
@@ -1420,7 +1495,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
 
     reference_steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
     base_parameters = np.asarray(model.parameter_values, dtype=np.float64)
-    parameter_subset = [str(name) for name in case["parameter_subset"]]
+    parameter_subset = list(_select_hlt_parameter_subset(model, case, str(args.hlt_parameter_set)))
     theta, subset_idx = _make_hlt_theta_design(
         base_parameters=base_parameters,
         parameter_names=model.parameter_names,
@@ -1827,6 +1902,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         "n_vars": int(model.timings.nVars),
         "n_exo": int(model.timings.nExo),
         "parameter_subset": parameter_subset,
+        "hlt_parameter_set": str(args.hlt_parameter_set),
         "theta_draws": int(theta.shape[1]),
         "steady_state_mode": steady_state_mode,
         "steady_state_solved_count": int(solved_count),
@@ -2016,6 +2092,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=ROOT / "benchmarks" / "results" / "test_payloads.json",
     )
     parser.add_argument("--hlt-case-name", default="medium_sw07_hlt")
+    parser.add_argument(
+        "--hlt-parameter-set",
+        default="payload",
+        help=(
+            "HLT parameter subset to estimate: 'payload', 'sw07_safe_15', "
+            "'sw07_safe_27', 'all', or a comma-separated list of parameter names."
+        ),
+    )
     parser.add_argument("--hlt-periods", type=int, default=2)
     parser.add_argument("--hlt-theta-draws", type=int, default=2)
     parser.add_argument("--hlt-shock-scale", type=float, default=0.02)

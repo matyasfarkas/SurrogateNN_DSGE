@@ -336,17 +336,43 @@ def test_hlt_surrogate_hmc_prior_intervals_keep_bounded_parameters_inside_suppor
     mod = _load_profile_module()
 
     lower, upper = mod._hlt_uniform_prior_arrays(
-        ("calfa", "crhob", "cry"),
-        np.asarray([0.24, 0.95, -0.1]),
+        ("calfa", "crhob", "crhoms", "cry"),
+        np.asarray([0.24, 0.95, 0.0, -0.1]),
         width_scale=0.2,
         width_floor=1.0e-4,
     )
 
-    assert lower.shape == (3,)
-    assert upper.shape == (3,)
+    assert lower.shape == (4,)
+    assert upper.shape == (4,)
     assert 0.0 < lower[0] < 0.24 < upper[0] < 1.0
     assert 0.0 < lower[1] < 0.95 < upper[1] < 1.0
-    assert lower[2] < -0.1 < upper[2]
+    assert lower[2] < 0.0 < upper[2]
+    assert lower[3] < -0.1 < upper[3]
+
+
+def test_hlt_parameter_set_selector_supports_payload_safe_and_all() -> None:
+    mod = _load_profile_module()
+
+    class DummyModel:
+        parameter_names = (
+            *mod.SW07_SAFE_27_PARAMETERS,
+            "cprobp",
+            "cindp",
+            "curvp",
+            "extra_parameter",
+        )
+
+    case = {"parameter_subset": ["cprobp", "cindp", "curvp"]}
+
+    assert mod._select_hlt_parameter_subset(DummyModel, case, "payload") == (
+        "cprobp",
+        "cindp",
+        "curvp",
+    )
+    assert mod._select_hlt_parameter_subset(DummyModel, case, "sw07_safe_15") == mod.SW07_SAFE_15_PARAMETERS
+    assert mod._select_hlt_parameter_subset(DummyModel, case, "sw07_safe_27") == mod.SW07_SAFE_27_PARAMETERS
+    assert mod._select_hlt_parameter_subset(DummyModel, case, "all") == DummyModel.parameter_names
+    assert mod._select_hlt_parameter_subset(DummyModel, case, "calfa, crhob") == ("calfa", "crhob")
 
 
 def test_static_hmc_on_bounded_surrogate_log_density_tiny_cpu_smoke() -> None:

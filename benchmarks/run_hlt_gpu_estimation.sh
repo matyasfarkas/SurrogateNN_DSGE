@@ -28,6 +28,7 @@ export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_command_buffer=''}"
 
 case "$MODE" in
   smoke)
+    HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-payload}"
     HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-1}"
     HLT_PERIODS="${HLT_PERIODS:-1}"
     SEP_PERIODS="${SEP_PERIODS:-1}"
@@ -46,6 +47,7 @@ case "$MODE" in
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.001}"
     ;;
   pilot)
+    HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-payload}"
     HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-32}"
     HLT_PERIODS="${HLT_PERIODS:-8}"
     SEP_PERIODS="${SEP_PERIODS:-8}"
@@ -64,6 +66,7 @@ case "$MODE" in
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.005}"
     ;;
   full)
+    HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-all}"
     HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-288}"
     HLT_PERIODS="${HLT_PERIODS:-8}"
     SEP_PERIODS="${SEP_PERIODS:-8}"
@@ -117,6 +120,7 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --mode hlt-fixed-ss-smoke \
   --device "$DEVICE" $REQUIRE_GPU_FLAG \
   --hlt-case-name medium_sw07_hlt \
+  --hlt-parameter-set "$HLT_PARAMETER_SET" \
   --hlt-steady-state-mode fixed-reference \
   --hlt-theta-draws "$HLT_THETA_DRAWS" \
   --hlt-periods "$HLT_PERIODS" \
@@ -167,6 +171,8 @@ log_density = result["jax_surrogate_log_density"]
 lik = result["surrogate_inversion_likelihood"]
 print("status", result["status"])
 print("backend", result["backend"])
+print("hlt_parameter_set", result["hlt_parameter_set"])
+print("parameter_count", len(result["parameter_subset"]))
 print("theta_draws", result["theta_draws"])
 print("train_size", result["train_size"], "val_size", result["val_size"])
 print("pipeline_s", result["pipeline_s"])
