@@ -330,3 +330,53 @@ def test_parsed_batched_sep_training_profile_tiny_cpu_smoke() -> None:
     assert result["sep_converged_count"] == 3
     assert result["train_size"] > 0
     assert result["end_to_end_s"] >= 0.0
+
+
+def test_hlt_surrogate_hmc_prior_intervals_keep_bounded_parameters_inside_support() -> None:
+    mod = _load_profile_module()
+
+    lower, upper = mod._hlt_uniform_prior_arrays(
+        ("calfa", "crhob", "cry"),
+        np.asarray([0.24, 0.95, -0.1]),
+        width_scale=0.2,
+        width_floor=1.0e-4,
+    )
+
+    assert lower.shape == (3,)
+    assert upper.shape == (3,)
+    assert 0.0 < lower[0] < 0.24 < upper[0] < 1.0
+    assert 0.0 < lower[1] < 0.95 < upper[1] < 1.0
+    assert lower[2] < -0.1 < upper[2]
+
+
+def test_static_hmc_on_bounded_surrogate_log_density_tiny_cpu_smoke() -> None:
+    mod = _load_profile_module()
+    center = mod.jnp.asarray([0.25, 0.75], dtype=mod.jnp.float64)
+
+    def log_density(theta):
+        return -0.5 * mod.jnp.sum((theta - center) ** 2)
+
+    result = mod.run_static_hmc_on_bounded_surrogate_log_density(
+        log_density_fn=log_density,
+        center=center,
+        parameter_names=("calfa", "crhob"),
+        lower=mod.jnp.asarray([0.1, 0.5], dtype=mod.jnp.float64),
+        upper=mod.jnp.asarray([0.4, 0.95], dtype=mod.jnp.float64),
+        chains=2,
+        warmup=1,
+        samples=2,
+        leapfrog_steps=2,
+        step_size=0.01,
+        target_accept_prob=0.8,
+        adapt_step_size=True,
+        initial_jitter=0.01,
+        seed=123,
+    )
+
+    assert result["status"] == "ok"
+    assert result["kind"] == "fixed_rom_surrogate_static_hmc"
+    assert result["samples_shape"] == [2, 2, 2]
+    assert result["samples_finite"]
+    assert result["post_warmup_draws"] == 4
+    assert result["accepted_share"] is not None
+    assert set(result["parameter_summary"]) == {"calfa", "crhob"}

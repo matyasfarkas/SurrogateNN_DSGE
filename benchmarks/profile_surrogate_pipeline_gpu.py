@@ -41,6 +41,8 @@ from surrogatenn_dsge import (
     build_surrogate_residual_arrays_from_batched_sep_jax,
     build_surrogate_residual_arrays_jax,
     build_surrogate_residual_dataset,
+    bounded_log_abs_det_jacobian,
+    bounded_to_unconstrained,
     fit_surrogate_pipeline_from_batched_sep_jax,
     fit_surrogate_pipeline,
     parse_macro_model,
@@ -49,11 +51,13 @@ from surrogatenn_dsge import (
     solve_batched_stochastic_extended_path_model,
     solve_batched_stochastic_extended_path_residual_expectation,
     solve_stochastic_extended_path_residual_expectation,
+    static_hmc_sample,
     summarize_surrogate_dataset,
     surrogate_inversion_loglik_per_period,
     surrogate_inversion_loglikelihood_jax,
     train_surrogate_from_batched_arrays_jax,
     train_surrogate_from_dataset,
+    unconstrained_to_bounded,
 )
 
 
@@ -96,6 +100,205 @@ def _finite_float_or_none(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _hlt_uniform_prior_interval(
+    name: str,
+    center: float,
+    *,
+    width_scale: float,
+    width_floor: float,
+) -> tuple[float, float]:
+    """Build a conservative bounded interval around an HLT reference value."""
+
+    if width_scale <= 0.0:
+        raise ValueError(f"width_scale must be positive, got {width_scale}.")
+    if width_floor <= 0.0:
+        raise ValueError(f"width_floor must be positive, got {width_floor}.")
+    width = max(abs(float(center)) * float(width_scale), float(width_floor))
+    lower = float(center) - width
+    upper = float(center) + width
+    if name.startswith(("crho", "cprob", "cind")) or name in {"calfa"}:
+        lower = max(1.0e-4, lower)
+        upper = min(0.9999, upper)
+    if center > 0.0 and lower <= 0.0 and name not in {"cry"}:
+        lower = max(center * 0.5, np.finfo(float).tiny)
+    if not lower < center < upper:
+        raise ValueError(
+            f"Invalid HLT prior interval for {name}: center={center}, lower={lower}, upper={upper}."
+        )
+    return lower, upper
+
+
+def _hlt_uniform_prior_arrays(
+    parameter_names: Sequence[str],
+    center: Any,
+    *,
+    width_scale: float,
+    width_floor: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    center_array = np.asarray(center, dtype=np.float64).reshape(-1)
+    if center_array.shape[0] != len(parameter_names):
+        raise ValueError("center length must match parameter_names.")
+    lower = np.empty_like(center_array)
+    upper = np.empty_like(center_array)
+    for idx, name in enumerate(parameter_names):
+        lower[idx], upper[idx] = _hlt_uniform_prior_interval(
+            str(name),
+            float(center_array[idx]),
+            width_scale=width_scale,
+            width_floor=width_floor,
+        )
+    return lower, upper
+
+
+def _summarize_static_hmc_result(
+    *,
+    result: Any,
+    constrained_samples: Any,
+    parameter_names: Sequence[str],
+    elapsed_s: float,
+) -> dict[str, Any]:
+    samples = np.asarray(constrained_samples, dtype=np.float64)
+    if samples.ndim != 3:
+        raise ValueError("constrained_samples must have shape (samples, chains, parameters).")
+    if samples.shape[-1] != len(parameter_names):
+        raise ValueError("parameter_names length must match the HMC sample parameter dimension.")
+    accepted = np.asarray(result.accepted, dtype=bool)
+    accept_prob = np.asarray(result.accept_prob, dtype=np.float64)
+    flat = samples.reshape((-1, samples.shape[-1]))
+    parameter_summary = {
+        str(name): {
+            "mean": float(np.mean(flat[:, idx])),
+            "std": float(np.std(flat[:, idx])),
+            "min": float(np.min(flat[:, idx])),
+            "max": float(np.max(flat[:, idx])),
+        }
+        for idx, name in enumerate(parameter_names)
+    }
+    draws = int(np.prod(samples.shape[:2]))
+    return {
+        "elapsed_s": float(elapsed_s),
+        "samples_shape": list(samples.shape),
+        "post_warmup_draws": draws,
+        "draws_per_second": float(draws / elapsed_s) if elapsed_s > 0 else math.inf,
+        "accepted_share": float(np.mean(accepted)) if accepted.size else None,
+        "accept_prob_mean": float(np.mean(accept_prob)) if accept_prob.size else None,
+        "accept_prob_min": float(np.min(accept_prob)) if accept_prob.size else None,
+        "accept_prob_max": float(np.max(accept_prob)) if accept_prob.size else None,
+        "final_step_size": _finite_float_or_none(np.asarray(result.step_size, dtype=np.float64)),
+        "final_log_prob_mean": _finite_float_or_none(np.mean(np.asarray(result.final_log_prob, dtype=np.float64))),
+        "samples_finite": bool(np.isfinite(samples).all()),
+        "parameter_summary": parameter_summary,
+    }
+
+
+def run_static_hmc_on_bounded_surrogate_log_density(
+    *,
+    log_density_fn: Any,
+    center: Any,
+    parameter_names: Sequence[str],
+    lower: Any,
+    upper: Any,
+    chains: int,
+    warmup: int,
+    samples: int,
+    leapfrog_steps: int,
+    step_size: float,
+    target_accept_prob: float,
+    adapt_step_size: bool,
+    initial_jitter: float,
+    seed: int,
+) -> dict[str, Any]:
+    """Run vectorized static HMC over a bounded surrogate log likelihood."""
+
+    if chains < 1:
+        raise ValueError(f"chains must be positive, got {chains}.")
+    if warmup < 0:
+        raise ValueError(f"warmup must be nonnegative, got {warmup}.")
+    if samples < 1:
+        raise ValueError(f"samples must be positive, got {samples}.")
+    if leapfrog_steps < 1:
+        raise ValueError(f"leapfrog_steps must be positive, got {leapfrog_steps}.")
+    if step_size <= 0.0:
+        raise ValueError(f"step_size must be positive, got {step_size}.")
+    center_jax = jnp.asarray(center, dtype=jnp.float64)
+    lower_jax = jnp.asarray(lower, dtype=jnp.float64)
+    upper_jax = jnp.asarray(upper, dtype=jnp.float64)
+    if center_jax.ndim != 1:
+        raise ValueError("center must be a one-dimensional parameter vector.")
+    if lower_jax.shape != center_jax.shape or upper_jax.shape != center_jax.shape:
+        raise ValueError("lower, upper, and center must have the same shape.")
+    if center_jax.shape[0] != len(parameter_names):
+        raise ValueError("parameter_names length must match center length.")
+    prior_log_const = -jnp.sum(jnp.log(upper_jax - lower_jax))
+
+    def log_posterior_unconstrained(unconstrained: jax.Array) -> jax.Array:
+        theta_local = unconstrained_to_bounded(unconstrained, lower_jax, upper_jax)
+        return (
+            log_density_fn(theta_local)
+            + prior_log_const
+            + bounded_log_abs_det_jacobian(unconstrained, lower_jax, upper_jax)
+        )
+
+    key = jax.random.PRNGKey(int(seed))
+    init_key, sample_key = jax.random.split(key)
+    initial_center = bounded_to_unconstrained(center_jax, lower_jax, upper_jax)
+    initial_position = initial_center[None, :] + float(initial_jitter) * jax.random.normal(
+        init_key,
+        shape=(int(chains), int(center_jax.shape[0])),
+        dtype=center_jax.dtype,
+    )
+    compiled_sampler = jax.jit(
+        lambda run_key, position: static_hmc_sample(
+            log_posterior_unconstrained,
+            position,
+            run_key,
+            num_warmup=int(warmup),
+            num_samples=int(samples),
+            step_size=float(step_size),
+            num_leapfrog_steps=int(leapfrog_steps),
+            target_accept_prob=float(target_accept_prob),
+            adapt_step_size=bool(adapt_step_size),
+        )
+    )
+    started = time.perf_counter()
+    result = compiled_sampler(sample_key, initial_position)
+    _block_until_ready_tree(result)
+    elapsed = time.perf_counter() - started
+    constrained_samples = unconstrained_to_bounded(result.samples, lower_jax, upper_jax)
+    _block_until_ready_tree(constrained_samples)
+    summary = _summarize_static_hmc_result(
+        result=result,
+        constrained_samples=constrained_samples,
+        parameter_names=parameter_names,
+        elapsed_s=elapsed,
+    )
+    summary.update(
+        {
+            "status": "ok",
+            "kind": "fixed_rom_surrogate_static_hmc",
+            "parameter_names": [str(name) for name in parameter_names],
+            "prior_lower": np.asarray(lower_jax, dtype=np.float64).tolist(),
+            "prior_upper": np.asarray(upper_jax, dtype=np.float64).tolist(),
+            "chains": int(chains),
+            "warmup": int(warmup),
+            "samples": int(samples),
+            "leapfrog_steps": int(leapfrog_steps),
+            "initial_step_size": float(step_size),
+            "target_accept_prob": float(target_accept_prob),
+            "adapt_step_size": bool(adapt_step_size),
+            "initial_jitter": float(initial_jitter),
+            "seed": int(seed),
+            "backend": jax.default_backend(),
+            "caveat": (
+                "Samples the trained-surrogate inversion likelihood with fixed reference steady state "
+                "and fixed first-order ROM matrices. This is not yet a parameter-specific full HLT "
+                "steady-state/ROM recomputation inside the HMC transition."
+            ),
+        }
+    )
+    return summary
 
 
 def _run_text(cmd: Sequence[str], *, check: bool = False) -> str:
@@ -1425,6 +1628,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         "status": "skipped",
         "reason": "hlt_jax_log_density_smoke disabled or likelihood skipped",
     }
+    surrogate_hmc_result: dict[str, Any] = {
+        "status": "skipped",
+        "reason": "hlt_surrogate_hmc_samples <= 0 or likelihood skipped",
+    }
     likelihood_periods = int(args.hlt_likelihood_periods)
     if likelihood_periods <= 0:
         likelihood_result = {"status": "skipped", "reason": "hlt_likelihood_periods <= 0"}
@@ -1470,9 +1677,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 "inferred_shocks_finite": bool(np.isfinite(inferred_shocks).all()),
                 "inferred_shocks_max_abs": float(np.max(np.abs(inferred_shocks))) if inferred_shocks.size else 0.0,
             }
-            if bool(args.hlt_jax_log_density_smoke):
-                jax_started = time.perf_counter()
-
+            if bool(args.hlt_jax_log_density_smoke) or int(args.hlt_surrogate_hmc_samples) > 0:
                 def device_array(values: Any, *, dtype: Any = jnp.float64) -> jax.Array:
                     array = jnp.asarray(values, dtype=dtype)
                     return array if target_device is None else jax.device_put(array, target_device)
@@ -1510,41 +1715,68 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         differentiate_shocks=bool(args.hlt_jax_differentiate_shocks),
                     )
 
-                value_and_grad = jax.jit(jax.value_and_grad(log_density))
-                value, grad = value_and_grad(theta0_jax)
-                _block_until_ready_tree((value, grad))
-                jax_elapsed = time.perf_counter() - jax_started
-                grad_np = np.asarray(grad, dtype=np.float64)
-                value_float = float(np.asarray(value))
-                python_total = _finite_float_or_none(likelihood_result.get("total_loglikelihood"))
-                value_minus_python = None if python_total is None else value_float - python_total
-                parity_abs_diff = None if value_minus_python is None else abs(value_minus_python)
-                parity_tol = float(args.hlt_jax_python_parity_tol)
-                jax_log_density_result = {
-                    "status": "ok",
-                    "elapsed_s": jax_elapsed,
-                    "value": value_float,
-                    "python_surrogate_total_loglikelihood": python_total,
-                    "value_minus_python": value_minus_python,
-                    "parity_abs_diff": parity_abs_diff,
-                    "parity_tol": parity_tol,
-                    "parity_ok": None if parity_abs_diff is None else bool(parity_abs_diff <= parity_tol),
-                    "gradient": grad_np.tolist(),
-                    "gradient_finite": bool(np.isfinite(grad_np).all()),
-                    "gradient_norm": float(np.linalg.norm(grad_np)),
-                    "backend": jax.default_backend(),
-                    "target_device": None if target_device is None else str(target_device),
-                    "shock_solver": str(args.hlt_jax_shock_solver),
-                    "batch_replay": bool(args.hlt_jax_batch_replay),
-                    "differentiate_shocks": bool(args.hlt_jax_differentiate_shocks),
-                    "caveat": (
-                        "Differentiates the fixed-ROM surrogate likelihood through theta and inferred shocks; "
-                        "steady-state and first-order matrices are held fixed in this smoke check."
-                        if bool(args.hlt_jax_differentiate_shocks)
-                        else "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; "
-                        "steady-state and first-order matrices are held fixed in this smoke check."
-                    ),
-                }
+                if bool(args.hlt_jax_log_density_smoke):
+                    jax_started = time.perf_counter()
+
+                    value_and_grad = jax.jit(jax.value_and_grad(log_density))
+                    value, grad = value_and_grad(theta0_jax)
+                    _block_until_ready_tree((value, grad))
+                    jax_elapsed = time.perf_counter() - jax_started
+                    grad_np = np.asarray(grad, dtype=np.float64)
+                    value_float = float(np.asarray(value))
+                    python_total = _finite_float_or_none(likelihood_result.get("total_loglikelihood"))
+                    value_minus_python = None if python_total is None else value_float - python_total
+                    parity_abs_diff = None if value_minus_python is None else abs(value_minus_python)
+                    parity_tol = float(args.hlt_jax_python_parity_tol)
+                    jax_log_density_result = {
+                        "status": "ok",
+                        "elapsed_s": jax_elapsed,
+                        "value": value_float,
+                        "python_surrogate_total_loglikelihood": python_total,
+                        "value_minus_python": value_minus_python,
+                        "parity_abs_diff": parity_abs_diff,
+                        "parity_tol": parity_tol,
+                        "parity_ok": None if parity_abs_diff is None else bool(parity_abs_diff <= parity_tol),
+                        "gradient": grad_np.tolist(),
+                        "gradient_finite": bool(np.isfinite(grad_np).all()),
+                        "gradient_norm": float(np.linalg.norm(grad_np)),
+                        "backend": jax.default_backend(),
+                        "target_device": None if target_device is None else str(target_device),
+                        "shock_solver": str(args.hlt_jax_shock_solver),
+                        "batch_replay": bool(args.hlt_jax_batch_replay),
+                        "differentiate_shocks": bool(args.hlt_jax_differentiate_shocks),
+                        "caveat": (
+                            "Differentiates the fixed-ROM surrogate likelihood through theta and inferred shocks; "
+                            "steady-state and first-order matrices are held fixed in this smoke check."
+                            if bool(args.hlt_jax_differentiate_shocks)
+                            else "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; "
+                            "steady-state and first-order matrices are held fixed in this smoke check."
+                        ),
+                    }
+
+                if int(args.hlt_surrogate_hmc_samples) > 0:
+                    lower, upper = _hlt_uniform_prior_arrays(
+                        parameter_subset,
+                        theta0,
+                        width_scale=float(args.hlt_surrogate_hmc_prior_width_scale),
+                        width_floor=float(args.hlt_surrogate_hmc_prior_width_floor),
+                    )
+                    surrogate_hmc_result = run_static_hmc_on_bounded_surrogate_log_density(
+                        log_density_fn=log_density,
+                        center=theta0_jax,
+                        parameter_names=parameter_subset,
+                        lower=device_array(lower),
+                        upper=device_array(upper),
+                        chains=int(args.hlt_surrogate_hmc_chains),
+                        warmup=int(args.hlt_surrogate_hmc_warmup),
+                        samples=int(args.hlt_surrogate_hmc_samples),
+                        leapfrog_steps=int(args.hlt_surrogate_hmc_leapfrog_steps),
+                        step_size=float(args.hlt_surrogate_hmc_step_size),
+                        target_accept_prob=float(args.hlt_surrogate_hmc_target_accept_prob),
+                        adapt_step_size=not bool(args.hlt_surrogate_hmc_no_adapt_step_size),
+                        initial_jitter=float(args.hlt_surrogate_hmc_initial_jitter),
+                        seed=int(args.hlt_surrogate_hmc_seed),
+                    )
         except Exception as exc:
             likelihood_result = {
                 "status": "error",
@@ -1555,13 +1787,18 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 "status": "skipped",
                 "reason": "Python surrogate likelihood failed before JAX log-density smoke.",
             }
+            surrogate_hmc_result = {
+                "status": "skipped",
+                "reason": "Python surrogate likelihood failed before surrogate HMC.",
+            }
 
     steady_statuses = [str(row["steady_state_status"]) for row in steady_state_diagnostics]
     fallback_count = sum(status.startswith("fallback") for status in steady_statuses)
     solved_count = sum(status == "solved" for status in steady_statuses)
     caveats = [
         "SEP target generation is still callback/Python-loop based; ResNet training is the GPU-native part.",
-        "The likelihood block evaluates a trained-surrogate inversion likelihood; it is not a full HMC posterior run.",
+        "The likelihood block evaluates a trained-surrogate inversion likelihood.",
+        "Optional surrogate HMC samples a fixed-reference steady-state/fixed-ROM likelihood; it does not yet recompute steady states and first-order matrices inside each HMC transition.",
     ]
     if steady_state_mode == "fixed-reference":
         caveats.append(
@@ -1616,6 +1853,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         else float(np.nanmean(result.training.validation_improvement)),
         "surrogate_inversion_likelihood": likelihood_result,
         "jax_surrogate_log_density": jax_log_density_result,
+        "surrogate_hmc": surrogate_hmc_result,
     }
 
 
@@ -1804,6 +2042,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-jax-batch-replay", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hlt-jax-differentiate-shocks", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--hlt-jax-python-parity-tol", type=float, default=1e-7)
+    parser.add_argument("--hlt-surrogate-hmc-warmup", type=int, default=0)
+    parser.add_argument("--hlt-surrogate-hmc-samples", type=int, default=0)
+    parser.add_argument("--hlt-surrogate-hmc-chains", type=int, default=1)
+    parser.add_argument("--hlt-surrogate-hmc-leapfrog-steps", type=int, default=4)
+    parser.add_argument("--hlt-surrogate-hmc-step-size", type=float, default=0.05)
+    parser.add_argument("--hlt-surrogate-hmc-target-accept-prob", type=float, default=0.8)
+    parser.add_argument("--hlt-surrogate-hmc-initial-jitter", type=float, default=0.02)
+    parser.add_argument("--hlt-surrogate-hmc-prior-width-scale", type=float, default=0.01)
+    parser.add_argument("--hlt-surrogate-hmc-prior-width-floor", type=float, default=1e-4)
+    parser.add_argument("--hlt-surrogate-hmc-no-adapt-step-size", action="store_true")
+    parser.add_argument("--hlt-surrogate-hmc-seed", type=int, default=20260923)
     parser.add_argument("--output", type=Path)
     return _apply_scenario_defaults(parser.parse_args(argv))
 
