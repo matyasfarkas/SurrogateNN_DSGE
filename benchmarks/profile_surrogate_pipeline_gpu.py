@@ -2373,17 +2373,53 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     jax_started = time.perf_counter()
 
                     grad_np: np.ndarray | None
+                    repeat_timings: list[float] = []
+                    repeat_values: list[float] = []
+                    repeat_gradient_norms: list[float] = []
                     if bool(args.hlt_jax_log_density_gradient):
                         value_and_grad = jax.jit(jax.value_and_grad(log_density))
                         value, grad = value_and_grad(theta0_jax)
                         _block_until_ready_tree((value, grad))
                         grad_np = np.asarray(grad, dtype=np.float64)
+                        repeat_fn = value_and_grad
                     else:
                         value_fn = jax.jit(log_density)
                         value = value_fn(theta0_jax)
                         _block_until_ready_tree(value)
                         grad_np = None
+                        repeat_fn = value_fn
                     jax_elapsed = time.perf_counter() - jax_started
+
+                    repeat_count = max(0, int(args.hlt_jax_log_density_repeat_evals))
+                    repeat_perturbation = float(args.hlt_jax_log_density_repeat_perturbation)
+                    if repeat_count > 0:
+                        _progress(
+                            "starting JAX log-density repeat timings "
+                            f"count={repeat_count} perturbation={repeat_perturbation:g}"
+                        )
+                    for repeat_idx in range(repeat_count):
+                        if repeat_perturbation == 0.0:
+                            theta_eval = theta0_jax
+                        else:
+                            direction = jnp.where(
+                                (jnp.arange(theta0_jax.shape[0]) + repeat_idx) % 2 == 0,
+                                jnp.asarray(1.0, dtype=jnp.float64),
+                                jnp.asarray(-1.0, dtype=jnp.float64),
+                            )
+                            theta_eval = theta0_jax + repeat_perturbation * direction
+                        repeat_started = time.perf_counter()
+                        if bool(args.hlt_jax_log_density_gradient):
+                            repeat_value, repeat_grad = repeat_fn(theta_eval)
+                            _block_until_ready_tree((repeat_value, repeat_grad))
+                            repeat_gradient_norms.append(
+                                float(np.linalg.norm(np.asarray(repeat_grad, dtype=np.float64)))
+                            )
+                        else:
+                            repeat_value = repeat_fn(theta_eval)
+                            _block_until_ready_tree(repeat_value)
+                        repeat_timings.append(time.perf_counter() - repeat_started)
+                        repeat_values.append(float(np.asarray(repeat_value)))
+
                     value_float = float(np.asarray(value))
                     python_total = _finite_float_or_none(likelihood_result.get("total_loglikelihood"))
                     value_minus_python = None if python_total is None else value_float - python_total
@@ -2392,6 +2428,16 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     jax_log_density_result = {
                         "status": "ok",
                         "elapsed_s": jax_elapsed,
+                        "repeat_eval_count": repeat_count,
+                        "repeat_eval_timings_s": repeat_timings,
+                        "repeat_eval_median_s": None
+                        if not repeat_timings
+                        else float(statistics.median(repeat_timings)),
+                        "repeat_eval_min_s": None if not repeat_timings else float(min(repeat_timings)),
+                        "repeat_eval_max_s": None if not repeat_timings else float(max(repeat_timings)),
+                        "repeat_eval_values": repeat_values,
+                        "repeat_eval_gradient_norms": repeat_gradient_norms,
+                        "repeat_eval_perturbation": repeat_perturbation,
                         "value": value_float,
                         "python_surrogate_total_loglikelihood": python_total,
                         "value_minus_python": value_minus_python,
@@ -2435,7 +2481,8 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     _progress(
                         "finished JAX log-density smoke "
                         f"elapsed={jax_elapsed:.3f}s parity_ok={jax_log_density_result['parity_ok']} "
-                        f"grad_norm={jax_log_density_result['gradient_norm']}"
+                        f"grad_norm={jax_log_density_result['gradient_norm']} "
+                        f"repeat_median={jax_log_density_result['repeat_eval_median_s']}"
                     )
 
                 if int(args.hlt_surrogate_hmc_samples) > 0:
@@ -2855,6 +2902,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-surrogate-inversion-lambda", type=float, default=1e-4)
     parser.add_argument("--hlt-jax-log-density-smoke", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hlt-jax-log-density-gradient", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--hlt-jax-log-density-repeat-evals",
+        type=int,
+        default=0,
+        help="Number of post-compile repeated JAX log-density evaluations to time.",
+    )
+    parser.add_argument(
+        "--hlt-jax-log-density-repeat-perturbation",
+        type=float,
+        default=0.0,
+        help="Add alternating +/- perturbations of this size to theta during repeat timing.",
+    )
     parser.add_argument("--hlt-jax-shock-solver", choices=("rom", "surrogate"), default="rom")
     parser.add_argument("--hlt-jax-batch-replay", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hlt-jax-differentiate-shocks", action=argparse.BooleanOptionalAction, default=False)
