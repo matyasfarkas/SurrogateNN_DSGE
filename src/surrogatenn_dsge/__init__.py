@@ -20,6 +20,7 @@ from .linalg import (
     solve_sylvester_equation,
 )
 from .inference import (
+    FirstOrderModelJAXResult,
     assemble_parameter_vector,
     build_numpyro_kalman_model,
     build_numpyro_kalman_model_jax,
@@ -36,6 +37,7 @@ from .inference import (
     kalman_loglikelihood_from_model_jax,
     linear_filter_full_state_initial_jax,
     linear_filter_initial_state_jax,
+    solve_first_order_model_jax,
     switching_loglikelihood_from_model_filter_gates_jax,
     switching_loglikelihood_from_model_jax,
 )
@@ -320,6 +322,7 @@ __all__ = [
     "DSGETimings",
     "FirstOrderDeterminacyResult",
     "FirstOrderDSGEResult",
+    "FirstOrderModelJAXResult",
     "FrozenMLP",
     "FrozenResNet",
     "GateCalibrationConfig",
@@ -550,6 +553,7 @@ __all__ = [
     "solve_first_order_dsge_solution",
     "solve_first_order_dsge_solution_jax",
     "solve_first_order_model",
+    "solve_first_order_model_jax",
     "solve_batched_stochastic_extended_path_model",
     "solve_sep_at_noise_level",
     "solve_discrete_lyapunov",

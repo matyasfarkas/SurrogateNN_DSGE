@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from surrogatenn_dsge import (
@@ -11,6 +12,7 @@ from surrogatenn_dsge import (
     parse_macro_model,
     simulate_linear_gaussian_state_space,
     solve_first_order_model,
+    solve_first_order_model_jax,
 )
 
 
@@ -28,6 +30,19 @@ end
     y_bar = 2.0
     rho_a = 0.8
     rho_y = 0.6
+end
+"""
+
+PRESENT_ONLY_SOURCE = """
+@model present_only_first_order begin
+    x[0] = rho * x[-1] + eps_x[x]
+    y[0] = alpha * x[0]
+end
+
+@parameters present_only_first_order begin
+    0 < rho < 1
+    alpha = 0.5
+    rho = 0.7
 end
 """
 
@@ -203,6 +218,108 @@ def test_model_loglikelihood_accepts_schur_qme_algorithm() -> None:
 
     np.testing.assert_allclose(high_level, explicit, rtol=1e-10, atol=1e-10)
     np.testing.assert_allclose(high_level, low_level, rtol=1e-10, atol=1e-10)
+
+
+def test_solve_first_order_model_jax_matches_python_explicit_steady_state() -> None:
+    model, first_order_result, _, _, _, _ = _loglikelihood_fixture()
+    parameters = np.asarray(model.parameter_values, dtype=np.float64).copy()
+
+    jax_result = solve_first_order_model_jax(
+        model,
+        parameter_values=parameters,
+        steady_state=np.asarray(first_order_result.steady_state, dtype=np.float64),
+        qme_algorithm="schur",
+        check_parameter_bounds=False,
+    )
+
+    assert bool(np.asarray(jax_result.converged))
+    np.testing.assert_allclose(
+        jax_result.steady_state,
+        first_order_result.steady_state,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        jax_result.state_transition,
+        first_order_result.solution.state_transition,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        jax_result.shock_impact,
+        first_order_result.solution.shock_impact,
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_solve_first_order_model_jax_solves_steady_state_and_has_finite_gradient() -> None:
+    model = parse_macro_model(LIKELIHOOD_SOURCE)
+    parameters = jnp.asarray(model.parameter_values, dtype=jnp.float64)
+    initial_guess = {"a": 1.5, "y": 2.0}
+
+    def objective(theta: jax.Array) -> jax.Array:
+        result = solve_first_order_model_jax(
+            model,
+            parameter_values=theta,
+            steady_state_initial_guess=initial_guess,
+            qme_algorithm="schur",
+            check_parameter_bounds=False,
+        )
+        return jnp.sum(result.steady_state) + jnp.sum(result.state_transition)
+
+    value, gradient = jax.jit(jax.value_and_grad(objective))(parameters)
+
+    assert np.isfinite(float(value))
+    assert gradient.shape == parameters.shape
+    assert np.isfinite(np.asarray(gradient)).all()
+
+
+def test_solve_first_order_model_jax_static_rows_avoid_qr_ad_limitation() -> None:
+    model = parse_macro_model(PRESENT_ONLY_SOURCE)
+    parameters = jnp.asarray(model.parameter_values, dtype=jnp.float64)
+    steady_state = np.zeros((model.timings.nVars,), dtype=np.float64)
+    static_rows = model._first_order_static_equation_rows_for_values(
+        steady_state=steady_state,
+        parameter_values=np.asarray(model.parameter_values, dtype=np.float64),
+    )
+
+    def objective(theta: jax.Array) -> jax.Array:
+        result = solve_first_order_model_jax(
+            model,
+            parameter_values=theta,
+            steady_state_initial_guess={"x": 0.0, "y": 0.0},
+            qme_algorithm="schur",
+            static_equation_rows=static_rows,
+            check_parameter_bounds=False,
+        )
+        return jnp.sum(result.state_transition) + jnp.sum(result.shock_impact)
+
+    value, gradient = jax.jit(jax.value_and_grad(objective))(parameters)
+
+    assert static_rows
+    assert np.isfinite(float(value))
+    assert gradient.shape == parameters.shape
+    assert np.isfinite(np.asarray(gradient)).all()
+
+
+def test_solve_first_order_model_jax_rejects_out_of_bounds_parameters() -> None:
+    model = parse_macro_model(LIKELIHOOD_SOURCE)
+    parameters = np.asarray(model.parameter_values, dtype=np.float64).copy()
+    parameters[model.parameter_names.index("rho_a")] = 1.2
+
+    result = solve_first_order_model_jax(
+        model,
+        parameter_values=parameters,
+        steady_state_initial_guess={"a": 1.5, "y": 2.0},
+        qme_algorithm="schur",
+        check_parameter_bounds=True,
+    )
+
+    assert not bool(np.asarray(result.converged))
+    assert not bool(np.asarray(result.steady_state_converged))
+    assert not bool(np.asarray(result.first_order_converged))
+    assert np.isinf(float(np.asarray(result.steady_state_residual_norm)))
 
 
 def test_model_loglikelihood_sorts_array_observables_like_julia() -> None:

@@ -51,6 +51,7 @@ from surrogatenn_dsge import (
     resolve_jax_device,
     solve_batched_stochastic_extended_path_model,
     solve_batched_stochastic_extended_path_residual_expectation,
+    solve_first_order_model_jax,
     solve_stochastic_extended_path_residual_expectation,
     static_hmc_sample,
     summarize_surrogate_dataset,
@@ -1965,6 +1966,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         first_order = model.solve_first_order(
             parameter_values=parameter_values,
             steady_state=steady_state,
+            qme_algorithm=str(args.hlt_first_order_qme_algorithm),
         )
         first_order_elapsed = time.perf_counter() - first_order_started
         first_order_s += first_order_elapsed
@@ -2180,6 +2182,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
     if likelihood_periods <= 0:
         likelihood_result = {"status": "skipped", "reason": "hlt_likelihood_periods <= 0"}
     else:
+        python_likelihood_completed = False
         try:
             _progress(f"starting surrogate inversion likelihood periods={likelihood_periods}")
             observations = np.asarray(case["observations"], dtype=np.float64)
@@ -2222,6 +2225,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 "inferred_shocks_finite": bool(np.isfinite(inferred_shocks).all()),
                 "inferred_shocks_max_abs": float(np.max(np.abs(inferred_shocks))) if inferred_shocks.size else 0.0,
             }
+            python_likelihood_completed = True
             _progress(
                 "finished Python surrogate inversion likelihood "
                 f"elapsed={likelihood_result['elapsed_s']:.3f}s "
@@ -2239,7 +2243,39 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 shock_impact_jax = device_array(runtime0["shock_impact"])
                 obs_data_jax = device_array(obs_data)
                 obs_sigma_jax = device_array(obs_sigma)
+                shock_sigmas_jax = device_array(shock_sigmas)
                 theta0_jax = device_array(theta0)
+                base_parameters_jax = device_array(base_parameters)
+                subset_idx_jax = device_array(np.asarray(subset_idx, dtype=np.int64), dtype=jnp.int64)
+                reference_steady_state_guess = model._extract_base_steady_state(reference_steady_state)
+                failure_loglikelihood_jax = device_array(float(args.hlt_likelihood_on_failure))
+                likelihood_runtime_mode = str(args.hlt_likelihood_runtime_mode).strip().lower()
+                likelihood_qme_algorithm = str(args.hlt_likelihood_qme_algorithm).strip().lower()
+                likelihood_static_rows_mode = str(args.hlt_likelihood_static_rows_mode).strip().lower()
+                if likelihood_runtime_mode not in {"fixed-reference", "full-jax"}:
+                    raise ValueError(
+                        "hlt_likelihood_runtime_mode must be 'fixed-reference' or "
+                        f"'full-jax', got {args.hlt_likelihood_runtime_mode!r}."
+                    )
+                if likelihood_static_rows_mode not in {"reference", "none"}:
+                    raise ValueError(
+                        "hlt_likelihood_static_rows_mode must be 'reference' or "
+                        f"'none', got {args.hlt_likelihood_static_rows_mode!r}."
+                    )
+                likelihood_static_rows = None
+                if (
+                    likelihood_runtime_mode == "full-jax"
+                    and likelihood_static_rows_mode == "reference"
+                    and model.timings.nPresent_only > 0
+                ):
+                    likelihood_static_rows = model._first_order_static_equation_rows_for_values(
+                        steady_state=runtime0["steady_state"],
+                        parameter_values=runtime0["parameter_values"],
+                    )
+
+                def full_parameter_vector_jax(theta_local: jax.Array) -> jax.Array:
+                    theta_arr = jnp.asarray(theta_local, dtype=jnp.float64).reshape(-1)
+                    return base_parameters_jax.at[subset_idx_jax].set(theta_arr)
 
                 def rom_predict_jax(state: Any, shock_t: Any, _theta_t: Any) -> tuple[jax.Array, jax.Array]:
                     state_arr = jnp.asarray(state, dtype=jnp.float64).reshape(-1)
@@ -2248,7 +2284,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     next_state = steady_state_jax + state_transition_jax @ state_dev + shock_impact_jax @ shock_arr
                     return next_state[observable_idx_jax], next_state
 
-                def log_density(theta_local: jax.Array) -> jax.Array:
+                def fixed_reference_log_density(theta_local: jax.Array) -> jax.Array:
                     return surrogate_inversion_loglikelihood_jax(
                         rom_predict_jax,
                         result.training.frozen,
@@ -2256,7 +2292,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         theta_local,
                         obs_data_jax,
                         obs_sigma_jax,
-                        shock_sigmas,
+                        shock_sigmas_jax,
                         maxit=int(args.hlt_surrogate_inversion_maxit),
                         tol=float(args.hlt_surrogate_inversion_tol),
                         lambda_=float(args.hlt_surrogate_inversion_lambda),
@@ -2265,15 +2301,89 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         differentiate_shocks=bool(args.hlt_jax_differentiate_shocks),
                     )
 
+                def full_jax_log_density(theta_local: jax.Array) -> jax.Array:
+                    parameter_vector = full_parameter_vector_jax(theta_local)
+                    runtime = solve_first_order_model_jax(
+                        model,
+                        parameter_values=parameter_vector,
+                        steady_state_initial_guess=reference_steady_state_guess,
+                        steady_state_tol=float(args.hlt_steady_state_tol),
+                        steady_state_max_iter=int(args.hlt_steady_state_max_iter),
+                        qme_algorithm=likelihood_qme_algorithm,
+                        static_equation_rows=likelihood_static_rows,
+                        check_parameter_bounds=True,
+                    )
+
+                    def runtime_rom_predict(
+                        state: Any,
+                        shock_t: Any,
+                        _theta_t: Any,
+                    ) -> tuple[jax.Array, jax.Array]:
+                        state_arr = jnp.asarray(state, dtype=jnp.float64).reshape(-1)
+                        shock_arr = jnp.asarray(shock_t, dtype=jnp.float64).reshape(-1)
+                        state_dev = state_arr[state_idx_jax] - runtime.steady_state[state_idx_jax]
+                        next_state = (
+                            runtime.steady_state
+                            + runtime.state_transition @ state_dev
+                            + runtime.shock_impact @ shock_arr
+                        )
+                        return next_state[observable_idx_jax], next_state
+
+                    runtime_ok = (
+                        runtime.converged
+                        & jnp.all(jnp.isfinite(runtime.steady_state))
+                        & jnp.all(jnp.isfinite(runtime.state_transition))
+                        & jnp.all(jnp.isfinite(runtime.shock_impact))
+                    )
+
+                    return jax.lax.cond(
+                        runtime_ok,
+                        lambda _: surrogate_inversion_loglikelihood_jax(
+                            runtime_rom_predict,
+                            result.training.frozen,
+                            runtime.steady_state,
+                            theta_local,
+                            obs_data_jax,
+                            obs_sigma_jax,
+                            shock_sigmas_jax,
+                            maxit=int(args.hlt_surrogate_inversion_maxit),
+                            tol=float(args.hlt_surrogate_inversion_tol),
+                            lambda_=float(args.hlt_surrogate_inversion_lambda),
+                            shock_solver=str(args.hlt_jax_shock_solver),
+                            batch_replay=bool(args.hlt_jax_batch_replay),
+                            differentiate_shocks=bool(args.hlt_jax_differentiate_shocks),
+                        ),
+                        lambda _: failure_loglikelihood_jax,
+                        operand=None,
+                    )
+
+                log_density = (
+                    fixed_reference_log_density
+                    if likelihood_runtime_mode == "fixed-reference"
+                    else full_jax_log_density
+                )
+
                 if bool(args.hlt_jax_log_density_smoke):
-                    _progress("starting JAX log-density value/gradient smoke")
+                    _progress(
+                        "starting JAX log-density smoke "
+                        f"runtime_mode={likelihood_runtime_mode} "
+                        f"qme={likelihood_qme_algorithm} "
+                        f"gradient={bool(args.hlt_jax_log_density_gradient)}"
+                    )
                     jax_started = time.perf_counter()
 
-                    value_and_grad = jax.jit(jax.value_and_grad(log_density))
-                    value, grad = value_and_grad(theta0_jax)
-                    _block_until_ready_tree((value, grad))
+                    grad_np: np.ndarray | None
+                    if bool(args.hlt_jax_log_density_gradient):
+                        value_and_grad = jax.jit(jax.value_and_grad(log_density))
+                        value, grad = value_and_grad(theta0_jax)
+                        _block_until_ready_tree((value, grad))
+                        grad_np = np.asarray(grad, dtype=np.float64)
+                    else:
+                        value_fn = jax.jit(log_density)
+                        value = value_fn(theta0_jax)
+                        _block_until_ready_tree(value)
+                        grad_np = None
                     jax_elapsed = time.perf_counter() - jax_started
-                    grad_np = np.asarray(grad, dtype=np.float64)
                     value_float = float(np.asarray(value))
                     python_total = _finite_float_or_none(likelihood_result.get("total_loglikelihood"))
                     value_minus_python = None if python_total is None else value_float - python_total
@@ -2288,31 +2398,50 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         "parity_abs_diff": parity_abs_diff,
                         "parity_tol": parity_tol,
                         "parity_ok": None if parity_abs_diff is None else bool(parity_abs_diff <= parity_tol),
-                        "gradient": grad_np.tolist(),
-                        "gradient_finite": bool(np.isfinite(grad_np).all()),
-                        "gradient_norm": float(np.linalg.norm(grad_np)),
+                        "gradient_evaluated": bool(args.hlt_jax_log_density_gradient),
+                        "gradient": None if grad_np is None else grad_np.tolist(),
+                        "gradient_finite": None if grad_np is None else bool(np.isfinite(grad_np).all()),
+                        "gradient_norm": None if grad_np is None else float(np.linalg.norm(grad_np)),
                         "backend": jax.default_backend(),
                         "target_device": None if target_device is None else str(target_device),
+                        "runtime_mode": likelihood_runtime_mode,
+                        "qme_algorithm": likelihood_qme_algorithm,
+                        "static_rows_mode": likelihood_static_rows_mode,
+                        "static_equation_rows": None
+                        if likelihood_static_rows is None
+                        else [int(row) for row in likelihood_static_rows],
+                        "failure_loglikelihood": float(args.hlt_likelihood_on_failure),
                         "shock_solver": str(args.hlt_jax_shock_solver),
                         "batch_replay": bool(args.hlt_jax_batch_replay),
                         "differentiate_shocks": bool(args.hlt_jax_differentiate_shocks),
                         "caveat": (
-                            "Differentiates the fixed-ROM surrogate likelihood through theta and inferred shocks; "
-                            "steady-state and first-order matrices are held fixed in this smoke check."
-                            if bool(args.hlt_jax_differentiate_shocks)
-                            else "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; "
-                            "steady-state and first-order matrices are held fixed in this smoke check."
+                            (
+                                "Differentiates the full JAX surrogate likelihood through parameter-dependent "
+                                "steady-state and first-order ROM solves."
+                                if bool(args.hlt_jax_log_density_gradient)
+                                else "Evaluates the full JAX surrogate likelihood with parameter-dependent "
+                                "steady-state and first-order ROM solves; gradient evaluation was disabled."
+                            )
+                            if likelihood_runtime_mode == "full-jax"
+                            else (
+                                "Differentiates the fixed-ROM surrogate likelihood through theta and inferred shocks; "
+                                "steady-state and first-order matrices are held fixed in this smoke check."
+                                if bool(args.hlt_jax_differentiate_shocks)
+                                else "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; "
+                                "steady-state and first-order matrices are held fixed in this smoke check."
+                            )
                         ),
                     }
                     _progress(
                         "finished JAX log-density smoke "
                         f"elapsed={jax_elapsed:.3f}s parity_ok={jax_log_density_result['parity_ok']} "
-                        f"grad_norm={jax_log_density_result['gradient_norm']:.6g}"
+                        f"grad_norm={jax_log_density_result['gradient_norm']}"
                     )
 
                 if int(args.hlt_surrogate_hmc_samples) > 0:
                     _progress(
-                        "starting static surrogate HMC "
+                        "starting surrogate HMC "
+                        f"runtime_mode={likelihood_runtime_mode} "
                         f"chains={args.hlt_surrogate_hmc_chains} "
                         f"warmup={args.hlt_surrogate_hmc_warmup} "
                         f"samples={args.hlt_surrogate_hmc_samples}"
@@ -2339,6 +2468,9 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         initial_jitter=float(args.hlt_surrogate_hmc_initial_jitter),
                         seed=int(args.hlt_surrogate_hmc_seed),
                     )
+                    surrogate_hmc_result["runtime_mode"] = likelihood_runtime_mode
+                    surrogate_hmc_result["qme_algorithm"] = likelihood_qme_algorithm
+                    surrogate_hmc_result["static_rows_mode"] = likelihood_static_rows_mode
                     _progress(
                         "finished static surrogate HMC "
                         f"elapsed={surrogate_hmc_result.get('elapsed_s')} "
@@ -2346,19 +2478,30 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     )
         except Exception as exc:
             _progress(f"likelihood/HMC stage failed: {exc!r}")
-            likelihood_result = {
-                "status": "error",
-                "elapsed_s": time.perf_counter() - likelihood_started,
-                "error": repr(exc),
-            }
-            jax_log_density_result = {
-                "status": "skipped",
-                "reason": "Python surrogate likelihood failed before JAX log-density smoke.",
-            }
-            surrogate_hmc_result = {
-                "status": "skipped",
-                "reason": "Python surrogate likelihood failed before surrogate HMC.",
-            }
+            if python_likelihood_completed:
+                jax_log_density_result = {
+                    "status": "error",
+                    "elapsed_s": time.perf_counter() - likelihood_started,
+                    "error": repr(exc),
+                }
+                surrogate_hmc_result = {
+                    "status": "skipped",
+                    "reason": "JAX log-density/HMC stage failed after Python likelihood completed.",
+                }
+            else:
+                likelihood_result = {
+                    "status": "error",
+                    "elapsed_s": time.perf_counter() - likelihood_started,
+                    "error": repr(exc),
+                }
+                jax_log_density_result = {
+                    "status": "skipped",
+                    "reason": "Python surrogate likelihood failed before JAX log-density smoke.",
+                }
+                surrogate_hmc_result = {
+                    "status": "skipped",
+                    "reason": "Python surrogate likelihood failed before surrogate HMC.",
+                }
 
     steady_statuses = [str(row["steady_state_status"]) for row in steady_state_diagnostics]
     fallback_count = sum(status.startswith("fallback") for status in steady_statuses)
@@ -2366,8 +2509,16 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
     caveats = [
         "SEP target generation is still callback/Python-loop based; ResNet training is the GPU-native part.",
         "The likelihood block evaluates a trained-surrogate inversion likelihood.",
-        "Optional surrogate HMC samples a fixed-reference steady-state/fixed-ROM likelihood; it does not yet recompute steady states and first-order matrices inside each HMC transition.",
     ]
+    likelihood_runtime_mode_summary = str(args.hlt_likelihood_runtime_mode).strip().lower()
+    if likelihood_runtime_mode_summary == "full-jax":
+        caveats.append(
+            "Optional surrogate HMC recomputes steady states and first-order ROM matrices inside the JAX log density."
+        )
+    else:
+        caveats.append(
+            "Optional surrogate HMC samples a fixed-reference steady-state/fixed-ROM likelihood."
+        )
     if steady_state_mode == "fixed-reference":
         caveats.append(
             "Uses a Julia-exported reference steady state for all draws; this is a fixed-SS smoke/stress test."
@@ -2398,6 +2549,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         "hlt_parameter_set": str(args.hlt_parameter_set),
         "theta_draws": int(theta.shape[1]),
         "steady_state_mode": steady_state_mode,
+        "first_order_qme_algorithm": str(args.hlt_first_order_qme_algorithm),
+        "likelihood_runtime_mode": likelihood_runtime_mode_summary,
+        "likelihood_qme_algorithm": str(args.hlt_likelihood_qme_algorithm),
+        "likelihood_static_rows_mode": str(args.hlt_likelihood_static_rows_mode),
         "steady_state_solved_count": int(solved_count),
         "steady_state_fallback_count": int(fallback_count),
         "steady_state_diagnostics": steady_state_diagnostics,
@@ -2663,11 +2818,43 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--hlt-steady-state-tol", type=float, default=1e-10)
     parser.add_argument("--hlt-steady-state-max-iter", type=int, default=100)
+    parser.add_argument(
+        "--hlt-first-order-qme-algorithm",
+        choices=("doubling", "schur", "schur_gpu"),
+        default="schur",
+        help="QME algorithm used by the Python first-order runtime for HLT target generation.",
+    )
     parser.add_argument("--hlt-likelihood-periods", type=int, default=1)
+    parser.add_argument(
+        "--hlt-likelihood-runtime-mode",
+        choices=("fixed-reference", "full-jax"),
+        default="fixed-reference",
+        help=(
+            "'fixed-reference' keeps the old HMC smoke path with frozen steady state and ROM; "
+            "'full-jax' recomputes steady state and first-order matrices inside the JAX log density."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-likelihood-qme-algorithm",
+        choices=("doubling", "schur", "schur_gpu"),
+        default="schur",
+        help="QME algorithm used by the full-JAX likelihood runtime.",
+    )
+    parser.add_argument(
+        "--hlt-likelihood-static-rows-mode",
+        choices=("reference", "none"),
+        default="reference",
+        help=(
+            "Static present-only equation rows passed to the full-JAX first-order solve. "
+            "'reference' avoids differentiating complete QR; 'none' uses generic QR and is mainly diagnostic."
+        ),
+    )
+    parser.add_argument("--hlt-likelihood-on-failure", type=float, default=-1e12)
     parser.add_argument("--hlt-surrogate-inversion-maxit", type=int, default=4)
     parser.add_argument("--hlt-surrogate-inversion-tol", type=float, default=1e-5)
     parser.add_argument("--hlt-surrogate-inversion-lambda", type=float, default=1e-4)
     parser.add_argument("--hlt-jax-log-density-smoke", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--hlt-jax-log-density-gradient", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hlt-jax-shock-solver", choices=("rom", "surrogate"), default="rom")
     parser.add_argument("--hlt-jax-batch-replay", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hlt-jax-differentiate-shocks", action=argparse.BooleanOptionalAction, default=False)

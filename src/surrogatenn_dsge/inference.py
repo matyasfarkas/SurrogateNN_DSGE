@@ -33,6 +33,20 @@ class _LinearFilterPathResult(NamedTuple):
     variables: jax.Array
 
 
+class FirstOrderModelJAXResult(NamedTuple):
+    steady_state: jax.Array
+    parameter_values: jax.Array
+    jacobian: jax.Array
+    solution_matrix: jax.Array
+    state_transition: jax.Array
+    shock_impact: jax.Array
+    steady_state_converged: jax.Array
+    first_order_converged: jax.Array
+    converged: jax.Array
+    steady_state_iterations: jax.Array
+    steady_state_residual_norm: jax.Array
+
+
 def _require_numpyro() -> tuple[Any, Any, Any]:
     try:
         import numpyro
@@ -137,6 +151,302 @@ def _static_equation_rows_for_jax_qme(
     if static_equation_rows is not None:
         return tuple(int(row) for row in static_equation_rows)
     return model._first_order_static_equation_rows_for_values(steady_state=steady_state)
+
+
+def _normalize_steady_state_initial_guess_for_jax(
+    model: MacroModel,
+    initial_guess: Optional[Sequence[float] | Mapping[str, float]],
+) -> Optional[Sequence[float] | Mapping[str, float]]:
+    if initial_guess is None or isinstance(initial_guess, Mapping):
+        return initial_guess
+    guess = np.asarray(initial_guess, dtype=np.float64)
+    if guess.shape == (model.timings.nVars,):
+        return np.asarray(model._extract_base_steady_state(guess), dtype=np.float64)
+    return initial_guess
+
+
+def _fallback_full_steady_state_for_jax(
+    model: MacroModel,
+    initial_guess: Optional[Sequence[float] | Mapping[str, float]],
+) -> jax.Array:
+    if initial_guess is not None and not isinstance(initial_guess, Mapping):
+        guess = np.asarray(initial_guess, dtype=np.float64)
+        if guess.shape == (model.timings.nVars,):
+            return jnp.asarray(guess, dtype=jnp.float64)
+    base_guess = model._coerce_steady_state_guess(
+        _normalize_steady_state_initial_guess_for_jax(model, initial_guess)
+    )
+    return model._expand_to_full_steady_state_jax(base_guess)
+
+
+def solve_first_order_model_jax(
+    model: MacroModel,
+    *,
+    parameter_values: Optional[Sequence[float] | Mapping[str, Any]] = None,
+    base_parameter_values: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state: Optional[Sequence[float]] = None,
+    steady_state_initial_guess: Optional[Sequence[float] | Mapping[str, float]] = None,
+    steady_state_tol: float = 1e-12,
+    steady_state_max_iter: int = 100,
+    qme_algorithm: str = "schur",
+    static_equation_rows: Optional[Sequence[int]] = None,
+    parameters_are_resolved: bool = False,
+    check_parameter_bounds: bool = True,
+) -> FirstOrderModelJAXResult:
+    """Solve the parsed-model steady state and first-order ROM in JAX.
+
+    The function is designed for compiled likelihoods and HMC kernels: it
+    returns convergence flags instead of raising when a draw is out of bounds,
+    the steady state fails, or the first-order solution is not determinate.
+    """
+
+    if len(model._dynamic_expressions) != model.timings.nVars:
+        raise ValueError(
+            "First-order solution requires as many dynamic equations as present variables. "
+            f"Got {len(model._dynamic_expressions)} equations and {model.timings.nVars} variables."
+        )
+
+    parameter_vector = _coerce_parameter_vector_for_jax(
+        model,
+        parameter_values,
+        base_parameter_values=base_parameter_values,
+    )
+    lower_bounds, upper_bounds = model._bounds_vector(model.parameter_names)
+    lower_bounds_array = jnp.asarray(lower_bounds, dtype=jnp.float64)
+    upper_bounds_array = jnp.asarray(upper_bounds, dtype=jnp.float64)
+    explicit_steady_state = (
+        None
+        if steady_state is None
+        else jnp.asarray(model._coerce_full_steady_state(steady_state), dtype=jnp.float64)
+    )
+    normalized_initial_guess = _normalize_steady_state_initial_guess_for_jax(
+        model,
+        steady_state_initial_guess,
+    )
+    fallback_steady_state = (
+        explicit_steady_state
+        if explicit_steady_state is not None
+        else _fallback_full_steady_state_for_jax(model, steady_state_initial_guess)
+    )
+
+    future_index_array = jnp.asarray(
+        model.timings.future_not_past_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+    past_index_array = jnp.asarray(
+        model.timings.past_not_future_and_mixed_idx,
+        dtype=jnp.int32,
+    )
+    dynamic_dim = (
+        model.timings.nFuture_not_past_and_mixed
+        + model.timings.nVars
+        + model.timings.nPast_not_future_and_mixed
+        + model.timings.nExo
+    )
+    zero_jacobian = jnp.zeros((model.timings.nVars, dynamic_dim), dtype=jnp.float64)
+    zero_solution = jnp.zeros(
+        (
+            model.timings.nVars,
+            model.timings.nPast_not_future_and_mixed + model.timings.nExo,
+        ),
+        dtype=jnp.float64,
+    )
+    zero_transition = zero_solution[:, : model.timings.nPast_not_future_and_mixed]
+    zero_shock_impact = zero_solution[:, model.timings.nPast_not_future_and_mixed :]
+    false = jnp.asarray(False, dtype=jnp.bool_)
+    true = jnp.asarray(True, dtype=jnp.bool_)
+    zero_iterations = jnp.asarray(0, dtype=jnp.int32)
+    infinite_residual = jnp.asarray(jnp.inf, dtype=jnp.float64)
+
+    if static_equation_rows is not None:
+        resolved_static_equation_rows = tuple(int(row) for row in static_equation_rows)
+    elif steady_state is not None and model.timings.nPresent_only > 0 and not model.has_obc:
+        resolved_static_equation_rows = model._first_order_static_equation_rows_for_values(
+            steady_state=steady_state,
+        )
+    else:
+        # In fully parameter-dependent mode the numeric pivot rows depend on the
+        # solved steady state. Callers that need gradients through the first-order
+        # solve for models with present-only variables should pass validated row
+        # pivots, otherwise the generic QR path may hit JAX AD limitations.
+        resolved_static_equation_rows = None
+
+    def _failure_result(
+        parameters: jax.Array,
+        full_steady_state: jax.Array,
+        steady_state_converged: jax.Array,
+        steady_state_iterations: jax.Array,
+        steady_state_residual_norm: jax.Array,
+    ) -> FirstOrderModelJAXResult:
+        return FirstOrderModelJAXResult(
+            steady_state=jnp.asarray(full_steady_state, dtype=jnp.float64),
+            parameter_values=jnp.asarray(parameters, dtype=jnp.float64),
+            jacobian=zero_jacobian,
+            solution_matrix=zero_solution,
+            state_transition=zero_transition,
+            shock_impact=zero_shock_impact,
+            steady_state_converged=steady_state_converged,
+            first_order_converged=false,
+            converged=false,
+            steady_state_iterations=jnp.asarray(steady_state_iterations, dtype=jnp.int32),
+            steady_state_residual_norm=jnp.asarray(steady_state_residual_norm, dtype=jnp.float64),
+        )
+
+    def _runtime_from_full_steady_state(
+        full_steady_state: jax.Array,
+        parameters: jax.Array,
+        steady_state_converged: jax.Array,
+        steady_state_iterations: jax.Array,
+        steady_state_residual_norm: jax.Array,
+    ) -> FirstOrderModelJAXResult:
+        steady_reference_values = model._steady_reference_values_jax(full_steady_state)
+        dynamic_point = jnp.concatenate(
+            [
+                full_steady_state[future_index_array],
+                full_steady_state,
+                full_steady_state[past_index_array],
+                jnp.zeros((model.timings.nExo,), dtype=jnp.float64),
+            ]
+        )
+
+        def residual_from_dynamic_vector(dynamic_vector: jax.Array) -> jax.Array:
+            lead_state = full_steady_state.at[future_index_array].set(
+                dynamic_vector[: model.timings.nFuture_not_past_and_mixed]
+            )
+            current_start = model.timings.nFuture_not_past_and_mixed
+            current_end = current_start + model.timings.nVars
+            current_state = dynamic_vector[current_start:current_end]
+            lag_state = full_steady_state.at[past_index_array].set(
+                dynamic_vector[
+                    current_end : current_end + model.timings.nPast_not_future_and_mixed
+                ]
+            )
+            shock = dynamic_vector[current_end + model.timings.nPast_not_future_and_mixed :]
+            return model._evaluate_dynamic_residual_with_context(
+                lag_state,
+                current_state,
+                lead_state,
+                shock,
+                parameter_values=parameters,
+                steady_reference_values=steady_reference_values,
+            )
+
+        if model.has_obc:
+            jacobian = jax.jacrev(residual_from_dynamic_vector)(dynamic_point)
+        else:
+            jacobian = model._evaluate_dynamic_jacobian_with_context_jax(
+                full_steady_state,
+                full_steady_state,
+                full_steady_state,
+                jnp.zeros((model.timings.nExo,), dtype=jnp.float64),
+                parameter_values=parameters,
+                steady_reference_values=steady_reference_values,
+            )
+
+        first_order_result = solve_first_order_dsge_solution_jax(
+            jacobian,
+            model.timings,
+            qme_algorithm=qme_algorithm,
+            static_equation_rows=resolved_static_equation_rows,
+        )
+
+        def _success(result: Any) -> FirstOrderModelJAXResult:
+            return FirstOrderModelJAXResult(
+                steady_state=full_steady_state,
+                parameter_values=parameters,
+                jacobian=jacobian,
+                solution_matrix=result.solution_matrix,
+                state_transition=result.state_transition,
+                shock_impact=result.shock_impact,
+                steady_state_converged=steady_state_converged,
+                first_order_converged=true,
+                converged=steady_state_converged,
+                steady_state_iterations=jnp.asarray(steady_state_iterations, dtype=jnp.int32),
+                steady_state_residual_norm=jnp.asarray(steady_state_residual_norm, dtype=jnp.float64),
+            )
+
+        def _first_order_failure(result: Any) -> FirstOrderModelJAXResult:
+            return FirstOrderModelJAXResult(
+                steady_state=full_steady_state,
+                parameter_values=parameters,
+                jacobian=jacobian,
+                solution_matrix=result.solution_matrix,
+                state_transition=result.state_transition,
+                shock_impact=result.shock_impact,
+                steady_state_converged=steady_state_converged,
+                first_order_converged=false,
+                converged=false,
+                steady_state_iterations=jnp.asarray(steady_state_iterations, dtype=jnp.int32),
+                steady_state_residual_norm=jnp.asarray(steady_state_residual_norm, dtype=jnp.float64),
+            )
+
+        return lax.cond(
+            first_order_result.converged,
+            _success,
+            _first_order_failure,
+            first_order_result,
+        )
+
+    def _valid_runtime(parameters: jax.Array) -> FirstOrderModelJAXResult:
+        if explicit_steady_state is not None:
+            resolved_parameters = _resolve_or_use_explicit_parameters_jax(
+                model,
+                parameters,
+                explicit_steady_state,
+                tol=steady_state_tol,
+                max_iter=steady_state_max_iter,
+                parameters_are_resolved=parameters_are_resolved,
+            )
+            return _runtime_from_full_steady_state(
+                explicit_steady_state,
+                resolved_parameters,
+                true,
+                zero_iterations,
+                jnp.asarray(0.0, dtype=jnp.float64),
+            )
+
+        steady_state_result = model.solve_steady_state_jax(
+            parameter_values=parameters,
+            initial_guess=normalized_initial_guess,
+            tol=steady_state_tol,
+            max_iter=steady_state_max_iter,
+        )
+        return lax.cond(
+            steady_state_result.converged,
+            lambda result: _runtime_from_full_steady_state(
+                result.steady_state,
+                result.parameter_values,
+                result.converged,
+                result.iterations,
+                result.residual_norm,
+            ),
+            lambda result: _failure_result(
+                result.parameter_values,
+                result.steady_state,
+                result.converged,
+                result.iterations,
+                result.residual_norm,
+            ),
+            steady_state_result,
+        )
+
+    within_bounds = jnp.all(
+        (parameter_vector >= lower_bounds_array) & (parameter_vector <= upper_bounds_array)
+    )
+    if not check_parameter_bounds:
+        return _valid_runtime(parameter_vector)
+    return lax.cond(
+        within_bounds,
+        _valid_runtime,
+        lambda parameters: _failure_result(
+            parameters,
+            fallback_steady_state,
+            false,
+            zero_iterations,
+            infinite_residual,
+        ),
+        parameter_vector,
+    )
 
 
 def _resolve_or_use_explicit_parameters_jax(
