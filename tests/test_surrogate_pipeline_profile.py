@@ -406,3 +406,97 @@ def test_static_hmc_on_bounded_surrogate_log_density_tiny_cpu_smoke() -> None:
     assert result["post_warmup_draws"] == 4
     assert result["accepted_share"] is not None
     assert set(result["parameter_summary"]) == {"calfa", "crhob"}
+
+
+def test_hlt_adaptive_sep_attempt_specs_auto_ladder() -> None:
+    mod = _load_profile_module()
+    args = mod.parse_args(
+        [
+            "--mode",
+            "hlt-fixed-ss-smoke",
+            "--sep-order",
+            "1",
+            "--sep-periods",
+            "2",
+            "--sep-max-iter",
+            "7",
+            "--hlt-sep-shock-scale-ladder",
+            "1.0,0.5",
+        ]
+    )
+
+    specs = mod._hlt_sep_attempt_specs(args)
+
+    assert [spec.index for spec in specs] == list(range(len(specs)))
+    assert [
+        (spec.config.branching_order, spec.config.periods, spec.shock_scale, spec.config.max_iter)
+        for spec in specs
+    ] == [
+        (1, 2, 1.0, 7),
+        (1, 2, 0.5, 7),
+        (1, 1, 1.0, 7),
+        (1, 1, 0.5, 7),
+        (0, 2, 1.0, 7),
+        (0, 2, 0.5, 7),
+        (0, 1, 1.0, 7),
+        (0, 1, 0.5, 7),
+    ]
+
+
+def test_adaptive_hlt_sep_dataset_keeps_multi_theta_fallback_targets() -> None:
+    mod = _load_profile_module()
+    theta = np.asarray([[1.0, 2.0]], dtype=np.float64)
+    initial_states = np.asarray([[0.0, 0.5]], dtype=np.float64)
+    shocks = np.asarray(
+        [
+            [[0.1, -0.2]],
+            [[0.05, 0.0]],
+        ],
+        dtype=np.float64,
+    )
+    specs = (
+        mod.HLTSEPAttemptSpec(
+            index=0,
+            shock_scale=1.0,
+            config=mod.SEPConfig(periods=1, branching_order=1, nnodes=3, max_iter=2),
+        ),
+        mod.HLTSEPAttemptSpec(
+            index=1,
+            shock_scale=1.0,
+            config=mod.SEPConfig(periods=1, branching_order=0, nnodes=1, max_iter=2),
+        ),
+    )
+
+    def rom_predict(state, shock, theta_t):
+        next_state = np.asarray(state, dtype=np.float64) + 0.5 * np.asarray(shock, dtype=np.float64)
+        return next_state.copy(), next_state
+
+    def sep_predict(state, shock, theta_t, config):
+        if int(config.branching_order) == 1:
+            raise RuntimeError("strict sparse-tree SEP failed")
+        next_state = np.asarray(state, dtype=np.float64) + np.asarray(shock, dtype=np.float64) + 0.01 * theta_t[0]
+        return next_state.copy(), next_state, {"residual_norm": 1.0e-8, "accepted": True}
+
+    dataset, diagnostics = mod._build_adaptive_hlt_sep_dataset(
+        rom_predict=rom_predict,
+        sep_predict=sep_predict,
+        initial_states=initial_states,
+        shocks=shocks,
+        theta=theta,
+        attempt_specs=specs,
+        target_mode="fom_full",
+        min_stable_periods=2,
+        input_names=("x", "eps", "theta"),
+        output_names=("obs", "x[1]"),
+        max_logged_failures=10,
+    )
+
+    assert dataset.n_samples == 4
+    np.testing.assert_array_equal(dataset.theta_ids, np.asarray([0, 0, 1, 1]))
+    np.testing.assert_array_equal(dataset.theta_success, np.asarray([True, True]))
+    np.testing.assert_array_equal(dataset.theta_stable_periods, np.asarray([2, 2]))
+    assert diagnostics["status"] == "ok"
+    assert diagnostics["fallback_samples"] == 4
+    assert diagnostics["fallback_share"] == 1.0
+    assert diagnostics["accepted_by_branching_order"] == {"0": 4}
+    assert len(diagnostics["failure_log"]) == 4

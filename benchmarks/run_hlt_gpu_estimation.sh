@@ -125,6 +125,13 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --hlt-theta-draws "$HLT_THETA_DRAWS" \
   --hlt-periods "$HLT_PERIODS" \
   --hlt-parameter-perturbation "${HLT_PARAMETER_PERTURBATION:-1e-6}" \
+  --hlt-target-builder "${HLT_TARGET_BUILDER:-adaptive-sep}" \
+  --hlt-target-min-stable-periods "${HLT_TARGET_MIN_STABLE_PERIODS:--1}" \
+  --hlt-sep-order-ladder "${HLT_SEP_ORDER_LADDER:-auto}" \
+  --hlt-sep-periods-ladder "${HLT_SEP_PERIODS_LADDER:-auto}" \
+  --hlt-sep-max-iter-ladder "${HLT_SEP_MAX_ITER_LADDER:-auto}" \
+  --hlt-sep-shock-scale-ladder "${HLT_SEP_SHOCK_SCALE_LADDER:-1.0,0.5,0.25,0.1,0.0}" \
+  --hlt-target-max-logged-failures "${HLT_TARGET_MAX_LOGGED_FAILURES:-20}" \
   --sep-periods "$SEP_PERIODS" \
   --sep-order "$SEP_ORDER" \
   --sep-nnodes "$SEP_NNODES" \
@@ -169,6 +176,7 @@ result = payload["results"]["hlt_fixed_ss_smoke"]
 hmc = result["surrogate_hmc"]
 log_density = result["jax_surrogate_log_density"]
 lik = result["surrogate_inversion_likelihood"]
+target = result.get("target_diagnostics", {})
 print("status", result["status"])
 print("backend", result["backend"])
 print("hlt_parameter_set", result["hlt_parameter_set"])
@@ -176,6 +184,10 @@ print("parameter_count", len(result["parameter_subset"]))
 print("theta_draws", result["theta_draws"])
 print("train_size", result["train_size"], "val_size", result["val_size"])
 print("pipeline_s", result["pipeline_s"])
+print("target_builder", target.get("builder"), "accepted_samples", target.get("accepted_samples"))
+print("target_theta_full_success_count", target.get("theta_full_success_count"))
+print("target_fallback_share", target.get("fallback_share"))
+print("target_accepted_by_order", target.get("accepted_by_branching_order"))
 print("likelihood_status", lik.get("status"), "likelihood", lik.get("total_loglikelihood"))
 print("jax_log_density_status", log_density.get("status"), "parity_ok", log_density.get("parity_ok"))
 print("hmc_status", hmc.get("status"))

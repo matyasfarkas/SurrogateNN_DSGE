@@ -38,6 +38,7 @@ import jax.numpy as jnp
 from surrogatenn_dsge import (
     SEPConfig,
     SurrogateDataset,
+    SurrogatePipelineResult,
     build_surrogate_residual_arrays_from_batched_sep_jax,
     build_surrogate_residual_arrays_jax,
     build_surrogate_residual_dataset,
@@ -152,6 +153,38 @@ def _finite_float_or_none(value: Any) -> float | None:
 
 def _progress(message: str) -> None:
     print(f"[profile] {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {message}", flush=True)
+
+
+def _unique_preserve_order(values: Sequence[Any]) -> tuple[Any, ...]:
+    out: list[Any] = []
+    for value in values:
+        if value not in out:
+            out.append(value)
+    return tuple(out)
+
+
+def _parse_int_ladder(spec: str, *, base: int, include_zero: bool = False) -> tuple[int, ...]:
+    normalized = str(spec).strip().lower()
+    if normalized in {"", "auto"}:
+        values: list[int] = [int(base)]
+        if include_zero:
+            values.append(0)
+        return tuple(int(x) for x in _unique_preserve_order(values))
+    values = [int(part.strip()) for part in str(spec).split(",") if part.strip()]
+    if not values:
+        raise ValueError("integer ladder must contain at least one value.")
+    if include_zero and 0 not in values:
+        values.append(0)
+    return tuple(int(x) for x in _unique_preserve_order(values))
+
+
+def _parse_float_ladder(spec: str) -> tuple[float, ...]:
+    values = [float(part.strip()) for part in str(spec).split(",") if part.strip()]
+    if not values:
+        raise ValueError("float ladder must contain at least one value.")
+    if any(not math.isfinite(value) for value in values):
+        raise ValueError(f"float ladder contains non-finite values: {values}.")
+    return tuple(float(x) for x in _unique_preserve_order(values))
 
 
 def _hlt_uniform_prior_interval(
@@ -1480,6 +1513,323 @@ def _make_hlt_theta_design(
     return theta, subset_idx
 
 
+@dataclass(frozen=True)
+class HLTSEPAttemptSpec:
+    index: int
+    shock_scale: float
+    config: SEPConfig
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "index": int(self.index),
+            "shock_scale": float(self.shock_scale),
+            "periods": int(self.config.periods),
+            "branching_order": int(self.config.branching_order),
+            "nnodes": int(self.config.nnodes),
+            "sparse_tree": bool(self.config.sparse_tree),
+            "max_iter": int(self.config.max_iter),
+            "tol": float(self.config.tol),
+            "accept_tol": None if self.config.accept_tol is None else float(self.config.accept_tol),
+            "linear_solver": str(self.config.linear_solver),
+        }
+
+
+def _hlt_sep_attempt_specs(args: argparse.Namespace) -> tuple[HLTSEPAttemptSpec, ...]:
+    order_ladder = _parse_int_ladder(
+        str(args.hlt_sep_order_ladder),
+        base=int(args.sep_order),
+        include_zero=bool(args.hlt_adaptive_include_order_zero),
+    )
+    period_spec = str(args.hlt_sep_periods_ladder).strip().lower()
+    if period_spec in {"", "auto"}:
+        period_ladder = tuple(
+            int(x)
+            for x in _unique_preserve_order(
+                [int(args.sep_periods), 1] if int(args.sep_periods) != 1 else [1]
+            )
+        )
+    else:
+        period_ladder = _parse_int_ladder(period_spec, base=int(args.sep_periods))
+    max_iter_ladder = _parse_int_ladder(
+        str(args.hlt_sep_max_iter_ladder),
+        base=int(args.sep_max_iter),
+    )
+    shock_scale_ladder = _parse_float_ladder(str(args.hlt_sep_shock_scale_ladder))
+    specs: list[HLTSEPAttemptSpec] = []
+    for order in order_ladder:
+        if order < 0:
+            raise ValueError(f"SEP order ladder values must be nonnegative, got {order}.")
+        for periods in period_ladder:
+            if periods < 1:
+                raise ValueError(f"SEP period ladder values must be positive, got {periods}.")
+            for shock_scale in shock_scale_ladder:
+                if shock_scale < 0.0:
+                    raise ValueError(f"SEP shock-scale ladder values must be nonnegative, got {shock_scale}.")
+                for max_iter in max_iter_ladder:
+                    if max_iter < 1:
+                        raise ValueError(f"SEP max-iter ladder values must be positive, got {max_iter}.")
+                    specs.append(
+                        HLTSEPAttemptSpec(
+                            index=len(specs),
+                            shock_scale=float(shock_scale),
+                            config=SEPConfig(
+                                periods=int(periods),
+                                branching_order=int(order),
+                                nnodes=int(args.sep_nnodes),
+                                sparse_tree=bool(args.sep_sparse_tree),
+                                max_iter=int(max_iter),
+                                tol=float(args.sep_tol),
+                                accept_tol=float(args.sep_accept_tol),
+                            ),
+                        )
+                    )
+    if not specs:
+        raise ValueError("At least one HLT SEP attempt spec is required.")
+    return tuple(specs)
+
+
+def _hlt_surrogate_target_vector(
+    target_mode: str,
+    fom_obs: np.ndarray,
+    fom_state_next: np.ndarray,
+    rom_obs: np.ndarray,
+    rom_state_next: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    mode = str(target_mode).strip().lower()
+    if mode == "fom_obs":
+        return fom_obs, rom_obs
+    if mode == "fom_full":
+        return np.concatenate([fom_obs, fom_state_next]), np.concatenate([rom_obs, rom_state_next])
+    if mode == "residual_obs":
+        return fom_obs - rom_obs, np.zeros_like(fom_obs)
+    if mode == "residual_full":
+        y_fom = np.concatenate([fom_obs, fom_state_next])
+        y_rom = np.concatenate([rom_obs, rom_state_next])
+        return y_fom - y_rom, np.zeros_like(y_fom)
+    raise ValueError(f"Unsupported HLT target_mode {target_mode!r}.")
+
+
+def _build_adaptive_hlt_sep_dataset(
+    *,
+    rom_predict: Any,
+    sep_predict: Any,
+    initial_states: np.ndarray,
+    shocks: np.ndarray,
+    theta: np.ndarray,
+    attempt_specs: Sequence[HLTSEPAttemptSpec],
+    target_mode: str,
+    min_stable_periods: int,
+    input_names: Sequence[str],
+    output_names: Sequence[str],
+    max_logged_failures: int,
+) -> tuple[SurrogateDataset, dict[str, Any]]:
+    """Build multi-theta HLT targets by accepting only successful SEP solves.
+
+    The builder tries an ordered ladder of SEP attempt specs for each theta-period
+    pair. If all attempts fail for a period, that theta path stops and its stable
+    prefix is kept if it meets `min_stable_periods`.
+    """
+
+    theta_array = np.asarray(theta, dtype=np.float64)
+    if theta_array.ndim != 2 or theta_array.shape[1] < 1:
+        raise ValueError("theta must have shape (parameters, theta_draws).")
+    initial_array = np.asarray(initial_states, dtype=np.float64)
+    if initial_array.ndim != 2 or initial_array.shape[1] != theta_array.shape[1]:
+        raise ValueError("initial_states must have shape (state_dim, theta_draws).")
+    shock_array = np.asarray(shocks, dtype=np.float64)
+    if shock_array.ndim != 3 or shock_array.shape[0] != theta_array.shape[1]:
+        raise ValueError("shocks must have shape (theta_draws, shock_dim, periods).")
+    if int(min_stable_periods) < 0:
+        raise ValueError(f"min_stable_periods must be nonnegative, got {min_stable_periods}.")
+    if not attempt_specs:
+        raise ValueError("attempt_specs must contain at least one candidate.")
+
+    target_mode_norm = str(target_mode).strip().lower()
+    n_theta = int(theta_array.shape[1])
+    periods = int(shock_array.shape[2])
+    X_columns: list[np.ndarray] = []
+    Y_columns: list[np.ndarray] = []
+    Y_rom_columns: list[np.ndarray] = []
+    theta_ids: list[int] = []
+    period_ids: list[int] = []
+    theta_success = np.zeros((n_theta,), dtype=bool)
+    theta_stable_periods = np.zeros((n_theta,), dtype=np.int64)
+    accepted_attempt_indices: list[int] = []
+    accepted_orders: list[int] = []
+    accepted_shock_scales: list[float] = []
+    accepted_residual_norms: list[float] = []
+    failure_log: list[dict[str, Any]] = []
+    attempted_count = 0
+
+    def log_failure(row: dict[str, Any]) -> None:
+        if len(failure_log) < int(max_logged_failures):
+            failure_log.append(row)
+
+    for theta_idx in range(n_theta):
+        theta_t = theta_array[:, theta_idx]
+        state = initial_array[:, theta_idx].copy()
+        period_records: list[tuple[np.ndarray, np.ndarray, np.ndarray, int, int, float, float]] = []
+        for period in range(periods):
+            base_shock = shock_array[theta_idx, :, period]
+            accepted_record: tuple[
+                np.ndarray,
+                np.ndarray,
+                np.ndarray,
+                np.ndarray,
+                int,
+                float,
+                float,
+                np.ndarray,
+            ] | None = None
+            last_error: str | None = None
+            for spec in attempt_specs:
+                attempted_count += 1
+                shock_t = np.asarray(base_shock * float(spec.shock_scale), dtype=np.float64)
+                try:
+                    rom_obs, rom_state_next = rom_predict(state, shock_t, theta_t)
+                    rom_obs = np.asarray(rom_obs, dtype=np.float64).reshape(-1)
+                    rom_state_next = np.asarray(rom_state_next, dtype=np.float64).reshape(-1)
+                    fom_obs, fom_state_next, sep_diag = sep_predict(state, shock_t, theta_t, spec.config)
+                    fom_obs = np.asarray(fom_obs, dtype=np.float64).reshape(-1)
+                    fom_state_next = np.asarray(fom_state_next, dtype=np.float64).reshape(-1)
+                    if not (
+                        np.isfinite(rom_obs).all()
+                        and np.isfinite(rom_state_next).all()
+                        and np.isfinite(fom_obs).all()
+                        and np.isfinite(fom_state_next).all()
+                    ):
+                        raise RuntimeError("non-finite ROM/FOM target arrays")
+                    if rom_obs.shape != fom_obs.shape:
+                        raise RuntimeError(f"ROM/FOM observation shape mismatch: {rom_obs.shape} vs {fom_obs.shape}")
+                    if rom_state_next.shape != fom_state_next.shape or fom_state_next.shape != state.shape:
+                        raise RuntimeError(
+                            "ROM/FOM state shape mismatch: "
+                            f"rom={rom_state_next.shape} fom={fom_state_next.shape} state={state.shape}"
+                        )
+                    residual_norm = _finite_float_or_none(dict(sep_diag).get("residual_norm"))
+                    residual_value = math.nan if residual_norm is None else float(residual_norm)
+                    accepted_record = (
+                        shock_t,
+                        rom_obs,
+                        rom_state_next,
+                        fom_obs,
+                        int(spec.index),
+                        float(spec.shock_scale),
+                        residual_value,
+                        fom_state_next,
+                    )
+                    break
+                except Exception as exc:
+                    last_error = repr(exc)
+                    log_failure(
+                        {
+                            "theta_index": int(theta_idx),
+                            "period": int(period),
+                            "candidate_index": int(spec.index),
+                            "branching_order": int(spec.config.branching_order),
+                            "shock_scale": float(spec.shock_scale),
+                            "max_iter": int(spec.config.max_iter),
+                            "error": last_error,
+                        }
+                    )
+            if accepted_record is None:
+                _progress(
+                    f"theta {theta_idx}/{n_theta - 1} stopped at period {period}/{periods - 1}; "
+                    f"last_error={last_error}"
+                )
+                break
+
+            shock_t, rom_obs, rom_state_next, fom_obs, spec_index, used_shock_scale, residual_value, fom_state_next = accepted_record
+            y, y_rom = _hlt_surrogate_target_vector(
+                target_mode_norm,
+                fom_obs,
+                fom_state_next,
+                rom_obs,
+                rom_state_next,
+            )
+            x = np.concatenate([state, shock_t, theta_t])
+            period_records.append((x, y, y_rom, int(period), spec_index, used_shock_scale, residual_value))
+            state = np.asarray(fom_state_next, dtype=np.float64)
+
+        stable = len(period_records)
+        theta_stable_periods[theta_idx] = stable
+        theta_success[theta_idx] = stable >= int(min_stable_periods) and stable == periods
+        if stable < int(min_stable_periods):
+            continue
+        for x, y, y_rom, period, spec_index, used_shock_scale, residual_value in period_records:
+            X_columns.append(x)
+            Y_columns.append(y)
+            Y_rom_columns.append(y_rom)
+            theta_ids.append(theta_idx)
+            period_ids.append(period)
+            accepted_attempt_indices.append(spec_index)
+            accepted_shock_scales.append(used_shock_scale)
+            accepted_residual_norms.append(residual_value)
+            accepted_orders.append(int(attempt_specs[spec_index].config.branching_order))
+        _progress(
+            f"theta {theta_idx}/{n_theta - 1} accepted stable_periods={stable}/{periods} "
+            f"full_success={bool(theta_success[theta_idx])}"
+        )
+
+    if not X_columns:
+        diagnostics = {
+            "builder": "adaptive_sep",
+            "status": "error",
+            "attempted_count": int(attempted_count),
+            "failure_log": failure_log,
+            "candidate_specs": [spec.as_dict() for spec in attempt_specs],
+        }
+        raise ValueError("No stable surrogate-dataset samples were generated. Diagnostics: " + json.dumps(_jsonable(diagnostics)))
+
+    dataset = SurrogateDataset(
+        X=np.column_stack(X_columns),
+        Y=np.column_stack(Y_columns),
+        Y_rom=np.column_stack(Y_rom_columns),
+        theta=theta_array,
+        theta_ids=np.asarray(theta_ids, dtype=np.int64),
+        period_ids=np.asarray(period_ids, dtype=np.int64),
+        theta_success=theta_success,
+        theta_stable_periods=theta_stable_periods,
+        target_mode=target_mode_norm,
+        input_names=tuple(input_names),
+        output_names=tuple(output_names),
+        theta_names=tuple(input_names[-theta_array.shape[0] :]) if len(input_names) >= theta_array.shape[0] else (),
+    )
+    accepted_attempt_array = np.asarray(accepted_attempt_indices, dtype=np.int64)
+    accepted_order_array = np.asarray(accepted_orders, dtype=np.int64)
+    accepted_scale_array = np.asarray(accepted_shock_scales, dtype=np.float64)
+    residual_array = np.asarray(accepted_residual_norms, dtype=np.float64)
+    diagnostics = {
+        "builder": "adaptive_sep",
+        "status": "ok",
+        "candidate_specs": [spec.as_dict() for spec in attempt_specs],
+        "attempted_count": int(attempted_count),
+        "accepted_samples": int(dataset.n_samples),
+        "fallback_samples": int(np.count_nonzero(accepted_attempt_array != 0)),
+        "fallback_share": float(np.mean(accepted_attempt_array != 0)) if accepted_attempt_array.size else 0.0,
+        "theta_full_success_count": int(np.count_nonzero(theta_success)),
+        "theta_with_any_sample_count": int(np.count_nonzero(theta_stable_periods >= int(min_stable_periods))),
+        "theta_stable_periods": theta_stable_periods.tolist(),
+        "theta_success": theta_success.tolist(),
+        "accepted_by_candidate": {
+            str(int(idx)): int(np.count_nonzero(accepted_attempt_array == int(idx)))
+            for idx in np.unique(accepted_attempt_array)
+        },
+        "accepted_by_branching_order": {
+            str(int(order)): int(np.count_nonzero(accepted_order_array == int(order)))
+            for order in np.unique(accepted_order_array)
+        },
+        "accepted_by_shock_scale": {
+            f"{float(scale):.12g}": int(np.count_nonzero(np.isclose(accepted_scale_array, float(scale))))
+            for scale in np.unique(accepted_scale_array)
+        },
+        "residual_norm_mean": _finite_float_or_none(np.nanmean(residual_array)) if residual_array.size else None,
+        "residual_norm_max": _finite_float_or_none(np.nanmax(residual_array)) if residual_array.size else None,
+        "failure_log": failure_log,
+    }
+    return dataset, diagnostics
+
+
 def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, Any]:
     """Run the actual HLT model through a tiny ROM/FOM surrogate path.
 
@@ -1677,11 +2027,11 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             raise RuntimeError("HLT ROM produced a non-finite next state.")
         return next_state[observable_idx], next_state
 
-    def fom_predict(state: Any, shock_t: Any, theta_t: Any) -> tuple[np.ndarray, np.ndarray]:
+    def sep_predict(state: Any, shock_t: Any, theta_t: Any, config: SEPConfig) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         runtime = runtime_for_theta(theta_t)
         steady_state = runtime["steady_state"]
-        deterministic = np.zeros((sep_config.periods, shock_dim), dtype=np.float64)
-        if sep_config.periods > 0:
+        deterministic = np.zeros((config.periods, shock_dim), dtype=np.float64)
+        if config.periods > 0:
             deterministic[0, :] = np.asarray(shock_t, dtype=np.float64)
         sep_result = model.solve_stochastic_extended_path(
             parameter_values=runtime["parameter_values"],
@@ -1689,37 +2039,127 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             initial_state=np.asarray(state, dtype=np.float64),
             terminal_state=steady_state,
             deterministic_shocks=deterministic,
-            config=sep_config,
+            config=config,
         )
         if not sep_result.solution.accepted:
             raise RuntimeError(f"HLT SEP failed with residual {sep_result.solution.residual_norm}.")
         next_state = np.asarray(sep_result.solution.mean_path, dtype=np.float64)[:, 1]
         if not np.isfinite(next_state).all():
             raise RuntimeError("HLT SEP produced a non-finite next state.")
-        return next_state[observable_idx], next_state
+        diagnostics = {
+            "residual_norm": _finite_float_or_none(sep_result.solution.residual_norm),
+            "iterations": int(sep_result.solution.iterations),
+            "converged": bool(sep_result.solution.converged),
+            "accepted": bool(sep_result.solution.accepted),
+            "branching_order": int(config.branching_order),
+            "max_iter": int(config.max_iter),
+        }
+        return next_state[observable_idx], next_state, diagnostics
+
+    def fom_predict(state: Any, shock_t: Any, theta_t: Any) -> tuple[np.ndarray, np.ndarray]:
+        obs, next_state, _ = sep_predict(state, shock_t, theta_t, sep_config)
+        return obs, next_state
 
     pipeline_started = time.perf_counter()
-    result = fit_surrogate_pipeline(
-        rom_predict,
-        fom_predict,
-        initial_state=initial_states,
-        shocks=shocks,
-        theta_design=theta,
-        target_mode="fom_full",
-        min_stable_periods=periods,
-        input_names=tuple(list(model.timings.var) + list(model.timings.exo) + parameter_subset),
-        output_names=tuple(observables + [f"{name}[1]" for name in model.timings.var]),
-        architecture="resnet",
-        rom_residual=True,
-        validation_fraction=float(args.validation_fraction),
-        split_by_theta=bool(args.split_by_theta),
-        d_hidden=int(args.hidden),
-        n_blocks=int(args.blocks),
-        nepoch=int(args.epochs),
-        eta_init=float(args.learning_rate),
-        batch_size=int(args.batch_size),
-        device=target_device,
+    target_diagnostics: dict[str, Any]
+    target_min_stable_periods = (
+        int(periods)
+        if int(args.hlt_target_min_stable_periods) < 0
+        else int(args.hlt_target_min_stable_periods)
     )
+    input_names = tuple(list(model.timings.var) + list(model.timings.exo) + parameter_subset)
+    output_names = tuple(observables + [f"{name}[1]" for name in model.timings.var])
+    target_builder = str(args.hlt_target_builder).strip().lower()
+    if target_builder == "callback":
+        result = fit_surrogate_pipeline(
+            rom_predict,
+            fom_predict,
+            initial_state=initial_states,
+            shocks=shocks,
+            theta_design=theta,
+            target_mode="fom_full",
+            min_stable_periods=target_min_stable_periods,
+            input_names=input_names,
+            output_names=output_names,
+            architecture="resnet",
+            rom_residual=True,
+            validation_fraction=float(args.validation_fraction),
+            split_by_theta=bool(args.split_by_theta),
+            only_full_success=bool(args.only_full_success),
+            d_hidden=int(args.hidden),
+            n_blocks=int(args.blocks),
+            nepoch=int(args.epochs),
+            eta_init=float(args.learning_rate),
+            batch_size=int(args.batch_size),
+            device=target_device,
+        )
+        target_diagnostics = {
+            "builder": "callback",
+            "status": "ok",
+            "target_min_stable_periods": int(target_min_stable_periods),
+            "sep_config": {
+                "periods": int(sep_config.periods),
+                "branching_order": int(sep_config.branching_order),
+                "nnodes": int(sep_config.nnodes),
+                "sparse_tree": bool(sep_config.sparse_tree),
+                "max_iter": int(sep_config.max_iter),
+                "tol": float(sep_config.tol),
+                "accept_tol": None if sep_config.accept_tol is None else float(sep_config.accept_tol),
+            },
+        }
+    elif target_builder == "adaptive-sep":
+        attempt_specs = _hlt_sep_attempt_specs(args)
+        _progress(
+            "adaptive HLT target generation "
+            f"min_stable_periods={target_min_stable_periods} "
+            f"attempt_specs={len(attempt_specs)}"
+        )
+        dataset, target_diagnostics = _build_adaptive_hlt_sep_dataset(
+            rom_predict=rom_predict,
+            sep_predict=sep_predict,
+            initial_states=initial_states,
+            shocks=shocks,
+            theta=theta,
+            attempt_specs=attempt_specs,
+            target_mode="fom_full",
+            min_stable_periods=target_min_stable_periods,
+            input_names=input_names,
+            output_names=output_names,
+            max_logged_failures=int(args.hlt_target_max_logged_failures),
+        )
+        dataset_summary = summarize_surrogate_dataset(dataset)
+        successful_groups = np.unique(dataset.theta_ids).size
+        validation_fraction = float(args.validation_fraction)
+        split_by_theta = bool(args.split_by_theta)
+        if split_by_theta and successful_groups < 2 and validation_fraction > 0.0:
+            _progress(
+                "disabling held-out-theta validation because fewer than two theta groups "
+                f"produced targets (groups={successful_groups})"
+            )
+            validation_fraction = 0.0
+        training = train_surrogate_from_dataset(
+            dataset,
+            architecture="resnet",
+            rom_residual=True,
+            validation_fraction=validation_fraction,
+            split_by_theta=split_by_theta,
+            only_full_success=bool(args.only_full_success),
+            d_hidden=int(args.hidden),
+            n_blocks=int(args.blocks),
+            nepoch=int(args.epochs),
+            eta_init=float(args.learning_rate),
+            batch_size=int(args.batch_size),
+            device=target_device,
+        )
+        result = SurrogatePipelineResult(
+            dataset=dataset,
+            dataset_summary=dataset_summary,
+            training=training,
+        )
+        target_diagnostics["target_min_stable_periods"] = int(target_min_stable_periods)
+        target_diagnostics["effective_validation_fraction"] = float(validation_fraction)
+    else:
+        raise ValueError("hlt_target_builder must be 'adaptive-sep' or 'callback'.")
     pipeline_s = time.perf_counter() - pipeline_started
     _progress(
         f"finished surrogate pipeline in {pipeline_s:.3f}s "
@@ -1971,6 +2411,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             "tol": float(sep_config.tol),
             "accept_tol": float(sep_config.accept_tol),
         },
+        "target_diagnostics": target_diagnostics,
         "dataset_summary": result.dataset_summary,
         "train_size": int(result.training.train_size),
         "val_size": int(result.training.val_size),
@@ -2157,6 +2598,58 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-theta-draws", type=int, default=2)
     parser.add_argument("--hlt-shock-scale", type=float, default=0.02)
     parser.add_argument("--hlt-parameter-perturbation", type=float, default=1e-6)
+    parser.add_argument(
+        "--hlt-target-builder",
+        choices=("adaptive-sep", "callback"),
+        default="adaptive-sep",
+        help=(
+            "How to build HLT surrogate targets. 'adaptive-sep' tries an ordered "
+            "ladder of accepted SEP solves per theta-period and records diagnostics; "
+            "'callback' preserves the original one-config callback path."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-target-min-stable-periods",
+        type=int,
+        default=-1,
+        help=(
+            "Minimum stable prefix length needed to keep a theta draw. "
+            "Use -1 to require the requested HLT period count."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-sep-order-ladder",
+        default="auto",
+        help=(
+            "Comma-separated SEP branching-order candidates for adaptive HLT targets. "
+            "'auto' starts with --sep-order and optionally appends 0."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-sep-periods-ladder",
+        default="auto",
+        help=(
+            "Comma-separated SEP horizon candidates for adaptive HLT targets. "
+            "'auto' tries --sep-periods first and then 1 if different."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-adaptive-include-order-zero",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Whether the adaptive HLT target ladder may fall back to deterministic order-0 SEP.",
+    )
+    parser.add_argument(
+        "--hlt-sep-max-iter-ladder",
+        default="auto",
+        help="Comma-separated max-iteration candidates for adaptive HLT SEP targets; 'auto' uses --sep-max-iter.",
+    )
+    parser.add_argument(
+        "--hlt-sep-shock-scale-ladder",
+        default="1.0,0.5,0.25,0.1,0.0",
+        help="Comma-separated deterministic-shock multipliers for adaptive HLT SEP target attempts.",
+    )
+    parser.add_argument("--hlt-target-max-logged-failures", type=int, default=20)
     parser.add_argument(
         "--hlt-steady-state-mode",
         choices=("fixed-reference", "solve", "solve-or-reference"),
