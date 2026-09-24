@@ -2376,6 +2376,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     repeat_timings: list[float] = []
                     repeat_values: list[float] = []
                     repeat_gradient_norms: list[float] = []
+                    batched_first_s: float | None = None
+                    batched_repeat_timings: list[float] = []
+                    batched_values: list[list[float]] = []
+                    batched_gradient_norms: list[list[float]] = []
                     if bool(args.hlt_jax_log_density_gradient):
                         value_and_grad = jax.jit(jax.value_and_grad(log_density))
                         value, grad = value_and_grad(theta0_jax)
@@ -2420,6 +2424,91 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         repeat_timings.append(time.perf_counter() - repeat_started)
                         repeat_values.append(float(np.asarray(repeat_value)))
 
+                    batch_size = max(0, int(args.hlt_jax_log_density_batch_size))
+                    batch_repeat_count = max(
+                        0,
+                        int(args.hlt_jax_log_density_batch_repeat_evals),
+                    )
+                    batch_perturbation = float(args.hlt_jax_log_density_batch_perturbation)
+                    if batch_size > 0:
+                        base_direction = jnp.where(
+                            jnp.arange(theta0_jax.shape[0]) % 2 == 0,
+                            jnp.asarray(1.0, dtype=jnp.float64),
+                            jnp.asarray(-1.0, dtype=jnp.float64),
+                        )
+                        theta_batch = jnp.stack(
+                            [
+                                theta0_jax
+                                + (
+                                    batch_perturbation
+                                    * jnp.asarray(i, dtype=jnp.float64)
+                                    * base_direction
+                                )
+                                for i in range(batch_size)
+                            ],
+                            axis=0,
+                        )
+                        _progress(
+                            "starting batched JAX log-density timing "
+                            f"batch_size={batch_size} repeats={batch_repeat_count} "
+                            f"perturbation={batch_perturbation:g}"
+                        )
+                        if bool(args.hlt_jax_log_density_gradient):
+                            batched_fn = jax.jit(jax.vmap(jax.value_and_grad(log_density)))
+                        else:
+                            batched_fn = jax.jit(jax.vmap(log_density))
+                        batch_started = time.perf_counter()
+                        batched_result = batched_fn(theta_batch)
+                        _block_until_ready_tree(batched_result)
+                        batched_first_s = time.perf_counter() - batch_started
+
+                        if bool(args.hlt_jax_log_density_gradient):
+                            batch_values_arr, batch_grad_arr = batched_result
+                            batched_values.append(
+                                np.asarray(batch_values_arr, dtype=np.float64).tolist()
+                            )
+                            batched_gradient_norms.append(
+                                np.linalg.norm(
+                                    np.asarray(batch_grad_arr, dtype=np.float64),
+                                    axis=1,
+                                ).tolist()
+                            )
+                        else:
+                            batched_values.append(
+                                np.asarray(batched_result, dtype=np.float64).tolist()
+                            )
+
+                        for batch_repeat_idx in range(batch_repeat_count):
+                            if batch_perturbation == 0.0:
+                                theta_eval_batch = theta_batch
+                            else:
+                                theta_eval_batch = theta_batch + (
+                                    batch_perturbation
+                                    * jnp.asarray(batch_repeat_idx + 1, dtype=jnp.float64)
+                                    * base_direction[None, :]
+                                )
+                            batch_repeat_started = time.perf_counter()
+                            batched_repeat_result = batched_fn(theta_eval_batch)
+                            _block_until_ready_tree(batched_repeat_result)
+                            batched_repeat_timings.append(
+                                time.perf_counter() - batch_repeat_started
+                            )
+                            if bool(args.hlt_jax_log_density_gradient):
+                                batch_values_arr, batch_grad_arr = batched_repeat_result
+                                batched_values.append(
+                                    np.asarray(batch_values_arr, dtype=np.float64).tolist()
+                                )
+                                batched_gradient_norms.append(
+                                    np.linalg.norm(
+                                        np.asarray(batch_grad_arr, dtype=np.float64),
+                                        axis=1,
+                                    ).tolist()
+                                )
+                            else:
+                                batched_values.append(
+                                    np.asarray(batched_repeat_result, dtype=np.float64).tolist()
+                                )
+
                     value_float = float(np.asarray(value))
                     python_total = _finite_float_or_none(likelihood_result.get("total_loglikelihood"))
                     value_minus_python = None if python_total is None else value_float - python_total
@@ -2438,6 +2527,28 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         "repeat_eval_values": repeat_values,
                         "repeat_eval_gradient_norms": repeat_gradient_norms,
                         "repeat_eval_perturbation": repeat_perturbation,
+                        "batched_eval_batch_size": batch_size,
+                        "batched_eval_first_s": batched_first_s,
+                        "batched_eval_first_per_theta_s": None
+                        if batched_first_s is None or batch_size <= 0
+                        else float(batched_first_s / batch_size),
+                        "batched_eval_repeat_count": batch_repeat_count,
+                        "batched_eval_repeat_timings_s": batched_repeat_timings,
+                        "batched_eval_repeat_median_s": None
+                        if not batched_repeat_timings
+                        else float(statistics.median(batched_repeat_timings)),
+                        "batched_eval_repeat_median_per_theta_s": None
+                        if not batched_repeat_timings or batch_size <= 0
+                        else float(statistics.median(batched_repeat_timings) / batch_size),
+                        "batched_eval_repeat_min_s": None
+                        if not batched_repeat_timings
+                        else float(min(batched_repeat_timings)),
+                        "batched_eval_repeat_max_s": None
+                        if not batched_repeat_timings
+                        else float(max(batched_repeat_timings)),
+                        "batched_eval_values": batched_values,
+                        "batched_eval_gradient_norms": batched_gradient_norms,
+                        "batched_eval_perturbation": batch_perturbation,
                         "value": value_float,
                         "python_surrogate_total_loglikelihood": python_total,
                         "value_minus_python": value_minus_python,
@@ -2913,6 +3024,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Add alternating +/- perturbations of this size to theta during repeat timing.",
+    )
+    parser.add_argument(
+        "--hlt-jax-log-density-batch-size",
+        type=int,
+        default=0,
+        help="Batch size for vmapped post-smoke JAX log-density timing.",
+    )
+    parser.add_argument(
+        "--hlt-jax-log-density-batch-repeat-evals",
+        type=int,
+        default=0,
+        help="Number of post-compile vmapped JAX log-density batches to time.",
+    )
+    parser.add_argument(
+        "--hlt-jax-log-density-batch-perturbation",
+        type=float,
+        default=0.0,
+        help="Theta perturbation step used across vmapped log-density batch entries.",
     )
     parser.add_argument("--hlt-jax-shock-solver", choices=("rom", "surrogate"), default="rom")
     parser.add_argument("--hlt-jax-batch-replay", action=argparse.BooleanOptionalAction, default=True)
