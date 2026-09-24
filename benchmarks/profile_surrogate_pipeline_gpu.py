@@ -150,6 +150,10 @@ def _finite_float_or_none(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _progress(message: str) -> None:
+    print(f"[profile] {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {message}", flush=True)
+
+
 def _hlt_uniform_prior_interval(
     name: str,
     center: float,
@@ -1486,12 +1490,18 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
     states; the default fixed-reference mode is a conservative stability check.
     """
 
+    _progress(
+        "starting actual-HLT fixed-SS profile "
+        f"device={args.device} theta_draws={args.hlt_theta_draws} "
+        f"parameter_set={args.hlt_parameter_set}"
+    )
     target_device = None if args.device == "auto" else resolve_jax_device(args.device)
     case = _load_hlt_payload_case(args)
     model_source = Path(args.hlt_model_source)
     started = time.perf_counter()
     model = parse_macro_model(model_source.read_text(encoding="utf-8"))
     parse_s = time.perf_counter() - started
+    _progress(f"parsed HLT model in {parse_s:.3f}s")
 
     reference_steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
     base_parameters = np.asarray(model.parameter_values, dtype=np.float64)
@@ -1552,6 +1562,8 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         cached = runtime_cache.get(key)
         if cached is not None:
             return cached
+        theta_label = "unknown" if theta_index is None else str(theta_index)
+        _progress(f"preparing runtime for theta {theta_label}/{theta.shape[1] - 1}")
 
         parameter_values = full_parameters(theta_arr)
         steady_state = reference_steady_state.copy()
@@ -1593,6 +1605,11 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     raise
                 ss_status = "fallback_reference_error"
         steady_state_s += ss_elapsed
+        if steady_state_mode != "fixed-reference":
+            _progress(
+                f"steady-state theta {theta_label} status={ss_status} "
+                f"elapsed={ss_elapsed:.3f}s residual={ss_residual_norm}"
+            )
 
         first_order_started = time.perf_counter()
         first_order = model.solve_first_order(
@@ -1607,6 +1624,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             raise RuntimeError("HLT first-order ROM did not converge.")
         if not np.isfinite(state_transition).all() or not np.isfinite(shock_impact).all():
             raise RuntimeError("HLT first-order ROM contains non-finite matrices.")
+        _progress(
+            f"first-order theta {theta_label} elapsed={first_order_elapsed:.3f}s "
+            f"cumulative_first_order={first_order_s:.3f}s"
+        )
 
         runtime = {
             "parameter_values": parameter_values,
@@ -1638,6 +1659,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         ]
     )
     runtime_prepare_s = time.perf_counter() - runtime_prepare_started
+    _progress(
+        f"prepared {theta.shape[1]} theta runtimes in {runtime_prepare_s:.3f}s; "
+        f"starting ROM/FOM surrogate target generation and training"
+    )
 
     def rom_predict(state: Any, shock_t: Any, theta_t: Any) -> tuple[np.ndarray, np.ndarray]:
         runtime = runtime_for_theta(theta_t)
@@ -1696,6 +1721,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         device=target_device,
     )
     pipeline_s = time.perf_counter() - pipeline_started
+    _progress(
+        f"finished surrogate pipeline in {pipeline_s:.3f}s "
+        f"train_size={result.training.split.train_size} val_size={result.training.split.val_size}"
+    )
 
     likelihood_started = time.perf_counter()
     likelihood_result: dict[str, Any]
@@ -1712,6 +1741,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         likelihood_result = {"status": "skipped", "reason": "hlt_likelihood_periods <= 0"}
     else:
         try:
+            _progress(f"starting surrogate inversion likelihood periods={likelihood_periods}")
             observations = np.asarray(case["observations"], dtype=np.float64)
             if observations.ndim != 2 or observations.shape[0] != len(observables):
                 raise ValueError(
@@ -1752,6 +1782,11 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 "inferred_shocks_finite": bool(np.isfinite(inferred_shocks).all()),
                 "inferred_shocks_max_abs": float(np.max(np.abs(inferred_shocks))) if inferred_shocks.size else 0.0,
             }
+            _progress(
+                "finished Python surrogate inversion likelihood "
+                f"elapsed={likelihood_result['elapsed_s']:.3f}s "
+                f"loglik={likelihood_result['total_loglikelihood']:.6g}"
+            )
             if bool(args.hlt_jax_log_density_smoke) or int(args.hlt_surrogate_hmc_samples) > 0:
                 def device_array(values: Any, *, dtype: Any = jnp.float64) -> jax.Array:
                     array = jnp.asarray(values, dtype=dtype)
@@ -1791,6 +1826,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     )
 
                 if bool(args.hlt_jax_log_density_smoke):
+                    _progress("starting JAX log-density value/gradient smoke")
                     jax_started = time.perf_counter()
 
                     value_and_grad = jax.jit(jax.value_and_grad(log_density))
@@ -1828,8 +1864,19 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                             "steady-state and first-order matrices are held fixed in this smoke check."
                         ),
                     }
+                    _progress(
+                        "finished JAX log-density smoke "
+                        f"elapsed={jax_elapsed:.3f}s parity_ok={jax_log_density_result['parity_ok']} "
+                        f"grad_norm={jax_log_density_result['gradient_norm']:.6g}"
+                    )
 
                 if int(args.hlt_surrogate_hmc_samples) > 0:
+                    _progress(
+                        "starting static surrogate HMC "
+                        f"chains={args.hlt_surrogate_hmc_chains} "
+                        f"warmup={args.hlt_surrogate_hmc_warmup} "
+                        f"samples={args.hlt_surrogate_hmc_samples}"
+                    )
                     lower, upper = _hlt_uniform_prior_arrays(
                         parameter_subset,
                         theta0,
@@ -1852,7 +1899,13 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         initial_jitter=float(args.hlt_surrogate_hmc_initial_jitter),
                         seed=int(args.hlt_surrogate_hmc_seed),
                     )
+                    _progress(
+                        "finished static surrogate HMC "
+                        f"elapsed={surrogate_hmc_result.get('elapsed_s')} "
+                        f"draws_per_second={surrogate_hmc_result.get('draws_per_second')}"
+                    )
         except Exception as exc:
+            _progress(f"likelihood/HMC stage failed: {exc!r}")
             likelihood_result = {
                 "status": "error",
                 "elapsed_s": time.perf_counter() - likelihood_started,
