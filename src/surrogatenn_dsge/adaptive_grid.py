@@ -99,6 +99,75 @@ class AdaptiveGridResult:
         return int(self.points.shape[0])
 
 
+@dataclass(frozen=True)
+class EndogenousSupportSelectionConfig:
+    """Select sampler-visited features for expensive SEP relabeling."""
+
+    selection: str = "gate_ood"
+    max_points: Optional[int] = None
+    repeat_active: int = 1
+    ood_z_threshold: float = 4.0
+
+    def __post_init__(self) -> None:
+        mode = str(self.selection)
+        if mode not in {"gate", "ood", "gate_ood", "all", "worst"}:
+            raise ValueError(
+                "selection must be one of 'gate', 'ood', 'gate_ood', 'all', or 'worst'."
+            )
+        if self.max_points is not None and int(self.max_points) < 1:
+            raise ValueError(f"max_points must be >= 1 when provided, got {self.max_points}.")
+        if int(self.repeat_active) < 1:
+            raise ValueError(f"repeat_active must be >= 1, got {self.repeat_active}.")
+        if not np.isfinite(float(self.ood_z_threshold)) or float(self.ood_z_threshold) <= 0.0:
+            raise ValueError(f"ood_z_threshold must be positive, got {self.ood_z_threshold}.")
+
+
+@dataclass(frozen=True)
+class EndogenousSupportSelectionResult:
+    """Gate/OOD-selected feature columns to label with SEP."""
+
+    points: np.ndarray
+    selected_indices: np.ndarray
+    base_selected_indices: np.ndarray
+    gate_mask: np.ndarray
+    ood_mask: np.ndarray
+    max_z: np.ndarray
+    scores: Optional[np.ndarray]
+    selection: str
+    diagnostics: dict[str, object]
+
+    def __post_init__(self) -> None:
+        points = np.asarray(self.points, dtype=np.float64)
+        selected = np.asarray(self.selected_indices, dtype=np.int64).reshape(-1)
+        base = np.asarray(self.base_selected_indices, dtype=np.int64).reshape(-1)
+        gate = np.asarray(self.gate_mask, dtype=bool).reshape(-1)
+        ood = np.asarray(self.ood_mask, dtype=bool).reshape(-1)
+        max_z = np.asarray(self.max_z, dtype=np.float64).reshape(-1)
+        scores = None if self.scores is None else np.asarray(self.scores, dtype=np.float64).reshape(-1)
+        if points.ndim != 2:
+            raise ValueError(f"points must be rank-2 with shape (dim, samples), got {points.shape}.")
+        if selected.shape[0] != points.shape[1]:
+            raise ValueError("selected_indices length must match selected point count.")
+        n_candidates = gate.shape[0]
+        if ood.shape[0] != n_candidates or max_z.shape[0] != n_candidates:
+            raise ValueError("gate_mask, ood_mask, and max_z must have the same length.")
+        if scores is not None and scores.shape[0] != n_candidates:
+            raise ValueError("scores length must match gate_mask length.")
+        object.__setattr__(self, "points", points)
+        object.__setattr__(self, "selected_indices", selected)
+        object.__setattr__(self, "base_selected_indices", base)
+        object.__setattr__(self, "gate_mask", gate)
+        object.__setattr__(self, "ood_mask", ood)
+        object.__setattr__(self, "max_z", max_z)
+        object.__setattr__(self, "scores", scores)
+        object.__setattr__(self, "selection", str(self.selection))
+        object.__setattr__(self, "diagnostics", dict(self.diagnostics))
+
+    @property
+    def n_samples(self) -> int:
+        return int(self.points.shape[1])
+
+
 def _coerce_bounds(lower: Any, upper: Any) -> tuple[np.ndarray, np.ndarray]:
     lower_arr = np.asarray(lower, dtype=np.float64).reshape(-1)
     upper_arr = np.asarray(upper, dtype=np.float64).reshape(-1)
@@ -124,6 +193,169 @@ def _coerce_points(points: Any, *, dim: int, label: str) -> np.ndarray:
     if not np.isfinite(array).all():
         raise ValueError(f"{label} must be finite.")
     return array
+
+
+def _coerce_feature_matrix(features: Any, *, label: str = "features") -> np.ndarray:
+    array = np.asarray(features, dtype=np.float64)
+    if array.ndim == 1:
+        array = array.reshape(-1, 1)
+    if array.ndim != 2:
+        raise ValueError(f"{label} must have shape (dim, samples), got {array.shape}.")
+    if array.shape[0] < 1:
+        raise ValueError(f"{label} must contain at least one feature row.")
+    if not np.isfinite(array).all():
+        raise ValueError(f"{label} must be finite.")
+    return array
+
+
+def _input_norm_stats(norm_stats: Any, dim: int) -> tuple[np.ndarray, np.ndarray]:
+    def read(keys: tuple[str, ...], *, label: str) -> np.ndarray:
+        if isinstance(norm_stats, dict):
+            for key in keys:
+                if key in norm_stats:
+                    return np.asarray(norm_stats[key], dtype=np.float64).reshape(-1)
+        else:
+            for key in keys:
+                if hasattr(norm_stats, key):
+                    return np.asarray(getattr(norm_stats, key), dtype=np.float64).reshape(-1)
+        raise ValueError(f"norm_stats is missing {label}.")
+
+    mu = read(("mu_x", "muX", "x_mean", "input_mean", "mean", "mu", "μX"), label="input mean")
+    sigma = read(("sigma_x", "sigmaX", "x_std", "input_std", "std", "sigma", "σX"), label="input std")
+    if mu.shape != (dim,) or sigma.shape != (dim,):
+        raise ValueError(f"norm_stats input dimension mismatch: got {mu.shape}/{sigma.shape}, expected ({dim},).")
+    if not np.isfinite(mu).all() or not np.isfinite(sigma).all() or np.any(sigma <= 0.0):
+        raise ValueError("norm_stats input mean/std must be finite and std must be strictly positive.")
+    return mu, sigma
+
+
+def _rank_selected(
+    indices: np.ndarray,
+    *,
+    scores: Optional[np.ndarray],
+    max_z: np.ndarray,
+    max_points: Optional[int],
+    selection: str,
+) -> np.ndarray:
+    if indices.size == 0:
+        return indices
+    if scores is not None:
+        rank_values = scores[indices]
+    elif selection == "worst":
+        rank_values = max_z[indices]
+    elif np.isfinite(max_z[indices]).any():
+        rank_values = max_z[indices]
+    else:
+        rank_values = -np.arange(indices.size, dtype=np.float64)
+    order = np.argsort(rank_values)[::-1]
+    ordered = indices[order]
+    if max_points is not None:
+        ordered = ordered[: min(int(max_points), ordered.size)]
+    return ordered
+
+
+def select_endogenous_support_points(
+    features: Any,
+    *,
+    gate_mask: Optional[Sequence[bool] | np.ndarray] = None,
+    norm_stats: Optional[Any] = None,
+    max_z: Optional[Sequence[float] | np.ndarray] = None,
+    scores: Optional[Sequence[float] | np.ndarray] = None,
+    config: EndogenousSupportSelectionConfig = EndogenousSupportSelectionConfig(),
+) -> EndogenousSupportSelectionResult:
+    """Select active support points for posterior-guided SEP target generation.
+
+    This mirrors the Julia active-support modes used by the HLT workflow:
+    select by switching gate, by NN-support OOD diagnostics, their union, all
+    points, or the worst-scored/OOD points. Repeating active points is a simple
+    way to weight nonlinear periods more heavily during residual training.
+    """
+
+    X = _coerce_feature_matrix(features)
+    n_samples = int(X.shape[1])
+    if gate_mask is None:
+        gate = np.zeros((n_samples,), dtype=bool)
+    else:
+        gate = np.asarray(gate_mask, dtype=bool).reshape(-1)
+        if gate.shape[0] != n_samples:
+            raise ValueError(f"gate_mask length mismatch: {gate.shape[0]} vs {n_samples} samples.")
+
+    if max_z is None:
+        if norm_stats is None:
+            max_z_values = np.zeros((n_samples,), dtype=np.float64)
+            ood = np.zeros((n_samples,), dtype=bool)
+        else:
+            mu, sigma = _input_norm_stats(norm_stats, X.shape[0])
+            z = np.abs((X - mu[:, None]) / sigma[:, None])
+            max_z_values = np.max(z, axis=0)
+            ood = max_z_values > float(config.ood_z_threshold)
+    else:
+        max_z_values = np.asarray(max_z, dtype=np.float64).reshape(-1)
+        if max_z_values.shape[0] != n_samples:
+            raise ValueError(f"max_z length mismatch: {max_z_values.shape[0]} vs {n_samples} samples.")
+        if not np.isfinite(max_z_values).all():
+            raise ValueError("max_z must be finite.")
+        ood = max_z_values > float(config.ood_z_threshold)
+
+    score_values: Optional[np.ndarray]
+    if scores is None:
+        score_values = None
+    else:
+        score_values = np.asarray(scores, dtype=np.float64).reshape(-1)
+        if score_values.shape[0] != n_samples:
+            raise ValueError(f"scores length mismatch: {score_values.shape[0]} vs {n_samples} samples.")
+        if not np.isfinite(score_values).all():
+            raise ValueError("scores must be finite.")
+
+    mode = str(config.selection)
+    if mode == "gate":
+        selected_mask = gate
+    elif mode == "ood":
+        selected_mask = ood
+    elif mode == "gate_ood":
+        selected_mask = gate | ood
+    elif mode == "all":
+        selected_mask = np.ones((n_samples,), dtype=bool)
+    else:
+        selected_mask = np.ones((n_samples,), dtype=bool)
+
+    base_indices = np.flatnonzero(selected_mask)
+    if mode == "worst" and base_indices.size == 0:
+        base_indices = np.arange(n_samples, dtype=np.int64)
+    base_indices = _rank_selected(
+        base_indices.astype(np.int64, copy=False),
+        scores=score_values,
+        max_z=max_z_values,
+        max_points=config.max_points,
+        selection=mode,
+    )
+    repeated_indices = np.repeat(base_indices, int(config.repeat_active))
+    points = X[:, repeated_indices] if repeated_indices.size else np.zeros((X.shape[0], 0), dtype=np.float64)
+    diagnostics = {
+        "selection": mode,
+        "candidate_count": n_samples,
+        "gate_count": int(np.count_nonzero(gate)),
+        "ood_count": int(np.count_nonzero(ood)),
+        "base_selected_count": int(base_indices.size),
+        "selected_count": int(repeated_indices.size),
+        "repeat_active": int(config.repeat_active),
+        "ood_z_threshold": float(config.ood_z_threshold),
+        "max_points": None if config.max_points is None else int(config.max_points),
+        "max_z_selected_max": (
+            None if base_indices.size == 0 else float(np.max(max_z_values[base_indices]))
+        ),
+    }
+    return EndogenousSupportSelectionResult(
+        points=points,
+        selected_indices=repeated_indices,
+        base_selected_indices=base_indices,
+        gate_mask=gate,
+        ood_mask=ood,
+        max_z=max_z_values,
+        scores=score_values,
+        selection=mode,
+        diagnostics=diagnostics,
+    )
 
 
 def _lhs_unit(n_samples: int, n_dim: int, rng: np.random.Generator) -> np.ndarray:

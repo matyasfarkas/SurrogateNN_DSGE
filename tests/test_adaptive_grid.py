@@ -5,7 +5,10 @@ import pytest
 
 from surrogatenn_dsge import (
     AdaptiveGridConfig,
+    EndogenousSupportSelectionConfig,
+    NormStats,
     endogenous_adaptive_grid,
+    select_endogenous_support_points,
     summarize_adaptive_grid,
 )
 
@@ -72,3 +75,59 @@ def test_endogenous_adaptive_grid_validates_initial_points_bounds() -> None:
             upper=[1.0, 1.0],
             initial_points=np.asarray([[1.2], [0.5]], dtype=np.float64),
         )
+
+
+def test_select_endogenous_support_points_uses_gate_ood_union_and_repeat_weighting() -> None:
+    features = np.asarray(
+        [
+            [0.0, 1.0, 5.0, 3.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    norm = NormStats(
+        mu_x=np.zeros((2,), dtype=np.float64),
+        sigma_x=np.ones((2,), dtype=np.float64),
+        mu_y=np.zeros((1,), dtype=np.float64),
+        sigma_y=np.ones((1,), dtype=np.float64),
+    )
+
+    result = select_endogenous_support_points(
+        features,
+        gate_mask=[False, True, False, False],
+        norm_stats=norm,
+        config=EndogenousSupportSelectionConfig(
+            selection="gate_ood",
+            repeat_active=2,
+            ood_z_threshold=4.0,
+        ),
+    )
+
+    assert set(result.base_selected_indices.tolist()) == {1, 2}
+    assert result.selected_indices.tolist().count(1) == 2
+    assert result.selected_indices.tolist().count(2) == 2
+    assert result.points.shape == (2, 4)
+    assert result.diagnostics["gate_count"] == 1
+    assert result.diagnostics["ood_count"] == 1
+    assert result.diagnostics["selected_count"] == 4
+
+
+def test_select_endogenous_support_points_worst_mode_uses_scores_budget() -> None:
+    features = np.asarray(
+        [
+            [0.0, 1.0, 2.0, 3.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    result = select_endogenous_support_points(
+        features,
+        scores=[0.0, 4.0, 2.0, 9.0],
+        config=EndogenousSupportSelectionConfig(
+            selection="worst",
+            max_points=2,
+        ),
+    )
+
+    np.testing.assert_array_equal(result.base_selected_indices, np.asarray([3, 1], dtype=np.int64))
+    np.testing.assert_allclose(result.points, features[:, [3, 1]], rtol=0, atol=0)

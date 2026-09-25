@@ -12,6 +12,7 @@ from .regime_switching_api import (
     additive_residual_loglik_per_period,
     inversion_loglik_per_period,
     predict_additive_residual,
+    predict_additive_residual_gated,
     predict_additive_residual_ood,
 )
 
@@ -1043,9 +1044,10 @@ def surrogate_additive_residual_loglik_per_period(
     d_obs: Optional[int] = None,
     allow_full_residual: bool = True,
     z_threshold: Optional[float] = None,
+    gate_mask: Optional[Sequence[float] | np.ndarray] = None,
 ) -> np.ndarray:
     residual_predict = make_surrogate_residual_predictor(frozen)
-    if z_threshold is None:
+    if gate_mask is None and z_threshold is None:
         return additive_residual_loglik_per_period(
             full_predict,
             residual_predict,
@@ -1059,30 +1061,62 @@ def surrogate_additive_residual_loglik_per_period(
         )
     observations = np.asarray(obs_data, dtype=np.float64)
     obs_dim = observations.shape[0] if d_obs is None else int(d_obs)
-
-    def predict_fn(state: Any, shock_t: Any, theta_local: Any) -> tuple[np.ndarray, np.ndarray]:
-        return predict_additive_residual_ood(
-            full_predict,
-            residual_predict,
-            state,
-            shock_t,
-            theta_local,
-            obs_dim,
-            frozen.norm.as_julia_dict(),
-            z_threshold=z_threshold,
-            allow_full_residual=allow_full_residual,
+    shock_matrix = np.asarray(shocks, dtype=np.float64)
+    if shock_matrix.ndim != 2:
+        raise ValueError(f"shocks must be rank-2 with shape (d_shock, periods), got {shock_matrix.shape}.")
+    if observations.shape[1] != shock_matrix.shape[1]:
+        raise ValueError(
+            f"obs_data/shocks period mismatch: {observations.shape[1]} vs {shock_matrix.shape[1]}."
         )
+    if gate_mask is None:
+        gate_values = np.ones((observations.shape[1],), dtype=np.float64)
+    else:
+        gate_values = np.asarray(gate_mask, dtype=np.float64).reshape(-1)
+        if gate_values.shape[0] != observations.shape[1]:
+            raise ValueError(
+                f"gate_mask length mismatch: {gate_values.shape[0]} vs {observations.shape[1]} periods."
+            )
+        if not np.isfinite(gate_values).all() or np.any(gate_values < 0.0) or np.any(gate_values > 1.0):
+            raise ValueError("gate_mask values must be finite and lie in [0, 1].")
 
-    from .regime_switching_api import conditional_loglik_per_period
-
-    return conditional_loglik_per_period(
-        predict_fn,
-        s0,
-        shocks,
-        theta,
-        observations,
-        obs_sigma,
-    )
+    sigma = np.asarray(obs_sigma, dtype=np.float64).reshape(-1)
+    if sigma.shape[0] != observations.shape[0]:
+        raise ValueError(f"obs_sigma length mismatch: {sigma.shape[0]} vs obs_data rows {observations.shape[0]}.")
+    if not np.isfinite(sigma).all() or np.any(sigma <= 0.0):
+        raise ValueError("obs_sigma must be finite and strictly positive.")
+    theta_vec = np.asarray(theta, dtype=np.float64).reshape(-1)
+    state = np.asarray(s0, dtype=np.float64).reshape(-1)
+    ll = np.zeros((observations.shape[1],), dtype=np.float64)
+    log_norm = np.log(2.0 * np.pi * sigma**2)
+    for period in range(observations.shape[1]):
+        gate_value = float(gate_values[period])
+        if z_threshold is None:
+            obs_pred, state = predict_additive_residual_gated(
+                full_predict,
+                residual_predict,
+                state,
+                shock_matrix[:, period],
+                theta_vec,
+                obs_dim,
+                gate_value=gate_value,
+                allow_full_residual=allow_full_residual,
+            )
+        else:
+            obs_pred, state = predict_additive_residual_ood(
+                full_predict,
+                residual_predict,
+                state,
+                shock_matrix[:, period],
+                theta_vec,
+                obs_dim,
+                frozen.norm.as_julia_dict(),
+                z_threshold=z_threshold,
+                gate_value=gate_value,
+                allow_full_residual=allow_full_residual,
+            )
+        resid = observations[:, period] - obs_pred
+        ll[period] = -0.5 * float(np.sum((resid / sigma) ** 2 + log_norm))
+    return ll
 
 
 def surrogate_inversion_loglik_per_period(
@@ -1156,6 +1190,7 @@ def surrogate_predict_additive_jax(
     *,
     d_obs: int,
     allow_full_residual: bool = True,
+    gate_value: ArrayLike = 1.0,
 ) -> tuple[jax.Array, jax.Array]:
     """JAX-native additive ROM+surrogate predictor.
 
@@ -1177,7 +1212,8 @@ def surrogate_predict_additive_jax(
     if obs_rom_arr.shape[0] != d_obs_int:
         raise ValueError(f"rom_predict returned {obs_rom_arr.shape[0]} observations, expected {d_obs_int}.")
     x = jnp.concatenate([state_arr, shock_arr, theta_arr], axis=0)
-    residual = predict_frozen(frozen, x).reshape(-1)
+    gate = jnp.asarray(gate_value, dtype=jnp.float64).reshape(())
+    residual = gate * predict_frozen(frozen, x).reshape(-1)
     if residual.shape[0] < d_obs_int:
         raise ValueError(
             f"Surrogate output dimension {residual.shape[0]} is smaller than d_obs={d_obs_int}."
@@ -1207,6 +1243,7 @@ def surrogate_inversion_loglik_per_period_jax(
     shock_solver: str = "rom",
     batch_replay: bool = True,
     differentiate_shocks: bool = False,
+    gate_mask: Optional[ArrayLike] = None,
 ) -> tuple[jax.Array, jax.Array]:
     """JAX-native surrogate inversion likelihood.
 
@@ -1244,6 +1281,14 @@ def surrogate_inversion_loglik_per_period_jax(
         raise ValueError(
             f"obs_data/obs_sigma mismatch: {observations.shape[0]} vs {obs_sigma_vec.shape[0]}."
         )
+    if gate_mask is None:
+        gate_values = jnp.ones((observations.shape[1],), dtype=jnp.float64)
+    else:
+        gate_values = jnp.asarray(gate_mask, dtype=jnp.float64).reshape(-1)
+        if gate_values.shape[0] != observations.shape[1]:
+            raise ValueError(
+                f"gate_mask length mismatch: {gate_values.shape[0]} vs {observations.shape[1]} periods."
+            )
     if active_shock_indices is None:
         shock_sigma_host = np.asarray(shock_sigmas, dtype=np.float64).reshape(-1)
         active_tuple = tuple(int(i) for i in np.flatnonzero(shock_sigma_host > 0.0))
@@ -1273,7 +1318,11 @@ def surrogate_inversion_loglik_per_period_jax(
             eps_full = eps_full.at[active_idx].set(eps_struct)
         return eps_full
 
-    def predict_period(state: jax.Array, eps_struct: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+    def predict_period(
+        state: jax.Array,
+        eps_struct: jax.Array,
+        gate_value: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         eps_full = full_shock(eps_struct)
         obs_pred, state_next = surrogate_predict_additive_jax(
             rom_predict,
@@ -1283,30 +1332,39 @@ def surrogate_inversion_loglik_per_period_jax(
             theta_solver,
             d_obs=d_obs,
             allow_full_residual=allow_full_residual,
+            gate_value=gate_value,
         )
         return eps_full, obs_pred, state_next
 
-    def predict_solver(state: jax.Array, eps_struct: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+    def predict_solver(
+        state: jax.Array,
+        eps_struct: jax.Array,
+        gate_value: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
         if shock_solver_norm == "rom":
             eps_full = full_shock(eps_struct)
             obs_rom, state_rom = rom_predict(state, eps_full, theta_solver)
             return eps_full, jnp.asarray(obs_rom, dtype=jnp.float64).reshape(-1), jnp.asarray(state_rom, dtype=jnp.float64).reshape(-1)
-        return predict_period(state, eps_struct)
+        return predict_period(state, eps_struct, gate_value)
 
-    def one_period(state: jax.Array, y_obs: jax.Array) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+    def one_period(
+        state: jax.Array,
+        payload: tuple[jax.Array, jax.Array],
+    ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+        y_obs, gate_value = payload
         if not n_active:
             eps_empty = jnp.zeros((0,), dtype=jnp.float64)
-            eps_full, obs_pred, state_solver = predict_solver(state, eps_empty)
+            eps_full, obs_pred, state_solver = predict_solver(state, eps_empty, gate_value)
             resid_obs = (y_obs - obs_pred) / obs_sigma_vec
             ll_t = -0.5 * (jnp.sum(resid_obs**2) + obs_log_norm_const)
             if shock_solver_norm == "rom" and bool(batch_replay):
                 state_eval = state_solver
             else:
-                _, _, state_eval = predict_period(state, eps_empty)
+                _, _, state_eval = predict_period(state, eps_empty, gate_value)
             return state_eval, (ll_t, eps_full)
 
         def residual_aug(eps_struct: jax.Array) -> jax.Array:
-            _, obs_pred, _ = predict_solver(state, eps_struct)
+            _, obs_pred, _ = predict_solver(state, eps_struct, gate_value)
             resid_obs = (y_obs - obs_pred) / obs_sigma_vec
             resid_prior = eps_struct / shock_std
             return jnp.concatenate([resid_obs, resid_prior], axis=0)
@@ -1361,7 +1419,7 @@ def surrogate_inversion_loglik_per_period_jax(
                 jnp.asarray(False),
             ),
         )
-        eps_full, obs_pred, state_solver = predict_solver(state, eps_hat)
+        eps_full, obs_pred, state_solver = predict_solver(state, eps_hat, gate_value)
         resid_obs = (y_obs - obs_pred) / obs_sigma_vec
         resid_prior = eps_hat / shock_std
         ll_t = -0.5 * (
@@ -1373,30 +1431,34 @@ def surrogate_inversion_loglik_per_period_jax(
         if shock_solver_norm == "rom" and bool(batch_replay):
             state_eval = state_solver
         else:
-            _, _, state_eval = predict_period(state, eps_hat)
+            _, _, state_eval = predict_period(state, eps_hat, gate_value)
         return state_eval, (ll_t, eps_full)
 
-    _, (ll, shocks_t_raw) = jax.lax.scan(one_period, state0, observations.T)
+    _, (ll, shocks_t_raw) = jax.lax.scan(one_period, state0, (observations.T, gate_values))
     shocks_t = shocks_t_raw if bool(differentiate_shocks) else jax.lax.stop_gradient(shocks_t_raw)
     shocks = shocks_t.T
     if not bool(batch_replay):
         return ll, shocks
 
-    def replay_period(state_rom: jax.Array, eps_full: jax.Array) -> tuple[jax.Array, jax.Array]:
+    def replay_period(
+        state_rom: jax.Array,
+        eps_full: jax.Array,
+        gate_value: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
         obs_rom, state_next_rom = rom_predict(state_rom, eps_full, theta_vec)
         obs_rom_arr = jnp.asarray(obs_rom, dtype=jnp.float64).reshape(-1)
         state_next_rom_arr = jnp.asarray(state_next_rom, dtype=jnp.float64).reshape(-1)
         x = jnp.concatenate([state_rom, eps_full, theta_vec], axis=0)
-        residual = predict_frozen(frozen, x).reshape(-1)
+        residual = jnp.asarray(gate_value, dtype=jnp.float64).reshape(()) * predict_frozen(frozen, x).reshape(-1)
         obs_pred = obs_rom_arr + residual[:d_obs]
         return state_next_rom_arr, obs_pred
 
     def replay_with_observation(
         state_rom: jax.Array,
-        payload: tuple[jax.Array, jax.Array],
+        payload: tuple[jax.Array, jax.Array, jax.Array],
     ) -> tuple[jax.Array, jax.Array]:
-        eps_full, y_obs = payload
-        state_next_rom, obs_pred = replay_period(state_rom, eps_full)
+        eps_full, y_obs, gate_value = payload
+        state_next_rom, obs_pred = replay_period(state_rom, eps_full, gate_value)
         resid_obs = (y_obs - obs_pred) / obs_sigma_vec
         ll_t = -0.5 * (jnp.sum(resid_obs**2) + obs_log_norm_const)
         if n_active:
@@ -1404,7 +1466,7 @@ def surrogate_inversion_loglik_per_period_jax(
             ll_t = ll_t - 0.5 * (jnp.sum((eps_struct / shock_std) ** 2) + shock_log_norm_const)
         return state_next_rom, ll_t
 
-    _, replay_ll = jax.lax.scan(replay_with_observation, state0, (shocks_t, observations.T))
+    _, replay_ll = jax.lax.scan(replay_with_observation, state0, (shocks_t, observations.T, gate_values))
     return replay_ll, shocks
 
 
@@ -1425,6 +1487,7 @@ def surrogate_inversion_loglikelihood_jax(
     shock_solver: str = "rom",
     batch_replay: bool = True,
     differentiate_shocks: bool = False,
+    gate_mask: Optional[ArrayLike] = None,
 ) -> jax.Array:
     ll, _ = surrogate_inversion_loglik_per_period_jax(
         rom_predict,
@@ -1442,6 +1505,7 @@ def surrogate_inversion_loglikelihood_jax(
         shock_solver=shock_solver,
         batch_replay=batch_replay,
         differentiate_shocks=differentiate_shocks,
+        gate_mask=gate_mask,
     )
     return jnp.sum(ll)
 
@@ -1476,6 +1540,7 @@ def build_numpyro_surrogate_inversion_model_jax(
     shock_solver: str = "rom",
     batch_replay: bool = True,
     differentiate_shocks: bool = False,
+    gate_mask: Optional[ArrayLike] = None,
 ):
     """Build a NumPyro model using the JAX surrogate inversion likelihood.
 
@@ -1521,6 +1586,7 @@ def build_numpyro_surrogate_inversion_model_jax(
             shock_solver=shock_solver,
             batch_replay=batch_replay,
             differentiate_shocks=differentiate_shocks,
+            gate_mask=gate_mask,
         )
         numpyro.deterministic("theta_vector", theta)
         numpyro.deterministic("loglikelihood", loglikelihood)
@@ -1549,6 +1615,7 @@ def evaluate_numpyro_surrogate_log_density_jax(
     shock_solver: str = "rom",
     batch_replay: bool = True,
     differentiate_shocks: bool = False,
+    gate_mask: Optional[ArrayLike] = None,
 ) -> jax.Array:
     _, log_density = _require_numpyro_surrogate()
     numpyro_model = build_numpyro_surrogate_inversion_model_jax(
@@ -1569,6 +1636,7 @@ def evaluate_numpyro_surrogate_log_density_jax(
         shock_solver=shock_solver,
         batch_replay=batch_replay,
         differentiate_shocks=differentiate_shocks,
+        gate_mask=gate_mask,
     )
     log_joint, _ = log_density(numpyro_model, (), {}, parameter_samples)
     return jnp.asarray(log_joint, dtype=jnp.float64)

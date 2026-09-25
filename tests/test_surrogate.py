@@ -15,6 +15,7 @@ from surrogatenn_dsge import (
     compute_ood_flag,
     evaluate_numpyro_surrogate_log_density_jax,
     inversion_loglik_per_period,
+    predict_additive_residual_gated,
     predict_frozen,
     predict_frozen_batch,
     predict_frozen_safe,
@@ -24,6 +25,7 @@ from surrogatenn_dsge import (
     surrogate_inversion_loglik_per_period,
     surrogate_inversion_loglik_per_period_jax,
     surrogate_inversion_loglikelihood_jax,
+    surrogate_predict_additive_jax,
     train_mlp,
     train_resnet,
     validate_surrogate,
@@ -379,6 +381,79 @@ def test_surrogate_additive_likelihood_matches_existing_callback_path() -> None:
     np.testing.assert_allclose(helper, np.full((2,), -0.5 * np.log(2.0 * np.pi)), rtol=1e-12, atol=1e-12)
 
 
+def test_predict_additive_residual_gated_uses_resnn_only_when_gate_activates() -> None:
+    frozen = _constant_residual_mlp(d_in=3, d_out=2, value=0.5)
+    residual = lambda state, shock_t, theta: np.asarray(predict_frozen(frozen, np.r_[state, shock_t, theta]))
+
+    obs_closed, state_closed = predict_additive_residual_gated(
+        _toy_full_predict,
+        residual,
+        [0.0],
+        [1.0],
+        [0.0],
+        1,
+        gate_value=0.0,
+    )
+    obs_soft, state_soft = predict_additive_residual_gated(
+        _toy_full_predict,
+        residual,
+        [0.0],
+        [1.0],
+        [0.0],
+        1,
+        gate_value=0.25,
+    )
+    obs_open, state_open = predict_additive_residual_gated(
+        _toy_full_predict,
+        residual,
+        [0.0],
+        [1.0],
+        [0.0],
+        1,
+        gate_value=1.0,
+    )
+
+    np.testing.assert_allclose(obs_closed, np.asarray([1.0]), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(state_closed, np.asarray([1.0]), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(obs_soft, np.asarray([1.125]), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(state_soft, np.asarray([1.125]), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(obs_open, np.asarray([1.5]), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(state_open, np.asarray([1.5]), rtol=0, atol=1e-12)
+
+
+def test_surrogate_additive_likelihood_gate_mask_keeps_calm_periods_rom() -> None:
+    frozen = _constant_residual_mlp(d_in=3, d_out=1, value=0.5)
+    shocks = np.asarray([[1.0, 0.0]], dtype=np.float64)
+    obs = np.asarray([[1.0, 1.5]], dtype=np.float64)
+    obs_sigma = np.asarray([1.0], dtype=np.float64)
+
+    gated = surrogate_additive_residual_loglik_per_period(
+        _toy_full_predict,
+        frozen,
+        [0.0],
+        shocks,
+        [0.0],
+        obs,
+        obs_sigma,
+        d_obs=1,
+        gate_mask=[False, True],
+    )
+    ungated = surrogate_additive_residual_loglik_per_period(
+        _toy_full_predict,
+        frozen,
+        [0.0],
+        shocks,
+        [0.0],
+        obs,
+        obs_sigma,
+        d_obs=1,
+    )
+
+    np.testing.assert_allclose(gated, np.full((2,), -0.5 * np.log(2.0 * np.pi)), rtol=0, atol=1e-12)
+    assert gated[0] > ungated[0]
+    np.testing.assert_allclose(gated[1], ungated[1], rtol=0, atol=1e-12)
+
+
 def test_economic_smell_ood_guard_suppresses_pathological_correction() -> None:
     frozen_large = _constant_residual_mlp(d_in=3, d_out=1, value=100.0)
     frozen_large = FrozenMLP(
@@ -467,6 +542,109 @@ def test_surrogate_inversion_likelihood_zero_residual_matches_rom() -> None:
     np.testing.assert_allclose(ll_sur, ll_rom, rtol=1e-10, atol=1e-10)
 
 
+def test_surrogate_inversion_gate_false_matches_rom_and_open_gate_matches_ungated() -> None:
+    frozen_residual = _constant_residual_mlp(d_in=4, d_out=1, value=0.2)
+    obs = np.asarray([[1.0, 0.5]], dtype=np.float64)
+    obs_sigma = np.asarray([0.1], dtype=np.float64)
+    shock_sigmas = np.asarray([0.5, 0.0], dtype=np.float64)
+    theta = np.asarray([0.1], dtype=np.float64)
+
+    ll_rom, shocks_rom = inversion_loglik_per_period(
+        _toy_split_predict,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=12,
+        tol=1e-8,
+        lambda_=1e-6,
+    )
+    ll_closed, shocks_closed = surrogate_inversion_loglik_per_period(
+        _toy_split_predict,
+        frozen_residual,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        gate_mask=[False, False],
+        maxit=12,
+        tol=1e-8,
+        lambda_=1e-6,
+    )
+    ll_open, shocks_open = surrogate_inversion_loglik_per_period(
+        _toy_split_predict,
+        frozen_residual,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        gate_mask=[True, True],
+        maxit=12,
+        tol=1e-8,
+        lambda_=1e-6,
+    )
+    ll_ungated, shocks_ungated = surrogate_inversion_loglik_per_period(
+        _toy_split_predict,
+        frozen_residual,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=12,
+        tol=1e-8,
+        lambda_=1e-6,
+    )
+
+    np.testing.assert_allclose(shocks_closed, shocks_rom, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(ll_closed, ll_rom, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(shocks_open, shocks_ungated, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(ll_open, ll_ungated, rtol=1e-10, atol=1e-10)
+    assert not np.allclose(ll_closed, ll_open)
+
+
+def test_inversion_batch_only_gate_applies_residual_only_on_gated_periods() -> None:
+    frozen_residual = _constant_residual_mlp(d_in=4, d_out=1, value=0.2)
+    obs = np.asarray([[1.0, 0.5]], dtype=np.float64)
+    obs_sigma = np.asarray([0.1], dtype=np.float64)
+    shock_sigmas = np.asarray([0.5, 0.0], dtype=np.float64)
+    theta = np.asarray([0.1], dtype=np.float64)
+    gate = [False, True]
+
+    ll_surrogate, shocks_surrogate = surrogate_inversion_loglik_per_period(
+        _toy_split_predict,
+        frozen_residual,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        gate_mask=gate,
+        maxit=12,
+        tol=1e-8,
+        lambda_=1e-6,
+    )
+    ll_batch_only, shocks_batch_only = inversion_loglik_per_period(
+        _toy_split_predict,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        batch_eval_residual_fn=lambda X: np.full((1, X.shape[1]), 0.2, dtype=np.float64),
+        gate_mask=gate,
+        maxit=12,
+        tol=1e-8,
+        lambda_=1e-6,
+    )
+
+    np.testing.assert_allclose(shocks_batch_only, shocks_surrogate, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(ll_batch_only, ll_surrogate, rtol=1e-10, atol=1e-10)
+
+
 def test_surrogate_inversion_likelihood_jax_matches_numpy_and_differentiates() -> None:
     frozen_zero = _constant_residual_mlp(d_in=4, d_out=1, value=0.0)
     obs = np.asarray([[1.0, 0.5]], dtype=np.float64)
@@ -537,6 +715,48 @@ def test_surrogate_inversion_likelihood_jax_matches_numpy_and_differentiates() -
     assert bool(jnp.isfinite(full_grad))
 
 
+def test_surrogate_predict_additive_jax_gate_is_jittable_and_differentiable() -> None:
+    frozen = _constant_residual_mlp(d_in=3, d_out=2, value=0.5)
+
+    obs_closed, state_closed = surrogate_predict_additive_jax(
+        _toy_split_predict_jax,
+        frozen,
+        jnp.asarray([0.0], dtype=jnp.float64),
+        jnp.asarray([1.0], dtype=jnp.float64),
+        jnp.asarray([0.0], dtype=jnp.float64),
+        d_obs=1,
+        gate_value=0.0,
+    )
+    obs_soft, state_soft = jax.jit(
+        lambda g: surrogate_predict_additive_jax(
+            _toy_split_predict_jax,
+            frozen,
+            jnp.asarray([0.0], dtype=jnp.float64),
+            jnp.asarray([1.0], dtype=jnp.float64),
+            jnp.asarray([0.0], dtype=jnp.float64),
+            d_obs=1,
+            gate_value=g,
+        )
+    )(jnp.asarray(0.25, dtype=jnp.float64))
+
+    np.testing.assert_allclose(np.asarray(obs_closed), np.asarray([1.0]), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(state_closed), np.asarray([1.0]), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(obs_soft), np.asarray([1.125]), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(state_soft), np.asarray([1.125]), rtol=0, atol=1e-12)
+    grad = jax.grad(
+        lambda g: surrogate_predict_additive_jax(
+            _toy_split_predict_jax,
+            frozen,
+            jnp.asarray([0.0], dtype=jnp.float64),
+            jnp.asarray([1.0], dtype=jnp.float64),
+            jnp.asarray([0.0], dtype=jnp.float64),
+            d_obs=1,
+            gate_value=g,
+        )[0][0]
+    )(jnp.asarray(0.25, dtype=jnp.float64))
+    np.testing.assert_allclose(np.asarray(grad), np.asarray(0.5), rtol=0, atol=1e-12)
+
+
 def test_surrogate_inversion_likelihood_jax_matches_python_residual_replay() -> None:
     frozen_residual = _constant_residual_mlp(d_in=4, d_out=1, value=0.2)
     obs = np.asarray([[1.0, 0.5]], dtype=np.float64)
@@ -572,6 +792,57 @@ def test_surrogate_inversion_likelihood_jax_matches_python_residual_replay() -> 
 
     np.testing.assert_allclose(np.asarray(shocks_jax), shocks_py, rtol=1e-9, atol=1e-9)
     np.testing.assert_allclose(np.asarray(ll_jax), ll_py, rtol=1e-9, atol=1e-9)
+
+
+def test_surrogate_inversion_jax_gate_false_matches_rom_replay() -> None:
+    frozen_residual = _constant_residual_mlp(d_in=4, d_out=1, value=0.2)
+    obs = np.asarray([[1.0, 0.5]], dtype=np.float64)
+    obs_sigma = np.asarray([0.1], dtype=np.float64)
+    shock_sigmas = np.asarray([0.5, 0.0], dtype=np.float64)
+    theta = np.asarray([0.1], dtype=np.float64)
+    ll_rom, shocks_rom = inversion_loglik_per_period(
+        _toy_split_predict,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=12,
+        tol=1e-8,
+        lambda_=1e-6,
+    )
+    ll_closed, shocks_closed = surrogate_inversion_loglik_per_period_jax(
+        _toy_split_predict_jax,
+        frozen_residual,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=12,
+        lambda_=1e-6,
+        shock_solver="rom",
+        batch_replay=True,
+        gate_mask=jnp.asarray([0.0, 0.0], dtype=jnp.float64),
+    )
+    ll_open, _ = surrogate_inversion_loglik_per_period_jax(
+        _toy_split_predict_jax,
+        frozen_residual,
+        [0.0],
+        theta,
+        obs,
+        obs_sigma,
+        shock_sigmas,
+        maxit=12,
+        lambda_=1e-6,
+        shock_solver="rom",
+        batch_replay=True,
+        gate_mask=jnp.asarray([1.0, 1.0], dtype=jnp.float64),
+    )
+
+    np.testing.assert_allclose(np.asarray(shocks_closed), shocks_rom, rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(np.asarray(ll_closed), ll_rom, rtol=1e-9, atol=1e-9)
+    assert not np.allclose(np.asarray(ll_closed), np.asarray(ll_open))
 
 
 def test_surrogate_inversion_jax_matches_python_with_state_residual_carry() -> None:

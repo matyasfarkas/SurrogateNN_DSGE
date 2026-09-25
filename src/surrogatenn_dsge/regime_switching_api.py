@@ -259,6 +259,15 @@ def _combine_additive_residual(
     )
 
 
+def _coerce_gate_value(gate_value: float | bool | np.ndarray | jax.Array) -> float:
+    value = float(np.asarray(gate_value, dtype=np.float64).reshape(()))
+    if not np.isfinite(value):
+        raise ValueError("gate_value must be finite.")
+    if value < 0.0 or value > 1.0:
+        raise ValueError(f"gate_value must lie in [0, 1], got {value}.")
+    return value
+
+
 def predict_additive_residual(
     full_predict: Callable[[Any, Any, Any], Any],
     residual_predict: Callable[[Any, Any, Any], Any],
@@ -286,6 +295,52 @@ def predict_additive_residual(
     return _combine_additive_residual(
         y_full,
         y_resid,
+        d_obs,
+        allow_full_residual=allow_full_residual,
+    )
+
+
+def predict_additive_residual_gated(
+    full_predict: Callable[[Any, Any, Any], Any],
+    residual_predict: Callable[[Any, Any, Any], Any],
+    state: Sequence[float] | np.ndarray | jax.Array,
+    shocks: Sequence[float] | np.ndarray | jax.Array,
+    theta: Sequence[float] | np.ndarray | jax.Array,
+    d_obs: int,
+    *,
+    gate_value: float | bool | np.ndarray | jax.Array,
+    allow_full_residual: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply a residual correction only to the extent allowed by a gate.
+
+    A gate value of 0 exactly recovers the ROM/full predictor, 1 applies the
+    full residual surrogate, and intermediate values implement a soft gate.
+    """
+
+    gate = _coerce_gate_value(gate_value)
+    y_full = _call_full_predict(
+        full_predict,
+        state,
+        shocks,
+        theta,
+        label="full_predict output",
+    )
+    if gate == 0.0:
+        return split_observation_state(
+            y_full,
+            d_obs,
+            label="full_predict output (gate fallback)",
+        )
+    y_resid = _call_full_predict(
+        residual_predict,
+        state,
+        shocks,
+        theta,
+        label="residual_predict output",
+    )
+    return _combine_additive_residual(
+        y_full,
+        gate * y_resid,
         d_obs,
         allow_full_residual=allow_full_residual,
     )
@@ -339,11 +394,13 @@ def predict_additive_residual_ood(
     norm_stats: Any,
     *,
     z_threshold: float = 4.0,
+    gate_value: float | bool | np.ndarray | jax.Array = 1.0,
     allow_full_residual: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     threshold = float(z_threshold)
     if threshold <= 0:
         raise ValueError(f"z_threshold must be positive, got {z_threshold}.")
+    gate = _coerce_gate_value(gate_value)
     state_vec = _as_float_vector(state, label="state")
     shock_vec = _as_float_vector(shocks, label="shocks")
     theta_vec = _as_float_vector(theta, label="theta")
@@ -361,7 +418,7 @@ def predict_additive_residual_ood(
         theta,
         label="full_predict output",
     )
-    if float(np.max(np.abs((x_input - mu) / sigma))) > threshold:
+    if gate == 0.0 or float(np.max(np.abs((x_input - mu) / sigma))) > threshold:
         return split_observation_state(
             y_full,
             d_obs,
@@ -377,7 +434,7 @@ def predict_additive_residual_ood(
     )
     return _combine_additive_residual(
         y_full,
-        y_resid,
+        gate * y_resid,
         d_obs,
         allow_full_residual=allow_full_residual,
     )
@@ -643,6 +700,9 @@ def _evaluate_inversion_model(
 ) -> tuple[np.ndarray, np.ndarray]:
     if single_eval_residual_fn is not None:
         obs_rom, state_rom_next = _call_predict(predict_fn, state, eps_full, theta)
+        gate_active = gate_mask is None or bool(gate_mask[period_idx])
+        if not gate_active:
+            return obs_rom, state_rom_next
         x_nn = np.concatenate([state, eps_full, theta], axis=0)
         y_nn = _clamp_residual_vector(
             single_eval_residual_fn(x_nn),
@@ -655,7 +715,7 @@ def _evaluate_inversion_model(
                 f"got {y_nn.shape[0]}, expected at least d_obs={int(d_obs)}."
             )
         obs_pred = obs_rom + y_nn[: int(d_obs)]
-        if gate_mask is not None and bool(gate_mask[period_idx]) and y_nn.shape[0] > int(d_obs):
+        if gate_mask is not None and gate_active and y_nn.shape[0] > int(d_obs):
             state_resid = y_nn[int(d_obs) :]
             if state_resid.shape[0] == 0:
                 state_next = state_rom_next
@@ -831,7 +891,7 @@ def _batch_residual_inversion_loglik(
     d_state = s0.shape[0]
     theta_col = theta.reshape(-1, 1)
 
-    if gate_mask is not None and single_eval_residual_fn is not None and bool(np.any(gate_mask)):
+    if gate_mask is not None:
         obs_pred = np.zeros((d_obs, periods), dtype=np.float64)
         input_states = np.zeros((d_state, periods), dtype=np.float64)
         state_rom = s0.copy()
@@ -843,7 +903,7 @@ def _batch_residual_inversion_loglik(
                 shocks_out[:, period],
                 theta,
             )
-            if bool(gate_mask[period]):
+            if bool(gate_mask[period]) and single_eval_residual_fn is not None:
                 x_nn = np.concatenate([state_rom, shocks_out[:, period], theta], axis=0)
                 y_nn = _clamp_residual_vector(
                     single_eval_residual_fn(x_nn),
@@ -865,32 +925,32 @@ def _batch_residual_inversion_loglik(
                     raise ValueError(
                         "single_eval_residual_fn state residual length mismatch: "
                         f"{state_resid.shape[0]} vs state length {state_next.shape[0]}."
-                    )
+                )
             else:
                 obs_pred[:, period] = obs_t
                 state_rom = state_next
 
-        non_gate_idx = np.flatnonzero(~gate_mask)
-        if non_gate_idx.size:
+        gate_idx = np.flatnonzero(gate_mask)
+        if gate_idx.size and single_eval_residual_fn is None:
             x_nn_ng = np.vstack(
                 [
-                    input_states[:, non_gate_idx],
-                    shocks_out[:, non_gate_idx],
-                    np.repeat(theta_col, non_gate_idx.size, axis=1),
+                    input_states[:, gate_idx],
+                    shocks_out[:, gate_idx],
+                    np.repeat(theta_col, gate_idx.size, axis=1),
                 ]
             )
             y_nn_ng = _clamp_residual_matrix(
                 batch_eval_residual_fn(x_nn_ng),
                 correction_clamp,
                 label="batch_eval_residual_fn output",
-                periods=non_gate_idx.size,
+                periods=gate_idx.size,
             )
             if y_nn_ng.shape[0] < d_obs:
                 raise ValueError(
                     "batch_eval_residual_fn output row mismatch: "
                     f"got {y_nn_ng.shape[0]}, expected at least d_obs={d_obs}."
                 )
-            obs_pred[:, non_gate_idx] += y_nn_ng[:d_obs, :]
+            obs_pred[:, gate_idx] += y_nn_ng[:d_obs, :]
     else:
         input_states = np.zeros((d_state, periods), dtype=np.float64)
         rom_obs = np.zeros((d_obs, periods), dtype=np.float64)

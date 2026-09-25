@@ -5,7 +5,10 @@ _jax_config.update("jax_enable_x64", True)
 from .adaptive_grid import (
     AdaptiveGridConfig,
     AdaptiveGridResult,
+    EndogenousSupportSelectionConfig,
+    EndogenousSupportSelectionResult,
     endogenous_adaptive_grid,
+    select_endogenous_support_points,
     summarize_adaptive_grid,
 )
 from .linalg import (
@@ -62,6 +65,7 @@ from .regime_switching_api import (
     override_named_parameters,
     parameters_with_theta_mode,
     predict_additive_residual,
+    predict_additive_residual_gated,
     predict_additive_residual_ood,
     predict_from_full,
     rollout_observations,
@@ -387,6 +391,8 @@ __all__ = [
     "ThirdOrderStochasticSteadyStateResult",
     "AdaptiveGridConfig",
     "AdaptiveGridResult",
+    "EndogenousSupportSelectionConfig",
+    "EndogenousSupportSelectionResult",
     "analyze_first_order_dsge_determinacy",
     "analyze_first_order_model_determinacy",
     "analyze_quadratic_matrix_equation_schur",
@@ -508,6 +514,7 @@ __all__ = [
     "parameter_grid",
     "parameters_with_theta_mode",
     "predict_additive_residual",
+    "predict_additive_residual_gated",
     "predict_additive_residual_ood",
     "predict_frozen",
     "predict_frozen_batch",
@@ -531,6 +538,7 @@ __all__ = [
     "second_order_state_update",
     "sep_inversion_loglikelihood",
     "sep_inversion_loglikelihood_per_period",
+    "select_endogenous_support_points",
     "simulate_linear_gaussian_state_space",
     "simulate_model",
     "silu",
