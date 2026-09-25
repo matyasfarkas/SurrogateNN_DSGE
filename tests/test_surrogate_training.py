@@ -22,6 +22,7 @@ from surrogatenn_dsge import (
     solve_batched_stochastic_extended_path_model,
     solve_batched_stochastic_extended_path_residual_expectation,
     split_surrogate_dataset,
+    residual_shrinkage_factors,
     surrogate_inversion_loglikelihood_jax,
     surrogate_sample_weights_from_residuals,
     train_surrogate_from_batched_arrays_jax,
@@ -107,6 +108,22 @@ def test_surrogate_sample_weights_from_residuals_are_inverse_and_mean_one() -> N
     assert weights[2] == weights[3]
 
 
+def test_residual_shrinkage_factors_clip_bad_corrections_to_rom_baseline() -> None:
+    target = np.asarray([[1.0, 2.0, -1.0], [1.0, -1.0, 0.5]], dtype=np.float64)
+    overfit_prediction = 10.0 * target[:1]
+    wrong_direction_prediction = -target[1:]
+
+    shrinkage = residual_shrinkage_factors(
+        np.vstack([overfit_prediction, wrong_direction_prediction]),
+        target,
+    )
+
+    np.testing.assert_allclose(shrinkage, np.asarray([0.1, 0.0]), rtol=1e-12, atol=1e-12)
+    scaled_error = shrinkage[:, None] * np.vstack([overfit_prediction, wrong_direction_prediction]) - target
+    baseline_error = -target
+    assert float(np.mean(scaled_error**2)) <= float(np.mean(baseline_error**2))
+
+
 def test_train_surrogate_from_dataset_mlp_rom_residual_is_device_placed() -> None:
     dataset = _supervised_dataset()
     cpu = jax.devices("cpu")[0]
@@ -128,6 +145,8 @@ def test_train_surrogate_from_dataset_mlp_rom_residual_is_device_placed() -> Non
     assert result.validation_rmse_rom is not None
     assert result.validation_improvement is not None
     assert float(np.nanmean(result.validation_improvement)) > 0.25
+    assert result.metadata["residual_shrinkage_calibrated"] is True
+    assert np.asarray(result.metadata["residual_shrinkage"]).shape == (2,)
     assert result.metadata["jax_device_platform"] == "cpu"
     assert _array_platform(result.frozen.W1) == "cpu"
 

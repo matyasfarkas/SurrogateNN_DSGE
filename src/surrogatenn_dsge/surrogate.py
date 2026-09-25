@@ -577,6 +577,82 @@ def _norm_on_device(norm: NormStats, device: Optional[jax.Device]) -> NormStats:
     )
 
 
+def scale_frozen_output(
+    frozen: FrozenMLP | FrozenResNet,
+    output_scale: ArrayLike,
+) -> FrozenMLP | FrozenResNet:
+    """Return a frozen surrogate whose physical outputs are scaled.
+
+    This is useful for residual surrogates: scaling the learned correction by
+    zero exactly recovers the ROM/linear baseline, while intermediate values
+    shrink a noisy correction toward that baseline.
+    """
+
+    scale = jnp.asarray(output_scale, dtype=jnp.float64).reshape(-1)
+    devices = frozen.norm.mu_y.devices() if hasattr(frozen.norm.mu_y, "devices") else {frozen.norm.mu_y.device()}
+    device = next(iter(devices))
+    scale = _device_put(scale, device)
+    if scale.shape[0] == 1:
+        scale = _device_put(jnp.full((frozen.d_out,), scale[0], dtype=jnp.float64), device)
+    elif scale.shape[0] != frozen.d_out:
+        raise ValueError(
+            f"output_scale must be scalar or length d_out={frozen.d_out}, got length {scale.shape[0]}."
+        )
+    if bool(jnp.any(~jnp.isfinite(scale))) or bool(jnp.any(scale < 0.0)):
+        raise ValueError("output_scale must be finite and nonnegative.")
+
+    norm = NormStats(
+        mu_x=frozen.norm.mu_x,
+        sigma_x=frozen.norm.sigma_x,
+        mu_y=frozen.norm.mu_y * scale,
+        sigma_y=frozen.norm.sigma_y,
+    )
+    row_scale = scale[:, None]
+    if isinstance(frozen, FrozenMLP):
+        if frozen.W3 is None:
+            return FrozenMLP(
+                W1=frozen.W1,
+                b1=frozen.b1,
+                W2=frozen.W2 * row_scale,
+                b2=frozen.b2 * scale,
+                W3=None,
+                b3=None,
+                norm=norm,
+                d_in=frozen.d_in,
+                d_out=frozen.d_out,
+                activation=frozen.activation,
+            )
+        assert frozen.W3 is not None and frozen.b3 is not None
+        return FrozenMLP(
+            W1=frozen.W1,
+            b1=frozen.b1,
+            W2=frozen.W2,
+            b2=frozen.b2,
+            W3=frozen.W3 * row_scale,
+            b3=frozen.b3 * scale,
+            norm=norm,
+            d_in=frozen.d_in,
+            d_out=frozen.d_out,
+            activation=frozen.activation,
+        )
+
+    return FrozenResNet(
+        W_embed=frozen.W_embed,
+        b_embed=frozen.b_embed,
+        d_theta=frozen.d_theta,
+        W_gamma=frozen.W_gamma,
+        b_gamma=frozen.b_gamma,
+        W_beta=frozen.W_beta,
+        b_beta=frozen.b_beta,
+        blocks=frozen.blocks,
+        W_out=frozen.W_out * row_scale,
+        b_out=frozen.b_out * scale,
+        norm=norm,
+        d_in=frozen.d_in,
+        d_out=frozen.d_out,
+    )
+
+
 def train_mlp(
     X: Any,
     Y: Any,

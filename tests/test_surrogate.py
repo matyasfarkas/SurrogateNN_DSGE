@@ -18,6 +18,7 @@ from surrogatenn_dsge import (
     predict_frozen,
     predict_frozen_batch,
     predict_frozen_safe,
+    scale_frozen_output,
     standardize_xy,
     surrogate_additive_residual_loglik_per_period,
     surrogate_inversion_loglik_per_period,
@@ -74,6 +75,20 @@ def _constant_residual_mlp(d_in: int, d_out: int, value: float = 0.5) -> FrozenM
         d_in=d_in,
         d_out=d_out,
         activation="tanh",
+    )
+
+
+def test_scale_frozen_output_shrinks_physical_residual_exactly() -> None:
+    frozen = _constant_residual_mlp(d_in=3, d_out=2, value=0.5)
+    x = np.asarray([1.0, -0.5, 0.2], dtype=np.float64)
+
+    scaled = scale_frozen_output(frozen, [0.25, 0.0])
+
+    np.testing.assert_allclose(
+        predict_frozen(scaled, x),
+        np.asarray([0.125, 0.0], dtype=np.float64),
+        rtol=1e-12,
+        atol=1e-12,
     )
 
 

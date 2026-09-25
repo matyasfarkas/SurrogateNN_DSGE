@@ -17,6 +17,7 @@ from .surrogate import (
     SurrogateValidationResult,
     predict_frozen_batch,
     resolve_jax_device,
+    scale_frozen_output,
     train_mlp,
     train_resnet,
     validate_surrogate,
@@ -561,11 +562,51 @@ def _improvement_vs_baseline(model_rmse: np.ndarray, baseline_rmse: np.ndarray) 
     return improvement
 
 
+def residual_shrinkage_factors(
+    predicted_residual: Any,
+    target_residual: Any,
+    *,
+    clip_min: float = 0.0,
+    clip_max: float = 1.0,
+) -> np.ndarray:
+    """Closed-form validation shrinkage for a residual correction.
+
+    For each output row this solves ``min_alpha ||alpha * predicted - target||``
+    and clips the result to ``[clip_min, clip_max]``. Because ``alpha=0`` is in
+    the default interval, the calibration objective can always recover the ROM
+    baseline; a bad correction is shrunk back toward zero.
+    """
+
+    pred = np.asarray(predicted_residual, dtype=np.float64)
+    target = np.asarray(target_residual, dtype=np.float64)
+    if pred.ndim != 2 or target.ndim != 2:
+        raise ValueError("predicted_residual and target_residual must be rank-2 arrays.")
+    if pred.shape != target.shape:
+        raise ValueError(f"Residual shape mismatch: {pred.shape} vs {target.shape}.")
+    if pred.shape[1] < 1:
+        raise ValueError("At least one calibration sample is required.")
+    if not np.isfinite(pred).all() or not np.isfinite(target).all():
+        raise ValueError("Residual calibration arrays must be finite.")
+    lower = float(clip_min)
+    upper = float(clip_max)
+    if not np.isfinite(lower) or not np.isfinite(upper) or lower < 0.0 or upper < lower:
+        raise ValueError(f"Invalid shrinkage clipping interval [{clip_min}, {clip_max}].")
+
+    denom = np.sum(pred * pred, axis=1)
+    numer = np.sum(pred * target, axis=1)
+    eps = np.sqrt(np.finfo(np.float64).eps)
+    raw = np.zeros((pred.shape[0],), dtype=np.float64)
+    active = denom > eps
+    raw[active] = numer[active] / denom[active]
+    return np.clip(raw, lower, upper)
+
+
 def train_surrogate_from_dataset(
     dataset: SurrogateDataset,
     *,
     architecture: str = "resnet",
     rom_residual: bool = False,
+    calibrate_residual_shrinkage: bool = True,
     output_indices: Optional[Sequence[int] | np.ndarray] = None,
     validation_fraction: float = 0.10,
     split_by_theta: bool = False,
@@ -586,7 +627,10 @@ def train_surrogate_from_dataset(
     """Train an MLP or ResNet surrogate from a `SurrogateDataset`.
 
     If `rom_residual=True`, training targets are `dataset.Y - dataset.Y_rom` and
-    validation reports both residual RMSE and reconstructed full-output RMSE.
+    validation reports both residual RMSE and reconstructed full-output RMSE. If
+    validation samples are available, the deployed residual is calibrated by a
+    per-output shrinkage factor in ``[0, 1]`` by default; zero shrinkage exactly
+    recovers the ROM baseline.
     """
 
     arch = str(architecture).strip().lower()
@@ -657,10 +701,15 @@ def train_surrogate_from_dataset(
     validation_rmse_residual: Optional[np.ndarray] = None
     validation_rmse_rom: Optional[np.ndarray] = None
     validation_improvement: Optional[np.ndarray] = None
+    residual_shrinkage: Optional[np.ndarray] = None
     if split.val_idx.size:
         X_val = dataset.X[:, split.val_idx]
         Y_val_target = Y_target[:, split.val_idx]
         Y_pred_target = np.asarray(predict_frozen_batch(frozen, X_val), dtype=np.float64)
+        if rom_residual and bool(calibrate_residual_shrinkage):
+            residual_shrinkage = residual_shrinkage_factors(Y_pred_target, Y_val_target)
+            frozen = scale_frozen_output(frozen, residual_shrinkage)
+            Y_pred_target = np.asarray(predict_frozen_batch(frozen, X_val), dtype=np.float64)
         validation_rmse_residual = _rmse_per_dim(Y_pred_target - Y_val_target)
         if rom_residual:
             assert Y_rom is not None
@@ -693,6 +742,8 @@ def train_surrogate_from_dataset(
         "jax_device_platform": None if target_device is None else str(target_device.platform),
         "theta_names": dataset.theta_names,
         "output_indices": None if out_idx is None else out_idx.copy(),
+        "residual_shrinkage_calibrated": bool(rom_residual and residual_shrinkage is not None),
+        "residual_shrinkage": None if residual_shrinkage is None else residual_shrinkage.copy(),
     }
     if arch == "resnet":
         metadata["d_theta"] = int(dataset.theta.shape[0])
