@@ -2,6 +2,12 @@ from jax import config as _jax_config
 
 _jax_config.update("jax_enable_x64", True)
 
+from .adaptive_grid import (
+    AdaptiveGridConfig,
+    AdaptiveGridResult,
+    endogenous_adaptive_grid,
+    summarize_adaptive_grid,
+)
 from .linalg import (
     LyapunovOutcome,
     LyapunovResult,
@@ -248,6 +254,7 @@ from .surrogate_dataset import (
     SurrogateDataset,
     build_surrogate_residual_arrays_jax,
     build_surrogate_residual_arrays_from_batched_sep_jax,
+    build_surrogate_residual_dataset_from_feature_grid,
     build_surrogate_residual_dataset_from_batched_rollouts,
     build_surrogate_residual_dataset,
     summarize_batched_surrogate_arrays,
@@ -378,6 +385,8 @@ __all__ = [
     "ThirdOrderAuxiliaryMatrices",
     "ThirdOrderDSGEResult",
     "ThirdOrderStochasticSteadyStateResult",
+    "AdaptiveGridConfig",
+    "AdaptiveGridResult",
     "analyze_first_order_dsge_determinacy",
     "analyze_first_order_model_determinacy",
     "analyze_quadratic_matrix_equation_schur",
@@ -398,6 +407,7 @@ __all__ = [
     "build_numpyro_switching_model_jax",
     "build_surrogate_residual_arrays_jax",
     "build_surrogate_residual_arrays_from_batched_sep_jax",
+    "build_surrogate_residual_dataset_from_feature_grid",
     "build_surrogate_residual_dataset_from_batched_rollouts",
     "build_surrogate_residual_dataset",
     "baseline_parameter_vector",
@@ -423,6 +433,7 @@ __all__ = [
     "evaluate_numpyro_surrogate_log_density_jax",
     "evaluate_numpyro_switching_filter_log_density_jax",
     "evaluate_numpyro_switching_log_density_jax",
+    "endogenous_adaptive_grid",
     "compute_linear_gate_stats_from_filter",
     "compute_linear_gate_stats_from_shocks",
     "compute_linear_gate_stats_from_shocks_model",
@@ -528,6 +539,7 @@ __all__ = [
     "static_hmc_sample",
     "summarize_batched_surrogate_arrays",
     "summarize_surrogate_dataset",
+    "summarize_adaptive_grid",
     "summarize_parameter_design",
     "surrogate_sample_weights_from_residuals",
     "surrogate_additive_residual_loglik_per_period",

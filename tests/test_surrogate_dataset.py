@@ -11,6 +11,7 @@ from surrogatenn_dsge import (
     build_surrogate_residual_arrays_from_batched_sep_jax,
     build_surrogate_residual_arrays_jax,
     build_surrogate_residual_dataset,
+    build_surrogate_residual_dataset_from_feature_grid,
     build_surrogate_residual_dataset_from_batched_rollouts,
     solve_batched_stochastic_extended_path_residual_expectation,
     summarize_surrogate_dataset,
@@ -156,6 +157,40 @@ def test_residual_full_dataset_uses_current_fom_state_and_next_residual_target()
 
     # The next input state is the FOM state, not the ROM state.
     np.testing.assert_allclose(dataset.X[:2, 1], fom_state, rtol=0, atol=1e-12)
+
+
+def test_feature_grid_dataset_spends_fom_calls_only_on_selected_columns() -> None:
+    feature_grid = np.asarray(
+        [
+            [1.0, -0.5, 0.25],
+            [0.2, 0.4, -0.1],
+            [0.3, -0.2, 0.1],
+            [0.1, 0.1, 0.2],
+            [1.0, 1.0, 1.5],
+        ],
+        dtype=np.float64,
+    )
+
+    dataset, diagnostics = build_surrogate_residual_dataset_from_feature_grid(
+        _rom_predict,
+        _fom_predict,
+        feature_grid,
+        state_dim=2,
+        shock_dim=1,
+        target_mode="residual_full",
+        theta_names=("rho", "scale"),
+    )
+
+    assert dataset.X.shape == feature_grid.shape
+    assert dataset.Y.shape == (3, 3)
+    assert diagnostics["accepted_samples"] == 3
+    assert diagnostics["unique_theta_count"] == 2
+    np.testing.assert_array_equal(dataset.theta_ids, np.asarray([0, 0, 1], dtype=np.int64))
+
+    rom_obs, rom_state_next = _rom_predict(feature_grid[:2, 0], feature_grid[2:3, 0], feature_grid[3:, 0])
+    fom_obs, fom_state_next = _fom_predict(feature_grid[:2, 0], feature_grid[2:3, 0], feature_grid[3:, 0])
+    expected = np.concatenate([fom_obs - rom_obs, fom_state_next - rom_state_next])
+    np.testing.assert_allclose(dataset.Y[:, 0], expected, rtol=0, atol=1e-12)
 
 
 def test_batched_jax_rollouts_match_sequential_dataset_with_theta_specific_shocks() -> None:

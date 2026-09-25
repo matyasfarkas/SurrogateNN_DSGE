@@ -655,6 +655,155 @@ def build_surrogate_residual_dataset(
     )
 
 
+def build_surrogate_residual_dataset_from_feature_grid(
+    rom_predict: PredictTupleFn,
+    fom_predict: PredictTupleFn,
+    feature_grid: Any,
+    *,
+    state_dim: int,
+    shock_dim: int,
+    target_mode: str = "residual_full",
+    min_successful_samples: int = 1,
+    input_names: Sequence[str] = (),
+    output_names: Sequence[str] = (),
+    theta_names: Sequence[str] = (),
+    max_logged_failures: int = 20,
+) -> tuple[SurrogateDataset, dict[str, object]]:
+    """Evaluate ROM/FOM targets only at selected feature-grid columns.
+
+    ``feature_grid`` must have columns ``[state; shock; theta]``. This is the
+    companion to an endogenous adaptive grid: a cheap scorer chooses relevant
+    state/shock/parameter combinations, and this function spends expensive FOM
+    or SEP calls only at those columns.
+    """
+
+    grid = np.asarray(feature_grid, dtype=np.float64)
+    if grid.ndim != 2:
+        raise ValueError(f"feature_grid must have shape (features, samples), got {grid.shape}.")
+    state_count = int(state_dim)
+    shock_count = int(shock_dim)
+    if state_count < 1:
+        raise ValueError(f"state_dim must be positive, got {state_dim}.")
+    if shock_count < 0:
+        raise ValueError(f"shock_dim must be nonnegative, got {shock_dim}.")
+    theta_dim = int(grid.shape[0]) - state_count - shock_count
+    if theta_dim < 1:
+        raise ValueError(
+            "feature_grid must contain at least one theta row after state/shock rows; "
+            f"got feature dimension {grid.shape[0]}, state_dim={state_dim}, shock_dim={shock_dim}."
+        )
+    if grid.shape[1] < 1:
+        raise ValueError("feature_grid must contain at least one candidate column.")
+    if not np.isfinite(grid).all():
+        raise ValueError("feature_grid must be finite.")
+    if int(min_successful_samples) < 1:
+        raise ValueError(f"min_successful_samples must be >= 1, got {min_successful_samples}.")
+
+    target_mode_norm = _normalize_target_mode(target_mode)
+    X_columns: list[np.ndarray] = []
+    Y_columns: list[np.ndarray] = []
+    Y_rom_columns: list[np.ndarray] = []
+    theta_columns: list[np.ndarray] = []
+    theta_lookup: dict[tuple[float, ...], int] = {}
+    theta_ids: list[int] = []
+    period_ids: list[int] = []
+    failures: list[dict[str, object]] = []
+    attempted = int(grid.shape[1])
+
+    for sample_idx in range(attempted):
+        x = grid[:, sample_idx]
+        state = x[:state_count]
+        shock_t = x[state_count : state_count + shock_count]
+        theta_t = x[state_count + shock_count :]
+        try:
+            rom_obs, rom_state_next = _call_predict_tuple(
+                rom_predict,
+                state,
+                shock_t,
+                theta_t,
+                label="rom_predict",
+            )
+            fom_obs, fom_state_next = _call_predict_tuple(
+                fom_predict,
+                state,
+                shock_t,
+                theta_t,
+                label="fom_predict",
+            )
+            if rom_obs.shape != fom_obs.shape:
+                raise ValueError(f"ROM/FOM observation shape mismatch: {rom_obs.shape} vs {fom_obs.shape}.")
+            if rom_state_next.shape != fom_state_next.shape:
+                raise ValueError(
+                    f"ROM/FOM next-state shape mismatch: {rom_state_next.shape} vs {fom_state_next.shape}."
+                )
+            if fom_state_next.shape[0] != state_count:
+                raise ValueError(
+                    f"FOM next-state length {fom_state_next.shape[0]} does not match state_dim={state_count}."
+                )
+            y, y_rom = _target_vector(target_mode_norm, fom_obs, fom_state_next, rom_obs, rom_state_next)
+        except Exception as exc:
+            if len(failures) < int(max_logged_failures):
+                failures.append({"sample_index": int(sample_idx), "error": repr(exc)})
+            continue
+        X_columns.append(x.copy())
+        Y_columns.append(y)
+        Y_rom_columns.append(y_rom)
+        theta_key = tuple(float(value) for value in theta_t)
+        theta_id = theta_lookup.get(theta_key)
+        if theta_id is None:
+            theta_id = len(theta_columns)
+            theta_lookup[theta_key] = theta_id
+            theta_columns.append(theta_t.copy())
+        theta_ids.append(theta_id)
+        period_ids.append(0)
+
+    if len(X_columns) < int(min_successful_samples):
+        diagnostics = {
+            "builder": "feature_grid",
+            "status": "error",
+            "attempted_count": attempted,
+            "accepted_samples": int(len(X_columns)),
+            "failure_log": failures,
+        }
+        raise ValueError(
+            "Feature-grid target generation produced fewer than "
+            f"{int(min_successful_samples)} successful samples. Diagnostics: {diagnostics}"
+        )
+
+    theta_array = np.column_stack(theta_columns)
+    accepted = int(len(X_columns))
+    n_theta = int(theta_array.shape[1])
+    theta_name_tuple = (
+        tuple(str(name) for name in theta_names)
+        if theta_names
+        else tuple(f"theta_{idx}" for idx in range(theta_dim))
+    )
+    dataset = SurrogateDataset(
+        X=np.column_stack(X_columns),
+        Y=np.column_stack(Y_columns),
+        Y_rom=np.column_stack(Y_rom_columns),
+        theta=theta_array,
+        theta_ids=np.asarray(theta_ids, dtype=np.int64),
+        period_ids=np.asarray(period_ids, dtype=np.int64),
+        theta_success=np.ones((n_theta,), dtype=bool),
+        theta_stable_periods=np.ones((n_theta,), dtype=np.int64),
+        target_mode=target_mode_norm,
+        input_names=tuple(input_names),
+        output_names=tuple(output_names),
+        theta_names=theta_name_tuple,
+    )
+    diagnostics = {
+        "builder": "feature_grid",
+        "status": "ok",
+        "attempted_count": attempted,
+        "accepted_samples": accepted,
+        "unique_theta_count": n_theta,
+        "failure_count": int(attempted - accepted),
+        "failure_log": failures,
+    }
+    return dataset, diagnostics
+
+
 def build_surrogate_residual_dataset_from_batched_rollouts(
     states: Any,
     shocks: Any,
