@@ -202,6 +202,12 @@ from .parameter_sampling import (
     sample_parameter_design,
     summarize_parameter_design,
 )
+from .pipeline_artifacts import (
+    HLTPipelineArtifactError,
+    build_hlt_pipeline_artifact_payload,
+    load_hlt_pipeline_artifact_payload,
+    save_hlt_pipeline_artifact_payload,
+)
 from .sep import (
     BatchedSEPSolution,
     SEPConfig,
@@ -346,6 +352,7 @@ __all__ = [
     "LinearGateStatsResult",
     "HomotopySEPResult",
     "HomotopyChainedTrajectoryResult",
+    "HLTPipelineArtifactError",
     "LyapunovOutcome",
     "LyapunovResult",
     "MacroModel",
@@ -411,6 +418,7 @@ __all__ = [
     "build_numpyro_surrogate_inversion_model_jax",
     "build_numpyro_switching_filter_model_jax",
     "build_numpyro_switching_model_jax",
+    "build_hlt_pipeline_artifact_payload",
     "build_surrogate_residual_arrays_jax",
     "build_surrogate_residual_arrays_from_batched_sep_jax",
     "build_surrogate_residual_dataset_from_feature_grid",
@@ -502,6 +510,7 @@ __all__ = [
     "linear_reference_loglik_per_period",
     "linear_state_space_from_first_order_solution",
     "load_surrogate_bundle",
+    "load_hlt_pipeline_artifact_payload",
     "latin_hypercube_unit",
     "lhs_to_bounds",
     "make_batched_surrogate_residual_predictor",
@@ -535,6 +544,7 @@ __all__ = [
     "sample_lhs_parameters",
     "sample_parameter_design",
     "save_surrogate_bundle",
+    "save_hlt_pipeline_artifact_payload",
     "second_order_state_update",
     "sep_inversion_loglikelihood",
     "sep_inversion_loglikelihood_per_period",
