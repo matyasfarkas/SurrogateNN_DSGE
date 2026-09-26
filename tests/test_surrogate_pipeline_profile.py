@@ -550,3 +550,122 @@ def test_adaptive_hlt_sep_dataset_keeps_multi_theta_fallback_targets() -> None:
     assert diagnostics["fallback_share"] == 1.0
     assert diagnostics["accepted_by_branching_order"] == {"0": 4}
     assert len(diagnostics["failure_log"]) == 4
+
+
+def test_batched_hlt_sep_dataset_matches_single_config_adaptive_builder() -> None:
+    mod = _load_profile_module()
+    model = mod.parse_macro_model(
+        """
+        @model nonlinear_sep begin
+            y[0] = rho * y[-1] + gamma * y[1]^2 + u[x]
+        end
+
+        @parameters nonlinear_sep begin
+            gamma = 0.15
+            rho = 0.25
+        end
+        """
+    )
+    parameter_names = tuple(model.parameter_names)
+    theta = np.asarray(
+        [
+            [0.12, 0.18],
+            [0.22, 0.30],
+        ],
+        dtype=np.float64,
+    )
+    initial_states = np.zeros((1, theta.shape[1]), dtype=np.float64)
+    steady_states = np.zeros((theta.shape[1], 1), dtype=np.float64)
+    shocks = np.asarray([[[0.04, -0.01]], [[-0.03, 0.02]]], dtype=np.float64)
+    config = mod.SEPConfig(periods=2, branching_order=1, nnodes=3, tol=1e-10, accept_tol=1e-8, max_iter=30)
+    runtimes = []
+    for theta_idx in range(theta.shape[1]):
+        params = theta[:, theta_idx]
+        first_order = model.solve_first_order(parameter_values=params, steady_state=[0.0])
+        assert first_order.solution.converged
+        runtimes.append(
+            {
+                "parameter_values": params,
+                "steady_state": np.zeros((1,), dtype=np.float64),
+                "state_transition": np.asarray(first_order.solution.state_transition, dtype=np.float64),
+                "shock_impact": np.asarray(first_order.solution.shock_impact, dtype=np.float64),
+            }
+        )
+
+    def runtime_for_theta(theta_t):
+        theta_arr = np.asarray(theta_t, dtype=np.float64).reshape(-1)
+        idx = int(np.argmin(np.linalg.norm(theta.T - theta_arr[None, :], axis=1)))
+        return runtimes[idx]
+
+    def rom_predict(state, shock, theta_t):
+        runtime = runtime_for_theta(theta_t)
+        state_arr = np.asarray(state, dtype=np.float64)
+        shock_arr = np.asarray(shock, dtype=np.float64)
+        next_state = (
+            runtime["steady_state"]
+            + runtime["state_transition"] @ (state_arr - runtime["steady_state"])
+            + runtime["shock_impact"] @ shock_arr
+        )
+        return next_state.copy(), next_state
+
+    def sep_predict(state, shock, theta_t, sep_config):
+        runtime = runtime_for_theta(theta_t)
+        deterministic = np.zeros((sep_config.periods, 1), dtype=np.float64)
+        deterministic[0, :] = np.asarray(shock, dtype=np.float64)
+        sep_result = model.solve_stochastic_extended_path(
+            parameter_values=runtime["parameter_values"],
+            steady_state=runtime["steady_state"],
+            initial_state=np.asarray(state, dtype=np.float64),
+            terminal_state=runtime["steady_state"],
+            deterministic_shocks=deterministic,
+            config=sep_config,
+        )
+        assert sep_result.solution.accepted
+        next_state = np.asarray(sep_result.solution.mean_path, dtype=np.float64)[:, 1]
+        return next_state.copy(), next_state, {"residual_norm": sep_result.solution.residual_norm}
+
+    adaptive, adaptive_diag = mod._build_adaptive_hlt_sep_dataset(
+        rom_predict=rom_predict,
+        sep_predict=sep_predict,
+        initial_states=initial_states,
+        shocks=shocks,
+        theta=theta,
+        attempt_specs=(mod.HLTSEPAttemptSpec(index=0, shock_scale=1.0, config=config),),
+        target_mode="fom_full",
+        min_stable_periods=2,
+        input_names=("y", "u", *parameter_names),
+        output_names=("y_obs", "y[1]"),
+        max_logged_failures=10,
+    )
+    batched, batched_diag = mod._build_batched_hlt_sep_dataset(
+        model=model,
+        parameter_values_by_theta=theta.T,
+        theta_features_by_theta=theta.T,
+        steady_states_by_theta=steady_states,
+        state_transition_by_theta=np.stack([runtime["state_transition"] for runtime in runtimes], axis=0),
+        shock_impact_by_theta=np.stack([runtime["shock_impact"] for runtime in runtimes], axis=0),
+        initial_states=initial_states,
+        shocks=shocks,
+        config=config,
+        target_mode="fom_full",
+        min_stable_periods=2,
+        observable_idx=(0,),
+        state_idx=(0,),
+        input_names=("y", "u", *parameter_names),
+        output_names=("y_obs", "y[1]"),
+        target_device=None,
+        max_logged_failures=10,
+    )
+
+    def sorted_columns(dataset):
+        order = np.lexsort((dataset.period_ids, dataset.theta_ids))
+        return dataset.X[:, order], dataset.Y[:, order], dataset.Y_rom[:, order]
+
+    assert adaptive_diag["status"] == "ok"
+    assert batched_diag["status"] == "ok"
+    assert batched_diag["builder"] == "batched_sep"
+    assert batched_diag["batched_calls"] == shocks.shape[2]
+    np.testing.assert_array_equal(adaptive.theta_ids, np.asarray([0, 0, 1, 1]))
+    np.testing.assert_array_equal(batched.theta_ids, np.asarray([0, 0, 1, 1]))
+    for left, right in zip(sorted_columns(adaptive), sorted_columns(batched)):
+        np.testing.assert_allclose(left, right, rtol=1e-9, atol=1e-10)

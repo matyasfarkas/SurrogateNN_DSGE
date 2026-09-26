@@ -5,7 +5,7 @@ This is a staging profiler, not a claim that the full HLT nonlinear pipeline is
 already GPU-native. It separates three costs:
 
 1. HLT-shaped supervised ResNet training on JAX.
-2. Current callback-based ROM/FOM dataset orchestration.
+2. Callback, adaptive SEP, and fixed-config batched SEP ROM/FOM target generation.
 3. A small sparse-tree SEP Newton solve microbenchmark.
 
 The first item should be GPU accelerated today. The second and third items are
@@ -16,6 +16,7 @@ large run.
 from __future__ import annotations
 
 import argparse
+from contextlib import nullcontext
 from dataclasses import dataclass
 import json
 import math
@@ -1929,6 +1930,271 @@ def _build_adaptive_hlt_sep_dataset(
     return dataset, diagnostics
 
 
+def _build_batched_hlt_sep_dataset(
+    *,
+    model: Any,
+    parameter_values_by_theta: np.ndarray,
+    theta_features_by_theta: np.ndarray,
+    steady_states_by_theta: np.ndarray,
+    state_transition_by_theta: np.ndarray,
+    shock_impact_by_theta: np.ndarray,
+    initial_states: np.ndarray,
+    shocks: np.ndarray,
+    config: SEPConfig,
+    target_mode: str,
+    min_stable_periods: int,
+    observable_idx: Sequence[int],
+    state_idx: Sequence[int],
+    input_names: Sequence[str],
+    output_names: Sequence[str],
+    target_device: Any,
+    max_logged_failures: int,
+) -> tuple[SurrogateDataset, dict[str, Any]]:
+    """Build HLT targets with parsed-model batched SEP solves.
+
+    This is the fixed-shape GPU-oriented target builder. It batches all theta
+    draws for a given outer period into one parsed SEP solve, then advances the
+    accepted nonlinear states before the next period. It intentionally does not
+    implement the adaptive fallback ladder; use ``adaptive-sep`` when per-sample
+    fallback/OBC reinjection is required.
+    """
+
+    theta_parameter_matrix = np.asarray(parameter_values_by_theta, dtype=np.float64)
+    theta_feature_matrix = np.asarray(theta_features_by_theta, dtype=np.float64)
+    steady_matrix = np.asarray(steady_states_by_theta, dtype=np.float64)
+    transition_tensor = np.asarray(state_transition_by_theta, dtype=np.float64)
+    impact_tensor = np.asarray(shock_impact_by_theta, dtype=np.float64)
+    initial_array = np.asarray(initial_states, dtype=np.float64)
+    shock_array = np.asarray(shocks, dtype=np.float64)
+    obs_idx = np.asarray(observable_idx, dtype=np.int64)
+    state_index = np.asarray(state_idx, dtype=np.int64)
+
+    if theta_parameter_matrix.ndim != 2:
+        raise ValueError("parameter_values_by_theta must have shape (theta_draws, parameters).")
+    n_theta = int(theta_parameter_matrix.shape[0])
+    if n_theta < 1:
+        raise ValueError("parameter_values_by_theta must contain at least one draw.")
+    if theta_feature_matrix.ndim != 2 or theta_feature_matrix.shape[0] != n_theta:
+        raise ValueError(
+            "theta_features_by_theta must have shape "
+            f"({n_theta}, theta_feature_dim), got {theta_feature_matrix.shape}."
+        )
+    if steady_matrix.shape != (n_theta, model.timings.nVars):
+        raise ValueError(
+            "steady_states_by_theta must have shape "
+            f"({n_theta}, {model.timings.nVars}), got {steady_matrix.shape}."
+        )
+    if initial_array.shape != (model.timings.nVars, n_theta):
+        raise ValueError(
+            "initial_states must have shape "
+            f"({model.timings.nVars}, {n_theta}), got {initial_array.shape}."
+        )
+    if shock_array.ndim != 3 or shock_array.shape[0] != n_theta or shock_array.shape[1] != model.timings.nExo:
+        raise ValueError(
+            "shocks must have shape "
+            f"({n_theta}, {model.timings.nExo}, periods), got {shock_array.shape}."
+        )
+    if transition_tensor.ndim != 3 or transition_tensor.shape != (
+        n_theta,
+        model.timings.nVars,
+        state_index.size,
+    ):
+        raise ValueError(
+            "state_transition_by_theta must have shape "
+            f"({n_theta}, {model.timings.nVars}, {state_index.size}), got {transition_tensor.shape}."
+        )
+    if impact_tensor.shape != (n_theta, model.timings.nVars, model.timings.nExo):
+        raise ValueError(
+            "shock_impact_by_theta must have shape "
+            f"({n_theta}, {model.timings.nVars}, {model.timings.nExo}), got {impact_tensor.shape}."
+        )
+    if int(min_stable_periods) < 0:
+        raise ValueError(f"min_stable_periods must be nonnegative, got {min_stable_periods}.")
+
+    target_mode_norm = str(target_mode).strip().lower()
+    periods = int(shock_array.shape[2])
+    current_states = initial_array.T.copy()
+    active = np.ones((n_theta,), dtype=bool)
+    theta_stable_periods = np.zeros((n_theta,), dtype=np.int64)
+    theta_success = np.zeros((n_theta,), dtype=bool)
+    records_by_theta: list[list[tuple[np.ndarray, np.ndarray, np.ndarray, int, float]]] = [
+        [] for _ in range(n_theta)
+    ]
+    failure_log: list[dict[str, Any]] = []
+    residual_values: list[float] = []
+    batched_calls = 0
+
+    def log_failure(row: dict[str, Any]) -> None:
+        if len(failure_log) < int(max_logged_failures):
+            failure_log.append(row)
+
+    for period in range(periods):
+        deterministic = np.zeros((n_theta, int(config.periods), model.timings.nExo), dtype=np.float64)
+        if config.periods > 0:
+            deterministic[:, 0, :] = shock_array[:, :, period]
+            deterministic[~active, 0, :] = 0.0
+        solve_context = nullcontext() if target_device is None else jax.default_device(target_device)
+        solve_started = time.perf_counter()
+        with solve_context:
+            batched_sep = solve_batched_stochastic_extended_path_model(
+                model,
+                parameter_values=theta_parameter_matrix,
+                steady_state=steady_matrix,
+                initial_state=current_states,
+                terminal_state=steady_matrix,
+                config=config,
+                deterministic_shocks=deterministic,
+            )
+        _block_until_ready_tree(batched_sep)
+        batched_calls += 1
+        solve_elapsed = time.perf_counter() - solve_started
+
+        accepted = np.asarray(batched_sep.solution.accepted, dtype=bool)
+        residual_norm = np.asarray(batched_sep.solution.residual_norm, dtype=np.float64)
+        next_states = np.asarray(batched_sep.solution.mean_path[:, :, 1], dtype=np.float64)
+        finite_next = np.isfinite(next_states).all(axis=1)
+        accepted_this = active & accepted & finite_next
+
+        shocks_t = shock_array[:, :, period]
+        state_dev = current_states[:, state_index] - steady_matrix[:, state_index]
+        rom_state_next = (
+            steady_matrix
+            + np.einsum("bij,bj->bi", transition_tensor, state_dev)
+            + np.einsum("bij,bj->bi", impact_tensor, shocks_t)
+        )
+        rom_finite = np.isfinite(rom_state_next).all(axis=1)
+        accepted_this = accepted_this & rom_finite
+
+        for theta_idx in range(n_theta):
+            if not active[theta_idx]:
+                continue
+            residual_value = float(residual_norm[theta_idx]) if np.isfinite(residual_norm[theta_idx]) else math.inf
+            if not accepted_this[theta_idx]:
+                active[theta_idx] = False
+                log_failure(
+                    {
+                        "theta_index": int(theta_idx),
+                        "period": int(period),
+                        "branching_order": int(config.branching_order),
+                        "shock_scale": float(config.shock_scale),
+                        "max_iter": int(config.max_iter),
+                        "residual_norm": _finite_float_or_none(residual_value),
+                        "accepted": bool(accepted[theta_idx]),
+                        "finite_next_state": bool(finite_next[theta_idx]),
+                        "finite_rom_state": bool(rom_finite[theta_idx]),
+                    }
+                )
+                continue
+            fom_state_next = next_states[theta_idx]
+            fom_obs = fom_state_next[obs_idx]
+            rom_obs = rom_state_next[theta_idx, obs_idx]
+            y, y_rom = _hlt_surrogate_target_vector(
+                target_mode_norm,
+                fom_obs,
+                fom_state_next,
+                rom_obs,
+                rom_state_next[theta_idx],
+            )
+            x = np.concatenate([current_states[theta_idx], shocks_t[theta_idx], theta_feature_matrix[theta_idx]])
+            records_by_theta[theta_idx].append((x, y, y_rom, int(period), residual_value))
+            residual_values.append(residual_value)
+            theta_stable_periods[theta_idx] += 1
+
+        current_states = np.where(accepted_this[:, None], next_states, current_states)
+        active = active & accepted_this
+        _progress(
+            f"batched HLT SEP period {period}/{periods - 1} "
+            f"accepted={int(np.count_nonzero(accepted_this))}/{n_theta} "
+            f"elapsed={solve_elapsed:.3f}s"
+        )
+
+    theta_success = theta_stable_periods == periods
+    X_columns: list[np.ndarray] = []
+    Y_columns: list[np.ndarray] = []
+    Y_rom_columns: list[np.ndarray] = []
+    theta_ids: list[int] = []
+    period_ids: list[int] = []
+    accepted_residual_norms: list[float] = []
+    for theta_idx, records in enumerate(records_by_theta):
+        stable = int(theta_stable_periods[theta_idx])
+        if stable < int(min_stable_periods):
+            continue
+        for x, y, y_rom, period, residual_value in records:
+            X_columns.append(x)
+            Y_columns.append(y)
+            Y_rom_columns.append(y_rom)
+            theta_ids.append(theta_idx)
+            period_ids.append(period)
+            accepted_residual_norms.append(residual_value)
+
+    if not X_columns:
+        diagnostics = {
+            "builder": "batched_sep",
+            "status": "error",
+            "batched_calls": int(batched_calls),
+            "failure_log": failure_log,
+            "sep_config": {
+                "periods": int(config.periods),
+                "branching_order": int(config.branching_order),
+                "nnodes": int(config.nnodes),
+                "sparse_tree": bool(config.sparse_tree),
+                "max_iter": int(config.max_iter),
+                "tol": float(config.tol),
+                "accept_tol": None if config.accept_tol is None else float(config.accept_tol),
+            },
+        }
+        raise ValueError("No batched SEP surrogate-dataset samples were generated. Diagnostics: " + json.dumps(_jsonable(diagnostics)))
+
+    dataset = SurrogateDataset(
+        X=np.column_stack(X_columns),
+        Y=np.column_stack(Y_columns),
+        Y_rom=np.column_stack(Y_rom_columns),
+        theta=theta_feature_matrix.T,
+        theta_ids=np.asarray(theta_ids, dtype=np.int64),
+        period_ids=np.asarray(period_ids, dtype=np.int64),
+        theta_success=theta_success,
+        theta_stable_periods=theta_stable_periods,
+        target_mode=target_mode_norm,
+        input_names=tuple(input_names),
+        output_names=tuple(output_names),
+        theta_names=tuple(input_names[-theta_feature_matrix.shape[1] :])
+        if len(input_names) >= theta_feature_matrix.shape[1]
+        else (),
+    )
+    residual_array = np.asarray(accepted_residual_norms, dtype=np.float64)
+    diagnostics = {
+        "builder": "batched_sep",
+        "status": "ok",
+        "batched_calls": int(batched_calls),
+        "attempted_count": int(n_theta * periods),
+        "accepted_samples": int(dataset.n_samples),
+        "fallback_samples": 0,
+        "fallback_share": 0.0,
+        "theta_full_success_count": int(np.count_nonzero(theta_success)),
+        "theta_with_any_sample_count": int(np.count_nonzero(theta_stable_periods >= int(min_stable_periods))),
+        "theta_stable_periods": theta_stable_periods.tolist(),
+        "theta_success": theta_success.tolist(),
+        "accepted_by_branching_order": {str(int(config.branching_order)): int(dataset.n_samples)},
+        "residual_norm_mean": _finite_float_or_none(np.nanmean(residual_array)) if residual_array.size else None,
+        "residual_norm_max": _finite_float_or_none(np.nanmax(residual_array)) if residual_array.size else None,
+        "failure_log": failure_log,
+        "sep_config": {
+            "periods": int(config.periods),
+            "branching_order": int(config.branching_order),
+            "nnodes": int(config.nnodes),
+            "sparse_tree": bool(config.sparse_tree),
+            "max_iter": int(config.max_iter),
+            "tol": float(config.tol),
+            "accept_tol": None if config.accept_tol is None else float(config.accept_tol),
+        },
+        "caveat": (
+            "Batched SEP target generation uses one fixed SEP configuration and "
+            "does not run the adaptive fallback ladder or auxiliary OBC-shock reinjection."
+        ),
+    }
+    return dataset, diagnostics
+
+
 def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, Any]:
     """Run the actual HLT model through a tiny ROM/FOM surrogate path.
 
@@ -2113,6 +2379,26 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         f"prepared {theta.shape[1]} theta runtimes in {runtime_prepare_s:.3f}s; "
         f"starting ROM/FOM surrogate target generation and training"
     )
+    theta_runtimes = [
+        runtime_for_theta(theta[:, theta_idx], theta_index=theta_idx)
+        for theta_idx in range(theta.shape[1])
+    ]
+    full_parameter_values_by_theta = np.stack(
+        [np.asarray(runtime["parameter_values"], dtype=np.float64) for runtime in theta_runtimes],
+        axis=0,
+    )
+    steady_states_by_theta = np.stack(
+        [np.asarray(runtime["steady_state"], dtype=np.float64) for runtime in theta_runtimes],
+        axis=0,
+    )
+    state_transition_by_theta = np.stack(
+        [np.asarray(runtime["state_transition"], dtype=np.float64) for runtime in theta_runtimes],
+        axis=0,
+    )
+    shock_impact_by_theta = np.stack(
+        [np.asarray(runtime["shock_impact"], dtype=np.float64) for runtime in theta_runtimes],
+        axis=0,
+    )
 
     def rom_predict(state: Any, shock_t: Any, theta_t: Any) -> tuple[np.ndarray, np.ndarray]:
         runtime = runtime_for_theta(theta_t)
@@ -2258,8 +2544,63 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         )
         target_diagnostics["target_min_stable_periods"] = int(target_min_stable_periods)
         target_diagnostics["effective_validation_fraction"] = float(validation_fraction)
+    elif target_builder == "batched-sep":
+        _progress(
+            "batched HLT target generation "
+            f"theta_draws={theta.shape[1]} periods={periods} sep_periods={sep_config.periods}"
+        )
+        dataset, target_diagnostics = _build_batched_hlt_sep_dataset(
+            model=model,
+            parameter_values_by_theta=full_parameter_values_by_theta,
+            theta_features_by_theta=theta.T,
+            steady_states_by_theta=steady_states_by_theta,
+            state_transition_by_theta=state_transition_by_theta,
+            shock_impact_by_theta=shock_impact_by_theta,
+            initial_states=initial_states,
+            shocks=shocks,
+            config=sep_config,
+            target_mode="fom_full",
+            min_stable_periods=target_min_stable_periods,
+            observable_idx=observable_idx,
+            state_idx=state_idx,
+            input_names=input_names,
+            output_names=output_names,
+            target_device=target_device,
+            max_logged_failures=int(args.hlt_target_max_logged_failures),
+        )
+        dataset_summary = summarize_surrogate_dataset(dataset)
+        successful_groups = np.unique(dataset.theta_ids).size
+        validation_fraction = float(args.validation_fraction)
+        split_by_theta = bool(args.split_by_theta)
+        if split_by_theta and successful_groups < 2 and validation_fraction > 0.0:
+            _progress(
+                "disabling held-out-theta validation because fewer than two theta groups "
+                f"produced targets (groups={successful_groups})"
+            )
+            validation_fraction = 0.0
+        training = train_surrogate_from_dataset(
+            dataset,
+            architecture="resnet",
+            rom_residual=True,
+            validation_fraction=validation_fraction,
+            split_by_theta=split_by_theta,
+            only_full_success=bool(args.only_full_success),
+            d_hidden=int(args.hidden),
+            n_blocks=int(args.blocks),
+            nepoch=int(args.epochs),
+            eta_init=float(args.learning_rate),
+            batch_size=int(args.batch_size),
+            device=target_device,
+        )
+        result = SurrogatePipelineResult(
+            dataset=dataset,
+            dataset_summary=dataset_summary,
+            training=training,
+        )
+        target_diagnostics["target_min_stable_periods"] = int(target_min_stable_periods)
+        target_diagnostics["effective_validation_fraction"] = float(validation_fraction)
     else:
-        raise ValueError("hlt_target_builder must be 'adaptive-sep' or 'callback'.")
+        raise ValueError("hlt_target_builder must be 'adaptive-sep', 'batched-sep', or 'callback'.")
     pipeline_s = time.perf_counter() - pipeline_started
     _progress(
         f"finished surrogate pipeline in {pipeline_s:.3f}s "
@@ -2772,10 +3113,24 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
     steady_statuses = [str(row["steady_state_status"]) for row in steady_state_diagnostics]
     fallback_count = sum(status.startswith("fallback") for status in steady_statuses)
     solved_count = sum(status == "solved" for status in steady_statuses)
+    target_builder_summary = str(args.hlt_target_builder).strip().lower()
     caveats = [
-        "SEP target generation is still callback/Python-loop based; ResNet training is the GPU-native part.",
         "The likelihood block evaluates a trained-surrogate inversion likelihood.",
     ]
+    if target_builder_summary == "batched-sep":
+        caveats.insert(
+            0,
+            "SEP target generation uses fixed-config parsed-model batched JAX solves across theta draws per period.",
+        )
+        caveats.insert(
+            1,
+            "The batched target builder does not run the adaptive fallback ladder or auxiliary OBC-shock reinjection.",
+        )
+    else:
+        caveats.insert(
+            0,
+            "SEP target generation is callback/Python-loop based for this target builder; ResNet training is GPU-native.",
+        )
     likelihood_runtime_mode_summary = str(args.hlt_likelihood_runtime_mode).strip().lower()
     if likelihood_runtime_mode_summary == "full-jax":
         caveats.append(
@@ -2929,8 +3284,8 @@ def build_plan(args: argparse.Namespace, shape: SyntheticHLTShape) -> dict[str, 
             "The current surrogate training implementation stores and trains in float64.",
             "Synthetic fixed-shape batched rollout training can be profiled with --mode batched-training.",
             "Synthetic batched SEP target generation plus training can be profiled with --mode batched-sep-training.",
-            "Actual parsed HLT SEP target generation is still callback/Python-loop based, not a fully batched JAX kernel.",
-            "This profiler can validate GPU training throughput now; it cannot certify full HLT SEP generation speedup yet.",
+            "Actual parsed HLT target generation can use --hlt-target-builder batched-sep for fixed-config batched SEP across theta draws per period.",
+            "Adaptive fallback ladders and auxiliary OBC-shock reinjection still use the sequential target-generation path.",
         ],
     }
 
@@ -3021,11 +3376,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-parameter-perturbation", type=float, default=1e-6)
     parser.add_argument(
         "--hlt-target-builder",
-        choices=("adaptive-sep", "callback"),
+        choices=("adaptive-sep", "batched-sep", "callback"),
         default="adaptive-sep",
         help=(
             "How to build HLT surrogate targets. 'adaptive-sep' tries an ordered "
             "ladder of accepted SEP solves per theta-period and records diagnostics; "
+            "'batched-sep' uses one fixed parsed-model batched SEP solve per period; "
             "'callback' preserves the original one-config callback path."
         ),
     )
