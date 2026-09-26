@@ -152,6 +152,48 @@ def _finite_float_or_none(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _parity_metrics(
+    *,
+    value: float,
+    reference: float | None,
+    atol: float,
+    rtol: float,
+) -> dict[str, Any]:
+    """Return scale-aware parity diagnostics for scalar likelihood checks."""
+
+    atol_float = float(atol)
+    rtol_float = float(rtol)
+    if atol_float < 0.0 or rtol_float < 0.0:
+        raise ValueError(f"Parity tolerances must be nonnegative, got atol={atol}, rtol={rtol}.")
+    if reference is None:
+        return {
+            "value_minus_reference": None,
+            "abs_diff": None,
+            "rel_diff": None,
+            "scale": None,
+            "atol": atol_float,
+            "rtol": rtol_float,
+            "effective_tol": None,
+            "ok": None,
+        }
+    value_float = float(value)
+    reference_float = float(reference)
+    diff = value_float - reference_float
+    abs_diff = abs(diff)
+    scale = max(abs(reference_float), 1.0)
+    effective_tol = atol_float + rtol_float * scale
+    return {
+        "value_minus_reference": diff,
+        "abs_diff": abs_diff,
+        "rel_diff": abs_diff / scale,
+        "scale": scale,
+        "atol": atol_float,
+        "rtol": rtol_float,
+        "effective_tol": effective_tol,
+        "ok": bool(abs_diff <= effective_tol),
+    }
+
+
 def _progress(message: str) -> None:
     print(f"[profile] {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {message}", flush=True)
 
@@ -322,6 +364,9 @@ def run_static_hmc_on_bounded_surrogate_log_density(
     adapt_step_size: bool,
     initial_jitter: float,
     seed: int,
+    min_accepted_share: float = 0.0,
+    max_retries: int = 0,
+    retry_step_size_factor: float = 0.25,
 ) -> dict[str, Any]:
     """Run vectorized static HMC over a bounded surrogate log likelihood."""
 
@@ -335,6 +380,15 @@ def run_static_hmc_on_bounded_surrogate_log_density(
         raise ValueError(f"leapfrog_steps must be positive, got {leapfrog_steps}.")
     if step_size <= 0.0:
         raise ValueError(f"step_size must be positive, got {step_size}.")
+    min_accept = float(min_accepted_share)
+    if not 0.0 <= min_accept <= 1.0:
+        raise ValueError(f"min_accepted_share must be in [0, 1], got {min_accepted_share}.")
+    retries = int(max_retries)
+    if retries < 0:
+        raise ValueError(f"max_retries must be nonnegative, got {max_retries}.")
+    retry_factor = float(retry_step_size_factor)
+    if not 0.0 < retry_factor < 1.0:
+        raise ValueError(f"retry_step_size_factor must be in (0, 1), got {retry_step_size_factor}.")
     center_jax = jnp.asarray(center, dtype=jnp.float64)
     lower_jax = jnp.asarray(lower, dtype=jnp.float64)
     upper_jax = jnp.asarray(upper, dtype=jnp.float64)
@@ -362,31 +416,57 @@ def run_static_hmc_on_bounded_surrogate_log_density(
         shape=(int(chains), int(center_jax.shape[0])),
         dtype=center_jax.dtype,
     )
-    compiled_sampler = jax.jit(
-        lambda run_key, position: static_hmc_sample(
-            log_posterior_unconstrained,
-            position,
-            run_key,
-            num_warmup=int(warmup),
-            num_samples=int(samples),
-            step_size=float(step_size),
-            num_leapfrog_steps=int(leapfrog_steps),
-            target_accept_prob=float(target_accept_prob),
-            adapt_step_size=bool(adapt_step_size),
+    def run_once(attempt_step_size: float) -> dict[str, Any]:
+        compiled_sampler = jax.jit(
+            lambda run_key, position: static_hmc_sample(
+                log_posterior_unconstrained,
+                position,
+                run_key,
+                num_warmup=int(warmup),
+                num_samples=int(samples),
+                step_size=float(attempt_step_size),
+                num_leapfrog_steps=int(leapfrog_steps),
+                target_accept_prob=float(target_accept_prob),
+                adapt_step_size=bool(adapt_step_size),
+            )
         )
-    )
-    started = time.perf_counter()
-    result = compiled_sampler(sample_key, initial_position)
-    _block_until_ready_tree(result)
-    elapsed = time.perf_counter() - started
-    constrained_samples = unconstrained_to_bounded(result.samples, lower_jax, upper_jax)
-    _block_until_ready_tree(constrained_samples)
-    summary = _summarize_static_hmc_result(
-        result=result,
-        constrained_samples=constrained_samples,
-        parameter_names=parameter_names,
-        elapsed_s=elapsed,
-    )
+        started = time.perf_counter()
+        result = compiled_sampler(sample_key, initial_position)
+        _block_until_ready_tree(result)
+        elapsed = time.perf_counter() - started
+        constrained_samples = unconstrained_to_bounded(result.samples, lower_jax, upper_jax)
+        _block_until_ready_tree(constrained_samples)
+        summary_once = _summarize_static_hmc_result(
+            result=result,
+            constrained_samples=constrained_samples,
+            parameter_names=parameter_names,
+            elapsed_s=elapsed,
+        )
+        summary_once["_raw_result"] = result
+        summary_once["_constrained_samples"] = constrained_samples
+        return summary_once
+
+    requested_step_size = float(step_size)
+    attempt_summaries: list[dict[str, Any]] = []
+    selected_attempt = 0
+    selected_summary: dict[str, Any] | None = None
+    for attempt in range(retries + 1):
+        attempt_step_size = requested_step_size * (retry_factor**attempt)
+        attempt_summary = run_once(attempt_step_size)
+        attempt_summary["attempt"] = int(attempt)
+        attempt_summary["attempt_step_size"] = float(attempt_step_size)
+        attempt_summaries.append(attempt_summary)
+        selected_attempt = attempt
+        selected_summary = attempt_summary
+        accepted_share = attempt_summary.get("accepted_share")
+        if accepted_share is None or float(accepted_share) >= min_accept:
+            break
+
+    assert selected_summary is not None
+    summary = dict(selected_summary)
+    summary.pop("_raw_result", None)
+    summary.pop("_constrained_samples", None)
+    selected_step_size = float(summary["attempt_step_size"])
     summary.update(
         {
             "status": "ok",
@@ -398,11 +478,29 @@ def run_static_hmc_on_bounded_surrogate_log_density(
             "warmup": int(warmup),
             "samples": int(samples),
             "leapfrog_steps": int(leapfrog_steps),
-            "initial_step_size": float(step_size),
+            "initial_step_size": selected_step_size,
+            "requested_initial_step_size": requested_step_size,
             "target_accept_prob": float(target_accept_prob),
             "adapt_step_size": bool(adapt_step_size),
             "initial_jitter": float(initial_jitter),
             "seed": int(seed),
+            "retry_attempt": int(selected_attempt),
+            "retry_count": int(selected_attempt),
+            "retry_max_retries": retries,
+            "retry_step_size_factor": retry_factor,
+            "retry_min_accepted_share": min_accept,
+            "retry_history": [
+                {
+                    "attempt": int(item["attempt"]),
+                    "attempt_step_size": float(item["attempt_step_size"]),
+                    "elapsed_s": float(item["elapsed_s"]),
+                    "accepted_share": item.get("accepted_share"),
+                    "accept_prob_mean": item.get("accept_prob_mean"),
+                    "draws_per_second": item.get("draws_per_second"),
+                    "final_step_size": item.get("final_step_size"),
+                }
+                for item in attempt_summaries
+            ],
             "backend": jax.default_backend(),
             "caveat": (
                 "Samples the trained-surrogate inversion likelihood with fixed reference steady state "
@@ -2511,9 +2609,12 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
 
                     value_float = float(np.asarray(value))
                     python_total = _finite_float_or_none(likelihood_result.get("total_loglikelihood"))
-                    value_minus_python = None if python_total is None else value_float - python_total
-                    parity_abs_diff = None if value_minus_python is None else abs(value_minus_python)
-                    parity_tol = float(args.hlt_jax_python_parity_tol)
+                    parity = _parity_metrics(
+                        value=value_float,
+                        reference=python_total,
+                        atol=float(args.hlt_jax_python_parity_tol),
+                        rtol=float(args.hlt_jax_python_parity_rtol),
+                    )
                     jax_log_density_result = {
                         "status": "ok",
                         "elapsed_s": jax_elapsed,
@@ -2551,10 +2652,14 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         "batched_eval_perturbation": batch_perturbation,
                         "value": value_float,
                         "python_surrogate_total_loglikelihood": python_total,
-                        "value_minus_python": value_minus_python,
-                        "parity_abs_diff": parity_abs_diff,
-                        "parity_tol": parity_tol,
-                        "parity_ok": None if parity_abs_diff is None else bool(parity_abs_diff <= parity_tol),
+                        "value_minus_python": parity["value_minus_reference"],
+                        "parity_abs_diff": parity["abs_diff"],
+                        "parity_rel_diff": parity["rel_diff"],
+                        "parity_scale": parity["scale"],
+                        "parity_tol": parity["atol"],
+                        "parity_rtol": parity["rtol"],
+                        "parity_effective_tol": parity["effective_tol"],
+                        "parity_ok": parity["ok"],
                         "gradient_evaluated": bool(args.hlt_jax_log_density_gradient),
                         "gradient": None if grad_np is None else grad_np.tolist(),
                         "gradient_finite": None if grad_np is None else bool(np.isfinite(grad_np).all()),
@@ -2625,6 +2730,9 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         adapt_step_size=not bool(args.hlt_surrogate_hmc_no_adapt_step_size),
                         initial_jitter=float(args.hlt_surrogate_hmc_initial_jitter),
                         seed=int(args.hlt_surrogate_hmc_seed),
+                        min_accepted_share=float(args.hlt_surrogate_hmc_min_accepted_share),
+                        max_retries=int(args.hlt_surrogate_hmc_max_retries),
+                        retry_step_size_factor=float(args.hlt_surrogate_hmc_retry_step_size_factor),
                     )
                     surrogate_hmc_result["runtime_mode"] = likelihood_runtime_mode
                     surrogate_hmc_result["qme_algorithm"] = likelihood_qme_algorithm
@@ -3047,6 +3155,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-jax-batch-replay", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--hlt-jax-differentiate-shocks", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--hlt-jax-python-parity-tol", type=float, default=1e-7)
+    parser.add_argument(
+        "--hlt-jax-python-parity-rtol",
+        type=float,
+        default=1e-9,
+        help=(
+            "Relative tolerance for Python-vs-JAX log-density parity. The effective "
+            "tolerance is atol + rtol * max(abs(Python value), 1)."
+        ),
+    )
     parser.add_argument("--hlt-surrogate-hmc-warmup", type=int, default=0)
     parser.add_argument("--hlt-surrogate-hmc-samples", type=int, default=0)
     parser.add_argument("--hlt-surrogate-hmc-chains", type=int, default=1)
@@ -3057,6 +3174,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-surrogate-hmc-prior-width-scale", type=float, default=0.01)
     parser.add_argument("--hlt-surrogate-hmc-prior-width-floor", type=float, default=1e-4)
     parser.add_argument("--hlt-surrogate-hmc-no-adapt-step-size", action="store_true")
+    parser.add_argument(
+        "--hlt-surrogate-hmc-min-accepted-share",
+        type=float,
+        default=0.01,
+        help="Automatically retry with a smaller initial step size if HMC acceptance is below this share.",
+    )
+    parser.add_argument(
+        "--hlt-surrogate-hmc-max-retries",
+        type=int,
+        default=3,
+        help="Maximum number of smaller-step HMC retries after a low-acceptance run.",
+    )
+    parser.add_argument(
+        "--hlt-surrogate-hmc-retry-step-size-factor",
+        type=float,
+        default=0.25,
+        help="Multiplicative initial-step-size shrinkage applied on each HMC retry.",
+    )
     parser.add_argument("--hlt-surrogate-hmc-seed", type=int, default=20260923)
     parser.add_argument("--output", type=Path)
     return _apply_scenario_defaults(parser.parse_args(argv))

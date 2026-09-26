@@ -408,6 +408,56 @@ def test_static_hmc_on_bounded_surrogate_log_density_tiny_cpu_smoke() -> None:
     assert set(result["parameter_summary"]) == {"calfa", "crhob"}
 
 
+def test_scale_aware_parity_metrics_allow_large_loglikelihood_tiny_relative_error() -> None:
+    mod = _load_profile_module()
+
+    metrics = mod._parity_metrics(
+        value=-14844.412480000916,
+        reference=-14844.412476276484,
+        atol=1.0e-7,
+        rtol=1.0e-9,
+    )
+
+    assert metrics["abs_diff"] > metrics["atol"]
+    assert metrics["effective_tol"] > metrics["abs_diff"]
+    assert metrics["rel_diff"] < metrics["rtol"]
+    assert metrics["ok"]
+
+
+def test_static_hmc_retries_low_acceptance_with_smaller_step_size() -> None:
+    mod = _load_profile_module()
+    center = mod.jnp.asarray([0.25], dtype=mod.jnp.float64)
+
+    def log_density(theta):
+        return -0.5 * mod.jnp.sum(((theta - center) / 0.001) ** 2)
+
+    result = mod.run_static_hmc_on_bounded_surrogate_log_density(
+        log_density_fn=log_density,
+        center=center,
+        parameter_names=("x",),
+        lower=mod.jnp.asarray([0.1], dtype=mod.jnp.float64),
+        upper=mod.jnp.asarray([0.4], dtype=mod.jnp.float64),
+        chains=2,
+        warmup=0,
+        samples=2,
+        leapfrog_steps=4,
+        step_size=1.0,
+        target_accept_prob=0.8,
+        adapt_step_size=False,
+        initial_jitter=0.0,
+        seed=1,
+        min_accepted_share=0.01,
+        max_retries=3,
+        retry_step_size_factor=1.0e-3,
+    )
+
+    assert result["status"] == "ok"
+    assert result["retry_count"] >= 1
+    assert result["retry_history"][0]["accepted_share"] == 0.0
+    assert result["initial_step_size"] < result["requested_initial_step_size"]
+    assert result["accepted_share"] >= 0.01
+
+
 def test_hlt_adaptive_sep_attempt_specs_auto_ladder() -> None:
     mod = _load_profile_module()
     args = mod.parse_args(

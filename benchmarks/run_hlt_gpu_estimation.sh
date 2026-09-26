@@ -162,6 +162,9 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --hlt-surrogate-hmc-initial-jitter "${HMC_INITIAL_JITTER:-0.02}" \
   --hlt-surrogate-hmc-prior-width-scale "${HMC_PRIOR_WIDTH_SCALE:-0.01}" \
   --hlt-surrogate-hmc-prior-width-floor "${HMC_PRIOR_WIDTH_FLOOR:-1e-4}" \
+  --hlt-surrogate-hmc-min-accepted-share "${HMC_MIN_ACCEPTED_SHARE:-0.01}" \
+  --hlt-surrogate-hmc-max-retries "${HMC_MAX_RETRIES:-3}" \
+  --hlt-surrogate-hmc-retry-step-size-factor "${HMC_RETRY_STEP_SIZE_FACTOR:-0.25}" \
   --hlt-surrogate-hmc-seed "${HMC_SEED:-20260923}" \
   --output "$RESULT_ROOT/hlt_${MODE}_surrogate_estimation.json" \
   2>&1 | tee "$RESULT_ROOT/hlt_${MODE}_surrogate_estimation.log"
@@ -194,6 +197,7 @@ print("hmc_status", hmc.get("status"))
 print("hmc_draws", hmc.get("post_warmup_draws"), "hmc_elapsed_s", hmc.get("elapsed_s"))
 print("hmc_draws_per_second", hmc.get("draws_per_second"))
 print("hmc_accepted_share", hmc.get("accepted_share"))
+print("hmc_retry_count", hmc.get("retry_count"), "hmc_initial_step_size", hmc.get("initial_step_size"))
 print("output", path)
 PY
 
