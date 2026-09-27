@@ -5,4 +5,9 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .DS_Store
-
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+benchmarks/results/
+*.snn

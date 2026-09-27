@@ -1,6 +1,12 @@
 from jax import config as _jax_config
+from importlib.metadata import PackageNotFoundError, version as _package_version
 
 _jax_config.update("jax_enable_x64", True)
+
+try:
+    __version__ = _package_version("surrogatenn-dsge")
+except PackageNotFoundError:  # pragma: no cover - editable source-tree fallback
+    __version__ = "0.0+unknown"
 
 from .adaptive_grid import (
     AdaptiveGridConfig,
@@ -338,6 +344,7 @@ from .switching import (
 )
 
 __all__ = [
+    "__version__",
     "DSGETimings",
     "FirstOrderDeterminacyResult",
     "FirstOrderDSGEResult",

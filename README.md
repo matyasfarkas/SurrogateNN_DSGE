@@ -9,6 +9,35 @@ The porting rule for this repository is strict:
 - only expose behavior that has been implemented and tested
 - prefer JAX-native kernels that can later feed NumPyro and GPU execution
 
+## Installation
+
+From a local clone:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+For inference-only use:
+
+```bash
+python -m pip install "surrogatenn-dsge[inference]"
+```
+
+For CUDA-enabled machines, install the matching JAX extra before running GPU
+benchmarks, for example:
+
+```bash
+python -m pip install "surrogatenn-dsge[cuda12,inference]"
+```
+
+Use `cuda13` instead of `cuda12` only when the installed driver/JAX stack
+supports it. After installation, check the runtime with:
+
+```bash
+surrogatenn-dsge info
+surrogatenn-dsge smoke --dtype float64
+```
+
 ## Benchmark profiles
 
 The default profile in `benchmarks/nn_surrogate_validation_profile.toml` is a
