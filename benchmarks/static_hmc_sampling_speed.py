@@ -7,7 +7,7 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -156,6 +156,57 @@ def _diagnostics(
     }
 
 
+def _schur_support_audit(
+    *,
+    args: argparse.Namespace,
+    context: Mapping[str, Any],
+    constrained_samples: Any,
+    log_fn: Callable[[str], None] | None = None,
+) -> dict[str, Any] | None:
+    max_draws = int(args.support_audit_draws)
+    if max_draws <= 0:
+        return None
+    if log_fn is not None:
+        log_fn(
+            "START Schur/QZ support audit "
+            f"for {max_draws} post-warmup draw(s); "
+            f"inner_qme_algorithm={args.qme_algorithm}"
+        )
+    samples_by_chain = _samples_by_chain(
+        constrained_samples,
+        context["parameter_names"],
+    )
+    audit = posterior_speed._support_audit(
+        sdsge=sdsge,
+        model=context["model"],
+        observations=np.asarray(context["observations"], dtype=np.float64),
+        observables=context["observables"],
+        steady_state=np.asarray(context["steady_state"], dtype=np.float64),
+        samples_by_chain=samples_by_chain,
+        parameter_names=context["parameter_names"],
+        base_parameter_values=np.asarray(context["parameter_values"], dtype=np.float64),
+        measurement_error_scale=float(context["measurement_error_scale"]),
+        jitter=float(context["jitter"]),
+        max_draws=max_draws,
+        schur_acceptance_tol=float(args.support_audit_schur_acceptance_tol),
+        failure_value=float(args.failure_value),
+        log_fn=log_fn,
+    )
+    audit = dict(audit)
+    audit["audited_from"] = "static_hmc_post_warmup_draws"
+    audit["inner_qme_algorithm"] = str(args.qme_algorithm)
+    audit["fast_algorithm_under_test"] = "doubling"
+    audit["schur_acceptance_tol"] = float(args.support_audit_schur_acceptance_tol)
+    if log_fn is not None:
+        log_fn(
+            "END Schur/QZ support audit: "
+            f"audited={audit['audited_draws']}, "
+            "doubling_accepts_non_unique="
+            f"{audit['doubling_accepts_non_unique_count']}"
+        )
+    return audit
+
+
 def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     started_at = time.perf_counter()
 
@@ -266,6 +317,12 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             elapsed_s=first_s,
             num_leapfrog_steps=int(args.leapfrog_steps),
         )
+        first_diagnostics["schur_support_audit"] = _schur_support_audit(
+            args=args,
+            context=context,
+            constrained_samples=constrained_first,
+            log_fn=log,
+        )
         steady_times: list[float] = []
         steady_diagnostics = None
         for rep, key in enumerate(steady_keys, start=1):
@@ -289,6 +346,7 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 elapsed_s=elapsed,
                 num_leapfrog_steps=int(args.leapfrog_steps),
             )
+            steady_diagnostics["schur_support_audit"] = None
         step_size_runs.append(
             {
                 "initial_step_size": float(step_size_value),
@@ -322,6 +380,10 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "initial_jitter": float(args.initial_jitter),
             "parameters_are_resolved": bool(args.parameters_are_resolved),
             "check_parameter_bounds": not bool(args.skip_parameter_bounds),
+            "support_audit_draws": int(args.support_audit_draws),
+            "support_audit_schur_acceptance_tol": float(
+                args.support_audit_schur_acceptance_tol
+            ),
             "resolved_parameter_max_abs_diff": context["resolved_parameter_max_abs_diff"],
             "static_equation_rows": (
                 list(context["static_equation_rows"])
@@ -401,6 +463,21 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Skip model bound checks because the transform keeps draws inside priors.",
     )
     parser.add_argument("--failure-value", type=float, default=-1.0e12)
+    parser.add_argument(
+        "--support-audit-draws",
+        type=int,
+        default=0,
+        help=(
+            "After each first static-HMC run, audit up to this many post-warmup "
+            "draws with Schur/QZ determinacy and compare against doubling acceptance."
+        ),
+    )
+    parser.add_argument(
+        "--support-audit-schur-acceptance-tol",
+        type=float,
+        default=1.0e-8,
+        help="Tolerance used by the Schur/QZ determinacy support audit.",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     return parser.parse_args(argv)
