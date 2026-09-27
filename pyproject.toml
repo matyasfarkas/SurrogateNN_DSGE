@@ -80,6 +80,7 @@ packages = ["src/surrogatenn_dsge"]
 [tool.hatch.build.targets.sdist]
 include = [
   "/LICENSE",
+  "/CHANGELOG.md",
   "/README.md",
   "/pyproject.toml",
   "/src",

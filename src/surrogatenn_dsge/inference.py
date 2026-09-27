@@ -146,7 +146,8 @@ def _static_equation_rows_for_jax_qme(
     steady_state: Optional[Sequence[float]],
     static_equation_rows: Optional[Sequence[int]] = None,
 ) -> Optional[tuple[int, ...]]:
-    if qme_algorithm != "schur_gpu" or model.has_obc:
+    del qme_algorithm
+    if model.has_obc:
         return None
     if static_equation_rows is not None:
         return tuple(int(row) for row in static_equation_rows)

@@ -62,12 +62,37 @@ def test_sw07_safe_presets_reference_known_parameter_names() -> None:
     assert set(selected_15).issubset(selected_27)
 
 
+def test_gali3_presets_reference_known_parameter_names() -> None:
+    module = _load_module()
+    model = SimpleNamespace(parameter_names=module.GALI3_ALL_STABLE_PARAMETERS)
+
+    selected_4 = module._select_parameter_names(model, "gali3_policy_4")
+    selected_7 = module._select_parameter_names(model, "gali3_policy_7")
+    selected_all = module._select_parameter_names(model, "gali3_all_stable")
+
+    assert selected_4 == module.GALI3_POLICY_4_PARAMETERS
+    assert selected_7 == module.GALI3_POLICY_7_PARAMETERS
+    assert selected_all == module.GALI3_ALL_STABLE_PARAMETERS
+    assert set(selected_4).issubset(selected_7)
+    assert set(selected_7).issubset(selected_all)
+
+
 def test_prior_interval_keeps_unit_root_like_parameters_inside_unit_bounds() -> None:
     module = _load_module()
 
     lower, upper = module._prior_interval("crhoa", 0.9977, 0.01, 1.0e-4)
 
     assert 0.0 < lower < 0.9977 < upper < 1.0
+
+
+def test_prior_interval_keeps_gali3_policy_parameters_in_safe_support() -> None:
+    module = _load_module()
+
+    phi_lower, phi_upper = module._prior_interval("phi_pi", 1.5, 0.75, 1.0e-4)
+    rho_lower, rho_upper = module._prior_interval("rho_i", 0.7, 0.75, 1.0e-4)
+
+    assert 1.0 < phi_lower < 1.5 < phi_upper
+    assert 0.0 < rho_lower < 0.7 < rho_upper < 1.0
 
 
 def test_parse_args_preflight_only_enables_preflight() -> None:
@@ -77,6 +102,15 @@ def test_parse_args_preflight_only_enables_preflight() -> None:
 
     assert args.preflight_only is True
     assert args.preflight is True
+
+
+def test_parse_args_accepts_gali3_preset() -> None:
+    module = _load_module()
+
+    args = module._parse_args(["--preset", "gali3_nk", "--parameters", "gali3_policy_7"])
+
+    assert args.preset == "gali3_nk"
+    assert args.parameters == "gali3_policy_7"
 
 
 def test_parse_args_accepts_gpu_schur_qme_algorithm() -> None:
@@ -108,3 +142,87 @@ def test_parse_args_accepts_fixed_step_hmc_kernel() -> None:
     assert args.hmc_step_size == 0.25
     assert args.no_adapt_step_size is True
     assert args.no_adapt_mass_matrix is True
+
+
+def test_gali3_payload_solves_and_matches_qme_likelihoods() -> None:
+    module = _load_module()
+    import jax
+    import surrogatenn_dsge as sdsge
+
+    args = SimpleNamespace(
+        model_source=module.DEFAULT_SW07_MODEL_SOURCE_PATH,
+        parameters="sw07_safe_15",
+        periods=8,
+        synthetic_seed=20260927,
+    )
+
+    payload = module._gali3_payload(args, sdsge, jax)
+    model = payload["model"]
+    observations = payload["observations"]
+    observables = payload["observables"]
+    steady_state = payload["steady_state"]
+
+    assert model.name == "Gali_3eq_linear"
+    assert payload["parameter_names"] == module.GALI3_POLICY_4_PARAMETERS
+    assert observations.shape == (3, 8)
+
+    likelihoods = [
+        float(
+            sdsge.kalman_loglikelihood_from_model(
+                model,
+                observations,
+                observables=observables,
+                steady_state=steady_state,
+                qme_algorithm=algorithm,
+                on_failure_loglikelihood=-1.0e12,
+            )
+        )
+        for algorithm in ("schur", "schur_gpu", "doubling")
+    ]
+    assert max(likelihoods) - min(likelihoods) < 1.0e-8
+
+
+def test_gali3_doubling_preflight_gradient_compiles_with_static_rows() -> None:
+    module = _load_module()
+    import jax
+    import jax.numpy as jnp
+    import surrogatenn_dsge as sdsge
+
+    args = SimpleNamespace(
+        model_source=module.DEFAULT_SW07_MODEL_SOURCE_PATH,
+        parameters="gali3_policy_4",
+        periods=8,
+        synthetic_seed=20260927,
+    )
+    payload = module._gali3_payload(args, sdsge, jax)
+    model = payload["model"]
+    steady_state = np.asarray(payload["steady_state"], dtype=np.float64)
+    parameter_values = np.asarray(model.parameter_values, dtype=np.float64)
+    static_equation_rows = model._first_order_static_equation_rows_for_values(
+        steady_state=steady_state,
+        parameter_values=parameter_values,
+    )
+
+    preflight = module._preflight_metrics(
+        jax=jax,
+        jnp=jnp,
+        sdsge=sdsge,
+        model=model,
+        observations=np.asarray(payload["observations"], dtype=np.float64),
+        observables=payload["observables"],
+        steady_state=steady_state,
+        parameter_values=parameter_values,
+        parameter_names=payload["parameter_names"],
+        measurement_error_scale=float(payload["measurement_error_scale"]),
+        jitter=float(payload["jitter"]),
+        qme_algorithm="doubling",
+        static_equation_rows=static_equation_rows,
+        reps=0,
+        failure_value=-1.0e12,
+        parameters_are_resolved=False,
+        check_parameter_bounds=True,
+    )
+
+    assert np.isfinite(preflight["loglikelihood"])
+    assert np.isfinite(preflight["gradient_value"])
+    assert len(preflight["gradient"]) == len(payload["parameter_names"])

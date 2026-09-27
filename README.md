@@ -52,6 +52,12 @@ the dedicated Python-only SW07/HLT JAX + NumPyro run. Use
 `notebooks/colab_surrogate_training_smoke.ipynb` for the small supervised
 surrogate-training GPU smoke test.
 
+For the smallest MacroModelling-style GPU estimation benchmark, use the
+Gali three-equation posterior smoke in
+[docs/gali3_gpu_estimation.md](docs/gali3_gpu_estimation.md). It is a release
+smoke for GPU-based first-order estimation, not a substitute for full HLT/SW07
+nonlinear SEP/residual-surrogate profiling.
+
 ## Current status
 
 Implemented:

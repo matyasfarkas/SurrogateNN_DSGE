@@ -20,6 +20,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PAYLOAD_PATH = ROOT / "benchmarks" / "results" / "test_payloads.json"
 DEFAULT_SW07_MODEL_SOURCE_PATH = ROOT / "benchmarks" / "model_sources" / "Smets_Wouters_2007_HLT.jl"
+DEFAULT_GALI3_MODEL_SOURCE_PATH = ROOT / "benchmarks" / "model_sources" / "Gali_3eq_linear.jl"
 DEFAULT_OUTPUT_PATH = ROOT / "benchmarks" / "results" / "posterior_sampling_speed.json"
 
 TOY_AR2_SOURCE = """
@@ -84,6 +85,35 @@ SW07_SAFE_27_PARAMETERS = (
     "z_epinf",
     "z_eqs",
     "z_ew",
+)
+
+GALI3_POLICY_4_PARAMETERS = (
+    "phi_pi",
+    "phi_x",
+    "rho_i",
+    "rho_u",
+)
+GALI3_POLICY_7_PARAMETERS = (
+    "kappa",
+    "phi_pi",
+    "phi_x",
+    "rho_i",
+    "rho_rn",
+    "rho_u",
+    "sigma",
+)
+GALI3_ALL_STABLE_PARAMETERS = (
+    "beta",
+    "kappa",
+    "phi_pi",
+    "phi_x",
+    "rho_i",
+    "rho_rn",
+    "rho_u",
+    "sigma",
+    "std_i",
+    "std_rn",
+    "std_u",
 )
 
 
@@ -239,6 +269,12 @@ def _select_parameter_names(model: Any, spec: str) -> tuple[str, ...]:
         names = SW07_SAFE_15_PARAMETERS
     elif spec == "sw07_safe_27":
         names = SW07_SAFE_27_PARAMETERS
+    elif spec == "gali3_policy_4":
+        names = GALI3_POLICY_4_PARAMETERS
+    elif spec == "gali3_policy_7":
+        names = GALI3_POLICY_7_PARAMETERS
+    elif spec == "gali3_all_stable":
+        names = GALI3_ALL_STABLE_PARAMETERS
     elif spec == "payload":
         raise ValueError("The 'payload' parameter selector must be expanded by the caller.")
     elif spec == "all":
@@ -256,12 +292,17 @@ def _prior_interval(name: str, center: float, scale: float, floor: float) -> tup
     lower = center - width
     upper = center + width
     bounded_unit_prefixes = ("crho", "cprob", "cind")
-    if name.startswith(bounded_unit_prefixes):
+    if name.startswith(bounded_unit_prefixes) or name in {"rho_i", "rho_rn", "rho_u"}:
         lower = max(1.0e-4, lower)
         upper = min(0.9999, upper)
     if name in {"calfa"}:
         lower = max(1.0e-4, lower)
         upper = min(0.9999, upper)
+    if name == "beta":
+        lower = max(1.0e-4, lower)
+        upper = min(0.9999, upper)
+    if name == "phi_pi":
+        lower = max(1.0001, lower)
     if center > 0.0 and lower <= 0.0 and name not in {"cry"}:
         lower = max(center * 0.5, np.finfo(float).tiny)
     if not lower < center < upper:
@@ -333,6 +374,53 @@ def _toy_payload(sdsge: Any, jax: Any, periods: int, seed: int) -> dict[str, Any
     }
 
 
+def _gali3_payload(args: argparse.Namespace, sdsge: Any, jax: Any) -> dict[str, Any]:
+    model_source_path = (
+        DEFAULT_GALI3_MODEL_SOURCE_PATH
+        if Path(args.model_source) == DEFAULT_SW07_MODEL_SOURCE_PATH
+        else Path(args.model_source)
+    )
+    model = sdsge.parse_macro_model(model_source_path.read_text())
+    steady_state_result = sdsge.solve_steady_state(model)
+    steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+    first_order = sdsge.solve_first_order_model(
+        model,
+        steady_state=steady_state,
+        qme_algorithm="schur",
+    )
+    if not first_order.solution.converged:
+        raise RuntimeError("Could not generate synthetic Gali observations: Schur solve failed.")
+    observables = ("y_obs", "pi_obs", "i_obs")
+    state_space = sdsge.build_linear_state_space_from_model(
+        model,
+        observables,
+        first_order_result=first_order,
+        measurement_error_scale=1.0e-8,
+    )
+    simulation = sdsge.simulate_linear_gaussian_state_space(
+        state_space,
+        key=jax.random.PRNGKey(int(args.synthetic_seed)),
+        num_periods=int(args.periods),
+    )
+    steady_lookup = dict(zip(model.timings.var, steady_state))
+    observations = np.asarray(simulation.observations, dtype=np.float64) + np.asarray(
+        [[steady_lookup[name]] for name in observables],
+        dtype=np.float64,
+    )
+    parameter_spec = (
+        "gali3_policy_4" if args.parameters == "sw07_safe_15" else args.parameters
+    )
+    return {
+        "model": model,
+        "steady_state": steady_state,
+        "observations": observations,
+        "observables": observables,
+        "parameter_names": _select_parameter_names(model, parameter_spec),
+        "measurement_error_scale": 1.0e-8,
+        "jitter": 1.0e-8,
+    }
+
+
 def _sw07_payload(args: argparse.Namespace, sdsge: Any) -> dict[str, Any]:
     case = _load_payload_case(args.payload_path, args.case)
     model_source = args.model_source.read_text()
@@ -390,6 +478,8 @@ def _sw07_payload(args: argparse.Namespace, sdsge: Any) -> dict[str, Any]:
 def _build_dataset(args: argparse.Namespace, sdsge: Any, jax: Any) -> dict[str, Any]:
     if args.preset == "toy_ar2":
         return _toy_payload(sdsge, jax, int(args.periods), int(args.synthetic_seed))
+    if args.preset == "gali3_nk":
+        return _gali3_payload(args, sdsge, jax)
     if args.preset == "sw07_hlt":
         return _sw07_payload(args, sdsge)
     raise ValueError(f"Unsupported preset {args.preset!r}.")
@@ -728,7 +818,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             steady_state=steady_state,
             parameter_values=parameter_values,
         )
-        if (args.qme_algorithm == "schur_gpu" and not model.has_obc)
+        if not model.has_obc
         else None
     )
     _log(
@@ -797,6 +887,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     benchmark_info = {
         "preset": args.preset,
         "case": args.case if args.preset == "sw07_hlt" else None,
+        "model_name": getattr(model, "name", None),
         "periods": int(observations.shape[1]),
         "n_observables": int(observations.shape[0]),
         "n_vars": int(model.timings.nVars),
@@ -963,11 +1054,24 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "for NumPyro/JAX DSGE estimation benchmarks."
         )
     )
-    parser.add_argument("--preset", choices=("toy_ar2", "sw07_hlt"), default="sw07_hlt")
+    parser.add_argument(
+        "--preset",
+        choices=("toy_ar2", "gali3_nk", "sw07_hlt"),
+        default="sw07_hlt",
+    )
     parser.add_argument("--payload-path", type=Path, default=DEFAULT_PAYLOAD_PATH)
     parser.add_argument("--case", default="medium_sw07_hlt")
     parser.add_argument("--model-source", type=Path, default=DEFAULT_SW07_MODEL_SOURCE_PATH)
-    parser.add_argument("--parameters", default="sw07_safe_15")
+    parser.add_argument(
+        "--parameters",
+        default="sw07_safe_15",
+        help=(
+            "Parameter subset. Supports comma-separated names, all, sw07_safe_15, "
+            "sw07_safe_27, gali3_policy_4, gali3_policy_7, and gali3_all_stable. "
+            "For --preset gali3_nk, the default sw07_safe_15 is interpreted as "
+            "gali3_policy_4 for convenience."
+        ),
+    )
     parser.add_argument("--periods", type=int, default=80)
     parser.add_argument("--synthetic-seed", type=int, default=20260712)
     parser.add_argument("--prior-width-scale", type=float, default=0.0025)

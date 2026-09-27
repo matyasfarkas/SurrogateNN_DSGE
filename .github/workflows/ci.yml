@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
+        run: |
+          python -m pip install "jax==0.4.30" "jaxlib==0.4.30"
+          python -m pip install -e ".[dev]"
+      - name: Runtime diagnostics
+        run: |
+          surrogatenn-dsge info --json
+          surrogatenn-dsge smoke --dtype float64 --json
+      - name: Test
+        run: python -m pytest -q
+      - name: Build distributions
+        run: python -m build
+      - name: Check distributions
+        run: python -m twine check dist/*

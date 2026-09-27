@@ -152,7 +152,7 @@ def run_stage_profile(args: argparse.Namespace) -> dict[str, Any]:
             steady_state=steady_state,
             parameter_values=parameter_values,
         )
-        if (args.qme_algorithm == "schur_gpu" and not model.has_obc)
+        if not model.has_obc
         else None
     )
 
