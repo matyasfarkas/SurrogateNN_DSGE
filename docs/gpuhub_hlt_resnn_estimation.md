@@ -1,7 +1,8 @@
 # GPUHUB HLT Nonlinear ResNN Runbook
 
 This runbook prepares the current executable HLT nonlinear SEP/ResNN pipeline
-for GPUHUB. It is a staged paid-run workflow: setup, smoke, pilot, then full.
+for GPUHUB. It is a staged paid-run workflow: setup, smoke, calibration, pilot,
+then full.
 
 Current estimator caveat: the default posterior stage samples the trained
 surrogate inversion likelihood with a fixed reference steady state and fixed
@@ -29,20 +30,21 @@ python scripts/gpuhub_hlt_resnn_runner.py --mode setup --jax-extra auto
 Setup installs the CUDA JAX stack, reinstalls the repo editable, and refuses to
 continue if JAX cannot see the GPU.
 
-## Recommended Full Staged Run
+## Recommended Staged Run
 
-This is the command I would run first on the 6000D or a similarly large GPU:
+Run this first on any paid GPU. It verifies the GPU stack, runs a one-theta
+smoke, then runs a bounded HLT calibration before attempting the larger pilot.
 
 ```bash
 RUN_LABEL="$(date -u +%Y%m%dT%H%M%SZ)"
 RESULTS_BASE="benchmarks/results/gpuhub_hlt_resnn_${RUN_LABEL}"
 mkdir -p "$RESULTS_BASE"
 nohup python scripts/gpuhub_hlt_resnn_runner.py \
-  --mode smoke_pilot_full \
+  --mode smoke_then_calibration \
   --skip-repo-sync \
   --skip-install \
   --jax-extra auto \
-  --hlt-target-builder adaptive-sep \
+  --hlt-target-builder batched-sep \
   --likelihood-runtime-mode fixed-reference \
   --steady-state-mode fixed-reference \
   --env JAX_LOG_DENSITY_REPEAT_EVALS=3 \
@@ -54,8 +56,55 @@ echo $! > "$RESULTS_BASE/runner.pid"
 tail -f "$RESULTS_BASE/master.log"
 ```
 
-The runner stops if `smoke` fails. If `smoke` passes, it runs `pilot`; if
-`pilot` passes, it starts `full`.
+The runner stops if `smoke` fails. If `smoke` passes, it runs `calibration`.
+Only run `pilot` after calibration produces finite targets, JAX parity, and
+nonzero HMC acceptance.
+
+## Known SEP Memory Bottleneck
+
+The current batched SEP target generator forms a dense Newton Jacobian. For HLT
+with `SEP_PERIODS=8`, `SEP_ORDER=1`, sparse Gauss-Hermite nodes, and 66 model
+variables, the stacked SEP unknown count is 9,768. One all-theta batch of 32
+draws tried to allocate a `f64[32,9768,9768]` Jacobian and OOMed on a 32 GB
+5090D. A chunk size of 4 reached about 31 GB VRAM and was still slow in the
+first target-generation period.
+
+The runner therefore defaults `HLT_SEP_BATCH_CHUNK_SIZE=2` whenever
+`HLT_TARGET_BUILDER=batched-sep` and no explicit chunk size is provided. The
+output JSON records a `target_diagnostics.memory_estimate` block with the
+estimated dense Jacobian and rough workspace sizes. Treat this estimate as a
+preflight warning, not an exact allocator forecast.
+
+## Pilot After Calibration
+
+If calibration succeeds, run:
+
+```bash
+RUN_LABEL="pilot_$(date -u +%Y%m%dT%H%M%SZ)"
+RESULTS_BASE="benchmarks/results/gpuhub_hlt_resnn_${RUN_LABEL}"
+mkdir -p "$RESULTS_BASE"
+nohup python scripts/gpuhub_hlt_resnn_runner.py \
+  --mode pilot \
+  --skip-repo-sync \
+  --skip-install \
+  --jax-extra auto \
+  --hlt-target-builder batched-sep \
+  --likelihood-runtime-mode fixed-reference \
+  --steady-state-mode fixed-reference \
+  --env HLT_SEP_BATCH_CHUNK_SIZE=2 \
+  --env JAX_LOG_DENSITY_REPEAT_EVALS=3 \
+  --env JAX_LOG_DENSITY_BATCH_SIZE=64 \
+  --env JAX_LOG_DENSITY_BATCH_REPEAT_EVALS=3 \
+  --run-label "$RUN_LABEL" \
+  > "$RESULTS_BASE/master.log" 2>&1 &
+echo $! > "$RESULTS_BASE/runner.pid"
+tail -f "$RESULTS_BASE/master.log"
+```
+
+Do not use `SEP_LINEAR_SOLVER=normal_equations` or `SEP_LINE_SEARCH=0` as a
+default. A local HLT smoke accepted targets with the robust QR + line-search
+solver, while the aggressive normal-equations/no-line-search shortcut generated
+zero accepted SEP targets.
 
 ## More Aggressive Full Overrides
 
@@ -96,7 +145,7 @@ nvidia-smi
 Each stage writes:
 
 ```text
-benchmarks/results/gpuhub_hlt_resnn_${RUN_LABEL}/{smoke,pilot,full}/
+benchmarks/results/gpuhub_hlt_resnn_${RUN_LABEL}/{smoke,calibration,pilot,full}/
 ```
 
 The most important fields are:
@@ -104,6 +153,7 @@ The most important fields are:
 - `target_status`
 - `accepted_samples`
 - `fallback_share`
+- `target_diagnostics.memory_estimate`
 - `jax_log_density_parity_ok`
 - `hmc_status`
 - `hmc_draws_per_second`
