@@ -141,6 +141,7 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --hlt-parameter-perturbation "${HLT_PARAMETER_PERTURBATION:-1e-6}" \
   --hlt-target-builder "${HLT_TARGET_BUILDER:-adaptive-sep}" \
   --hlt-target-min-stable-periods "${HLT_TARGET_MIN_STABLE_PERIODS:--1}" \
+  --hlt-sep-batch-chunk-size "${HLT_SEP_BATCH_CHUNK_SIZE:-0}" \
   --hlt-sep-order-ladder "${HLT_SEP_ORDER_LADDER:-auto}" \
   --hlt-sep-periods-ladder "${HLT_SEP_PERIODS_LADDER:-auto}" \
   --hlt-sep-max-iter-ladder "${HLT_SEP_MAX_ITER_LADDER:-auto}" \

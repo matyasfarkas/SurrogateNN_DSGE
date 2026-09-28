@@ -1949,6 +1949,7 @@ def _build_batched_hlt_sep_dataset(
     output_names: Sequence[str],
     target_device: Any,
     max_logged_failures: int,
+    batch_chunk_size: int | None = None,
 ) -> tuple[SurrogateDataset, dict[str, Any]]:
     """Build HLT targets with parsed-model batched SEP solves.
 
@@ -2010,6 +2011,10 @@ def _build_batched_hlt_sep_dataset(
         )
     if int(min_stable_periods) < 0:
         raise ValueError(f"min_stable_periods must be nonnegative, got {min_stable_periods}.")
+    if batch_chunk_size is None or int(batch_chunk_size) <= 0:
+        effective_chunk_size = n_theta
+    else:
+        effective_chunk_size = min(int(batch_chunk_size), n_theta)
 
     target_mode_norm = str(target_mode).strip().lower()
     periods = int(shock_array.shape[2])
@@ -2029,29 +2034,40 @@ def _build_batched_hlt_sep_dataset(
             failure_log.append(row)
 
     for period in range(periods):
-        deterministic = np.zeros((n_theta, int(config.periods), model.timings.nExo), dtype=np.float64)
-        if config.periods > 0:
-            deterministic[:, 0, :] = shock_array[:, :, period]
-            deterministic[~active, 0, :] = 0.0
-        solve_context = nullcontext() if target_device is None else jax.default_device(target_device)
-        solve_started = time.perf_counter()
-        with solve_context:
-            batched_sep = solve_batched_stochastic_extended_path_model(
-                model,
-                parameter_values=theta_parameter_matrix,
-                steady_state=steady_matrix,
-                initial_state=current_states,
-                terminal_state=steady_matrix,
-                config=config,
-                deterministic_shocks=deterministic,
-            )
-        _block_until_ready_tree(batched_sep)
-        batched_calls += 1
-        solve_elapsed = time.perf_counter() - solve_started
+        accepted = np.zeros((n_theta,), dtype=bool)
+        residual_norm = np.full((n_theta,), math.inf, dtype=np.float64)
+        next_states = current_states.copy()
+        solve_elapsed = 0.0
+        period_chunk_calls = 0
+        for start in range(0, n_theta, effective_chunk_size):
+            end = min(start + effective_chunk_size, n_theta)
+            chunk = slice(start, end)
+            if not bool(np.any(active[chunk])):
+                continue
+            deterministic = np.zeros((end - start, int(config.periods), model.timings.nExo), dtype=np.float64)
+            if config.periods > 0:
+                deterministic[:, 0, :] = shock_array[chunk, :, period]
+                deterministic[~active[chunk], 0, :] = 0.0
+            solve_context = nullcontext() if target_device is None else jax.default_device(target_device)
+            solve_started = time.perf_counter()
+            with solve_context:
+                batched_sep = solve_batched_stochastic_extended_path_model(
+                    model,
+                    parameter_values=theta_parameter_matrix[chunk],
+                    steady_state=steady_matrix[chunk],
+                    initial_state=current_states[chunk],
+                    terminal_state=steady_matrix[chunk],
+                    config=config,
+                    deterministic_shocks=deterministic,
+                )
+            _block_until_ready_tree(batched_sep)
+            batched_calls += 1
+            period_chunk_calls += 1
+            solve_elapsed += time.perf_counter() - solve_started
 
-        accepted = np.asarray(batched_sep.solution.accepted, dtype=bool)
-        residual_norm = np.asarray(batched_sep.solution.residual_norm, dtype=np.float64)
-        next_states = np.asarray(batched_sep.solution.mean_path[:, :, 1], dtype=np.float64)
+            accepted[chunk] = np.asarray(batched_sep.solution.accepted, dtype=bool)
+            residual_norm[chunk] = np.asarray(batched_sep.solution.residual_norm, dtype=np.float64)
+            next_states[chunk] = np.asarray(batched_sep.solution.mean_path[:, :, 1], dtype=np.float64)
         finite_next = np.isfinite(next_states).all(axis=1)
         accepted_this = active & accepted & finite_next
 
@@ -2105,6 +2121,7 @@ def _build_batched_hlt_sep_dataset(
         _progress(
             f"batched HLT SEP period {period}/{periods - 1} "
             f"accepted={int(np.count_nonzero(accepted_this))}/{n_theta} "
+            f"chunks={period_chunk_calls} chunk_size={effective_chunk_size} "
             f"elapsed={solve_elapsed:.3f}s"
         )
 
@@ -2132,6 +2149,7 @@ def _build_batched_hlt_sep_dataset(
             "builder": "batched_sep",
             "status": "error",
             "batched_calls": int(batched_calls),
+            "batch_chunk_size": int(effective_chunk_size),
             "failure_log": failure_log,
             "sep_config": {
                 "periods": int(config.periods),
@@ -2141,6 +2159,7 @@ def _build_batched_hlt_sep_dataset(
                 "max_iter": int(config.max_iter),
                 "tol": float(config.tol),
                 "accept_tol": None if config.accept_tol is None else float(config.accept_tol),
+                "batch_chunk_size": int(effective_chunk_size),
             },
         }
         raise ValueError("No batched SEP surrogate-dataset samples were generated. Diagnostics: " + json.dumps(_jsonable(diagnostics)))
@@ -2166,6 +2185,7 @@ def _build_batched_hlt_sep_dataset(
         "builder": "batched_sep",
         "status": "ok",
         "batched_calls": int(batched_calls),
+        "batch_chunk_size": int(effective_chunk_size),
         "attempted_count": int(n_theta * periods),
         "accepted_samples": int(dataset.n_samples),
         "fallback_samples": 0,
@@ -2186,10 +2206,12 @@ def _build_batched_hlt_sep_dataset(
             "max_iter": int(config.max_iter),
             "tol": float(config.tol),
             "accept_tol": None if config.accept_tol is None else float(config.accept_tol),
+            "batch_chunk_size": int(effective_chunk_size),
         },
         "caveat": (
             "Batched SEP target generation uses one fixed SEP configuration and "
-            "does not run the adaptive fallback ladder or auxiliary OBC-shock reinjection."
+            "does not run the adaptive fallback ladder or auxiliary OBC-shock reinjection. "
+            "It may be chunked by theta draw to fit dense SEP Jacobians into GPU memory."
         ),
     }
     return dataset, diagnostics
@@ -2567,6 +2589,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             output_names=output_names,
             target_device=target_device,
             max_logged_failures=int(args.hlt_target_max_logged_failures),
+            batch_chunk_size=int(args.hlt_sep_batch_chunk_size),
         )
         dataset_summary = summarize_surrogate_dataset(dataset)
         successful_groups = np.unique(dataset.theta_ids).size
@@ -3392,6 +3415,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Minimum stable prefix length needed to keep a theta draw. "
             "Use -1 to require the requested HLT period count."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-sep-batch-chunk-size",
+        type=int,
+        default=0,
+        help=(
+            "For --hlt-target-builder batched-sep, split theta draws into GPU "
+            "microbatches of this size before forming dense SEP Jacobians. "
+            "Use 0 to solve all theta draws in one batch."
         ),
     )
     parser.add_argument(

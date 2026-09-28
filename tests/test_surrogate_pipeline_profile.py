@@ -656,6 +656,26 @@ def test_batched_hlt_sep_dataset_matches_single_config_adaptive_builder() -> Non
         target_device=None,
         max_logged_failures=10,
     )
+    chunked, chunked_diag = mod._build_batched_hlt_sep_dataset(
+        model=model,
+        parameter_values_by_theta=theta.T,
+        theta_features_by_theta=theta.T,
+        steady_states_by_theta=steady_states,
+        state_transition_by_theta=np.stack([runtime["state_transition"] for runtime in runtimes], axis=0),
+        shock_impact_by_theta=np.stack([runtime["shock_impact"] for runtime in runtimes], axis=0),
+        initial_states=initial_states,
+        shocks=shocks,
+        config=config,
+        target_mode="fom_full",
+        min_stable_periods=2,
+        observable_idx=(0,),
+        state_idx=(0,),
+        input_names=("y", "u", *parameter_names),
+        output_names=("y_obs", "y[1]"),
+        target_device=None,
+        max_logged_failures=10,
+        batch_chunk_size=1,
+    )
 
     def sorted_columns(dataset):
         order = np.lexsort((dataset.period_ids, dataset.theta_ids))
@@ -663,9 +683,15 @@ def test_batched_hlt_sep_dataset_matches_single_config_adaptive_builder() -> Non
 
     assert adaptive_diag["status"] == "ok"
     assert batched_diag["status"] == "ok"
+    assert chunked_diag["status"] == "ok"
     assert batched_diag["builder"] == "batched_sep"
     assert batched_diag["batched_calls"] == shocks.shape[2]
+    assert chunked_diag["batch_chunk_size"] == 1
+    assert chunked_diag["batched_calls"] == shocks.shape[2] * theta.shape[1]
     np.testing.assert_array_equal(adaptive.theta_ids, np.asarray([0, 0, 1, 1]))
     np.testing.assert_array_equal(batched.theta_ids, np.asarray([0, 0, 1, 1]))
+    np.testing.assert_array_equal(chunked.theta_ids, np.asarray([0, 0, 1, 1]))
     for left, right in zip(sorted_columns(adaptive), sorted_columns(batched)):
+        np.testing.assert_allclose(left, right, rtol=1e-9, atol=1e-10)
+    for left, right in zip(sorted_columns(batched), sorted_columns(chunked)):
         np.testing.assert_allclose(left, right, rtol=1e-9, atol=1e-10)
