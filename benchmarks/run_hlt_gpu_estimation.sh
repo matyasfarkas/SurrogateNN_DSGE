@@ -108,6 +108,19 @@ case "$MODE" in
     ;;
 esac
 
+HLT_TARGET_BUILDER_EFFECTIVE="${HLT_TARGET_BUILDER:-adaptive-sep}"
+if [[ -z "${HLT_SEP_BATCH_CHUNK_SIZE:-}" ]]; then
+  if [[ "$HLT_TARGET_BUILDER_EFFECTIVE" == "batched-sep" ]]; then
+    # HLT horizon-8/order-1 forms large dense SEP Jacobians; one all-theta
+    # batch OOMs on 32GB GPUs, while small microbatches preserve parity.
+    HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE="2"
+  else
+    HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE="0"
+  fi
+else
+  HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE="$HLT_SEP_BATCH_CHUNK_SIZE"
+fi
+
 mkdir -p "$RESULT_ROOT"
 
 if [[ "$INSTALL_DEPS" == "1" ]]; then
@@ -145,9 +158,9 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --hlt-theta-draws "$HLT_THETA_DRAWS" \
   --hlt-periods "$HLT_PERIODS" \
   --hlt-parameter-perturbation "${HLT_PARAMETER_PERTURBATION:-1e-6}" \
-  --hlt-target-builder "${HLT_TARGET_BUILDER:-adaptive-sep}" \
+  --hlt-target-builder "$HLT_TARGET_BUILDER_EFFECTIVE" \
   --hlt-target-min-stable-periods "${HLT_TARGET_MIN_STABLE_PERIODS:--1}" \
-  --hlt-sep-batch-chunk-size "${HLT_SEP_BATCH_CHUNK_SIZE:-0}" \
+  --hlt-sep-batch-chunk-size "$HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE" \
   --hlt-sep-order-ladder "${HLT_SEP_ORDER_LADDER:-auto}" \
   --hlt-sep-periods-ladder "${HLT_SEP_PERIODS_LADDER:-auto}" \
   --hlt-sep-max-iter-ladder "${HLT_SEP_MAX_ITER_LADDER:-auto}" \
