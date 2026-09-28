@@ -199,6 +199,80 @@ def _progress(message: str) -> None:
     print(f"[profile] {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {message}", flush=True)
 
 
+def _sep_group_counts_for_estimate(
+    *,
+    periods: int,
+    branching_order: int,
+    nnodes: int,
+    shock_dim: int,
+    sparse_tree: bool,
+) -> tuple[int, ...]:
+    if shock_dim <= 0:
+        num_nodes = 1
+    elif sparse_tree:
+        num_nodes = int(shock_dim) * int(nnodes)
+    else:
+        num_nodes = int(nnodes) ** int(shock_dim)
+    counts = [1]
+    for t in range(1, int(periods) + 1):
+        if sparse_tree:
+            if int(branching_order) <= 0 or num_nodes <= 1:
+                counts.append(1)
+            else:
+                branch_levels = min(max(t - 1, 0), int(branching_order))
+                counts.append(1 + (num_nodes - 1) * branch_levels)
+        elif t <= int(branching_order):
+            counts.append(num_nodes**t)
+        else:
+            counts.append(num_nodes ** int(branching_order))
+    return tuple(int(value) for value in counts)
+
+
+def _estimate_batched_sep_dense_memory(
+    *,
+    config: SEPConfig,
+    state_dim: int,
+    shock_dim: int,
+    total_batch_size: int,
+    chunk_size: int,
+) -> dict[str, Any]:
+    """Estimate dense SEP Jacobian size before XLA compilation.
+
+    The current batched SEP Newton path explicitly forms a dense per-theta
+    Jacobian. QR/autotuning can require much more memory than the raw Jacobian,
+    so the workspace estimate is intentionally conservative and diagnostic only.
+    """
+
+    effective_chunk_size = max(1, min(int(chunk_size), int(total_batch_size)))
+    group_counts = _sep_group_counts_for_estimate(
+        periods=int(config.periods),
+        branching_order=int(config.branching_order),
+        nnodes=int(config.nnodes),
+        shock_dim=int(shock_dim),
+        sparse_tree=bool(config.sparse_tree),
+    )
+    stacked_unknowns = int(sum(group_counts[1:]) * int(state_dim))
+    bytes_per_float = 8
+    gib = 1024.0**3
+    per_theta_dense_gib = (stacked_unknowns * stacked_unknowns * bytes_per_float) / gib
+    chunk_dense_gib = per_theta_dense_gib * effective_chunk_size
+    all_theta_dense_gib = per_theta_dense_gib * int(total_batch_size)
+    workspace_multiplier = 12.0 if str(config.linear_solver) == "qr" else 4.0
+    return {
+        "group_counts": list(group_counts),
+        "stacked_unknowns": int(stacked_unknowns),
+        "total_batch_size": int(total_batch_size),
+        "chunk_size": int(effective_chunk_size),
+        "per_theta_dense_jacobian_gib": float(per_theta_dense_gib),
+        "chunk_dense_jacobian_gib": float(chunk_dense_gib),
+        "all_theta_dense_jacobian_gib": float(all_theta_dense_gib),
+        "rough_chunk_workspace_gib": float(chunk_dense_gib * workspace_multiplier),
+        "rough_all_theta_workspace_gib": float(all_theta_dense_gib * workspace_multiplier),
+        "workspace_multiplier": float(workspace_multiplier),
+        "linear_solver": str(config.linear_solver),
+    }
+
+
 def _unique_preserve_order(values: Sequence[Any]) -> tuple[Any, ...]:
     out: list[Any] = []
     for value in values:
@@ -2015,6 +2089,21 @@ def _build_batched_hlt_sep_dataset(
         effective_chunk_size = n_theta
     else:
         effective_chunk_size = min(int(batch_chunk_size), n_theta)
+    memory_estimate = _estimate_batched_sep_dense_memory(
+        config=config,
+        state_dim=int(model.timings.nVars),
+        shock_dim=int(model.timings.nExo),
+        total_batch_size=n_theta,
+        chunk_size=effective_chunk_size,
+    )
+    _progress(
+        "batched HLT SEP dense-memory estimate "
+        f"unknowns={memory_estimate['stacked_unknowns']} "
+        f"chunk={effective_chunk_size}/{n_theta} "
+        f"dense_chunk_gib={memory_estimate['chunk_dense_jacobian_gib']:.3f} "
+        f"rough_workspace_gib={memory_estimate['rough_chunk_workspace_gib']:.3f} "
+        f"solver={config.linear_solver}"
+    )
 
     target_mode_norm = str(target_mode).strip().lower()
     periods = int(shock_array.shape[2])
@@ -2150,6 +2239,7 @@ def _build_batched_hlt_sep_dataset(
             "status": "error",
             "batched_calls": int(batched_calls),
             "batch_chunk_size": int(effective_chunk_size),
+            "memory_estimate": memory_estimate,
             "failure_log": failure_log,
             "sep_config": {
                 "periods": int(config.periods),
@@ -2186,6 +2276,7 @@ def _build_batched_hlt_sep_dataset(
         "status": "ok",
         "batched_calls": int(batched_calls),
         "batch_chunk_size": int(effective_chunk_size),
+        "memory_estimate": memory_estimate,
         "attempted_count": int(n_theta * periods),
         "accepted_samples": int(dataset.n_samples),
         "fallback_samples": 0,

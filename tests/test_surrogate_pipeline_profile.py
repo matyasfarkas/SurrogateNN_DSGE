@@ -493,6 +493,31 @@ def test_hlt_adaptive_sep_attempt_specs_auto_ladder() -> None:
     ]
 
 
+def test_hlt_batched_sep_dense_memory_estimate_matches_hlt_shape() -> None:
+    mod = _load_profile_module()
+
+    estimate = mod._estimate_batched_sep_dense_memory(
+        config=mod.SEPConfig(
+            periods=8,
+            branching_order=1,
+            nnodes=3,
+            sparse_tree=True,
+            linear_solver="qr",
+        ),
+        state_dim=66,
+        shock_dim=7,
+        total_batch_size=32,
+        chunk_size=4,
+    )
+
+    assert estimate["group_counts"] == [1, 1, 21, 21, 21, 21, 21, 21, 21]
+    assert estimate["stacked_unknowns"] == 9768
+    assert estimate["chunk_size"] == 4
+    assert estimate["chunk_dense_jacobian_gib"] > 2.8
+    assert estimate["all_theta_dense_jacobian_gib"] > 22.0
+    assert estimate["rough_chunk_workspace_gib"] > 30.0
+
+
 def test_adaptive_hlt_sep_dataset_keeps_multi_theta_fallback_targets() -> None:
     mod = _load_profile_module()
     theta = np.asarray([[1.0, 2.0]], dtype=np.float64)
@@ -686,8 +711,10 @@ def test_batched_hlt_sep_dataset_matches_single_config_adaptive_builder() -> Non
     assert chunked_diag["status"] == "ok"
     assert batched_diag["builder"] == "batched_sep"
     assert batched_diag["batched_calls"] == shocks.shape[2]
+    assert batched_diag["memory_estimate"]["stacked_unknowns"] == 6
     assert chunked_diag["batch_chunk_size"] == 1
     assert chunked_diag["batched_calls"] == shocks.shape[2] * theta.shape[1]
+    assert chunked_diag["memory_estimate"]["chunk_size"] == 1
     np.testing.assert_array_equal(adaptive.theta_ids, np.asarray([0, 0, 1, 1]))
     np.testing.assert_array_equal(batched.theta_ids, np.asarray([0, 0, 1, 1]))
     np.testing.assert_array_equal(chunked.theta_ids, np.asarray([0, 0, 1, 1]))
