@@ -20,7 +20,7 @@ from typing import Any, Sequence
 
 
 DEFAULT_REPO_URL = "https://github.com/matyasfarkas/SurrogateNN_DSGE.git"
-DEFAULT_BRANCH = "codex/colab-jax-gemini-profile"
+DEFAULT_BRANCH = "codex/nonlinear-sep-surrogate-port"
 DEFAULT_DATA_ROOT = (
     Path(os.environ["GPUHUB_DATA_DIR"])
     if "GPUHUB_DATA_DIR" in os.environ

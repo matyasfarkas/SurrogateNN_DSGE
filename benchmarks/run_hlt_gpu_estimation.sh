@@ -26,6 +26,18 @@ export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_command_buffer=''}"
 
+if [[ "${JAX_LOG_DENSITY_GRADIENT:-1}" == "1" ]]; then
+  JAX_LOG_DENSITY_GRADIENT_FLAG="--hlt-jax-log-density-gradient"
+else
+  JAX_LOG_DENSITY_GRADIENT_FLAG="--no-hlt-jax-log-density-gradient"
+fi
+
+if [[ "${DIFFERENTIATE_SHOCKS:-0}" == "1" ]]; then
+  DIFFERENTIATE_SHOCKS_FLAG="--hlt-jax-differentiate-shocks"
+else
+  DIFFERENTIATE_SHOCKS_FLAG="--no-hlt-jax-differentiate-shocks"
+fi
+
 case "$MODE" in
   smoke)
     HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-payload}"
@@ -121,7 +133,9 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --device "$DEVICE" $REQUIRE_GPU_FLAG \
   --hlt-case-name medium_sw07_hlt \
   --hlt-parameter-set "$HLT_PARAMETER_SET" \
-  --hlt-steady-state-mode fixed-reference \
+  --hlt-steady-state-mode "${HLT_STEADY_STATE_MODE:-fixed-reference}" \
+  --hlt-steady-state-tol "${HLT_STEADY_STATE_TOL:-1e-10}" \
+  --hlt-steady-state-max-iter "${HLT_STEADY_STATE_MAX_ITER:-100}" \
   --hlt-theta-draws "$HLT_THETA_DRAWS" \
   --hlt-periods "$HLT_PERIODS" \
   --hlt-parameter-perturbation "${HLT_PARAMETER_PERTURBATION:-1e-6}" \
@@ -146,13 +160,22 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --split-by-theta \
   --learning-rate "${LEARNING_RATE:-1e-3}" \
   --hlt-likelihood-periods "$LIKELIHOOD_PERIODS" \
+  --hlt-likelihood-runtime-mode "${LIKELIHOOD_RUNTIME_MODE:-fixed-reference}" \
+  --hlt-likelihood-qme-algorithm "${LIKELIHOOD_QME_ALGORITHM:-schur}" \
+  --hlt-likelihood-static-rows-mode "${LIKELIHOOD_STATIC_ROWS_MODE:-reference}" \
   --hlt-surrogate-inversion-maxit "${INVERSION_MAXIT:-4}" \
   --hlt-surrogate-inversion-tol "${INVERSION_TOL:-1e-5}" \
   --hlt-surrogate-inversion-lambda "${INVERSION_LAMBDA:-1e-4}" \
   --hlt-jax-log-density-smoke \
+  "$JAX_LOG_DENSITY_GRADIENT_FLAG" \
+  --hlt-jax-log-density-repeat-evals "${JAX_LOG_DENSITY_REPEAT_EVALS:-0}" \
+  --hlt-jax-log-density-repeat-perturbation "${JAX_LOG_DENSITY_REPEAT_PERTURBATION:-0.0}" \
+  --hlt-jax-log-density-batch-size "${JAX_LOG_DENSITY_BATCH_SIZE:-0}" \
+  --hlt-jax-log-density-batch-repeat-evals "${JAX_LOG_DENSITY_BATCH_REPEAT_EVALS:-0}" \
+  --hlt-jax-log-density-batch-perturbation "${JAX_LOG_DENSITY_BATCH_PERTURBATION:-0.0}" \
   --hlt-jax-shock-solver "${SHOCK_SOLVER:-rom}" \
   --hlt-jax-batch-replay \
-  --no-hlt-jax-differentiate-shocks \
+  "$DIFFERENTIATE_SHOCKS_FLAG" \
   --hlt-surrogate-hmc-warmup "$HMC_WARMUP" \
   --hlt-surrogate-hmc-samples "$HMC_SAMPLES" \
   --hlt-surrogate-hmc-chains "$HMC_CHAINS" \
