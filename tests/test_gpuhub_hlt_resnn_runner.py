@@ -26,6 +26,8 @@ def test_stage_sequence_runs_smoke_before_full() -> None:
     module = _load_module()
 
     assert module.stage_sequence("setup") == ()
+    assert module.stage_sequence("calibration") == ("calibration",)
+    assert module.stage_sequence("smoke_then_calibration") == ("smoke", "calibration")
     assert module.stage_sequence("smoke_then_full") == ("smoke", "full")
     assert module.stage_sequence("smoke_pilot_full") == ("smoke", "pilot", "full")
 

@@ -64,6 +64,25 @@ case "$MODE" in
     HMC_LEAPFROG_STEPS="${HMC_LEAPFROG_STEPS:-1}"
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.001}"
     ;;
+  calibration)
+    HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-payload}"
+    HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-8}"
+    HLT_PERIODS="${HLT_PERIODS:-2}"
+    SEP_PERIODS="${SEP_PERIODS:-2}"
+    SEP_ORDER="${SEP_ORDER:-1}"
+    SEP_NNODES="${SEP_NNODES:-3}"
+    SEP_MAX_ITER="${SEP_MAX_ITER:-6}"
+    EPOCHS="${EPOCHS:-10}"
+    HIDDEN="${HIDDEN:-48}"
+    BLOCKS="${BLOCKS:-1}"
+    TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-128}"
+    LIKELIHOOD_PERIODS="${LIKELIHOOD_PERIODS:-4}"
+    HMC_WARMUP="${HMC_WARMUP:-8}"
+    HMC_SAMPLES="${HMC_SAMPLES:-16}"
+    HMC_CHAINS="${HMC_CHAINS:-4}"
+    HMC_LEAPFROG_STEPS="${HMC_LEAPFROG_STEPS:-2}"
+    HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.003}"
+    ;;
   pilot)
     HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-payload}"
     HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-32}"
@@ -103,7 +122,7 @@ case "$MODE" in
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.003}"
     ;;
   *)
-    echo "Unknown MODE=$MODE. Use smoke, pilot, or full." >&2
+    echo "Unknown MODE=$MODE. Use smoke, calibration, pilot, or full." >&2
     exit 2
     ;;
 esac
