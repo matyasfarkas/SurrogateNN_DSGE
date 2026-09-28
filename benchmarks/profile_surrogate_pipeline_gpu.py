@@ -2270,6 +2270,8 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         max_iter=int(args.sep_max_iter),
         tol=float(args.sep_tol),
         accept_tol=float(args.sep_accept_tol),
+        linear_solver=str(args.sep_linear_solver),
+        line_search=bool(args.sep_line_search),
     )
     steady_state_mode = str(args.hlt_steady_state_mode).strip().lower()
     if steady_state_mode not in {"fixed-reference", "solve", "solve-or-reference"}:
@@ -3362,6 +3364,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sep-max-iter", type=int, default=8)
     parser.add_argument("--sep-tol", type=float, default=1e-8)
     parser.add_argument("--sep-accept-tol", type=float, default=1e-5)
+    parser.add_argument("--sep-linear-solver", choices=("qr", "normal_equations"), default="qr")
+    parser.add_argument("--sep-line-search", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--sep-reps", type=int, default=3)
     parser.add_argument("--sep-batch-size", type=int, default=64)
     parser.add_argument(

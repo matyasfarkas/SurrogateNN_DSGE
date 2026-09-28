@@ -38,6 +38,12 @@ else
   DIFFERENTIATE_SHOCKS_FLAG="--no-hlt-jax-differentiate-shocks"
 fi
 
+if [[ "${SEP_LINE_SEARCH:-1}" == "1" ]]; then
+  SEP_LINE_SEARCH_FLAG="--sep-line-search"
+else
+  SEP_LINE_SEARCH_FLAG="--no-sep-line-search"
+fi
+
 case "$MODE" in
   smoke)
     HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-payload}"
@@ -153,6 +159,8 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --sep-max-iter "$SEP_MAX_ITER" \
   --sep-tol "${SEP_TOL:-1e-8}" \
   --sep-accept-tol "${SEP_ACCEPT_TOL:-1e-5}" \
+  --sep-linear-solver "${SEP_LINEAR_SOLVER:-qr}" \
+  "$SEP_LINE_SEARCH_FLAG" \
   --epochs "$EPOCHS" \
   --hidden "$HIDDEN" \
   --blocks "$BLOCKS" \
