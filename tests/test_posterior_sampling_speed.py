@@ -121,6 +121,16 @@ def test_parse_args_accepts_gpu_schur_qme_algorithm() -> None:
     assert args.qme_algorithm == "schur_gpu"
 
 
+def test_parse_args_accepts_cuda_platform_aliases() -> None:
+    module = _load_module()
+
+    gpu_args = module._parse_args(["--platform", "gpu"])
+    cuda_args = module._parse_args(["--platform", "cuda"])
+
+    assert module._jax_platform_name(gpu_args.platform) == "cuda"
+    assert module._jax_platform_name(cuda_args.platform) == "cuda"
+
+
 def test_parse_args_accepts_fixed_step_hmc_kernel() -> None:
     module = _load_module()
 

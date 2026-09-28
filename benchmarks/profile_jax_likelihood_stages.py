@@ -397,7 +397,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--periods", type=int, default=80)
     parser.add_argument("--synthetic-seed", type=int, default=20260712)
     parser.add_argument("--dtype", choices=("float64", "float32"), default="float64")
-    parser.add_argument("--platform", choices=("cpu", "gpu"), default=None)
+    parser.add_argument("--platform", choices=("cpu", "gpu", "cuda"), default=None)
     parser.add_argument("--force-gpu", action="store_true")
     parser.add_argument(
         "--qme-algorithm",

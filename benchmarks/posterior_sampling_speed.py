@@ -210,9 +210,16 @@ def _logged_stage(args: argparse.Namespace, name: str):
             thread.join(timeout=0.1)
 
 
+def _jax_platform_name(platform: str | None) -> str | None:
+    """Map user-facing backend aliases to JAX backend names."""
+    if platform == "gpu":
+        return "cuda"
+    return platform
+
+
 def _configure_runtime(args: argparse.Namespace) -> tuple[Any, Any, Any, Any]:
     if args.platform:
-        os.environ["JAX_PLATFORM_NAME"] = args.platform
+        os.environ["JAX_PLATFORM_NAME"] = _jax_platform_name(args.platform)
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 
     import jax
@@ -1110,7 +1117,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host-device-count", type=int, default=None)
     parser.add_argument("--seed", type=int, default=20260908)
     parser.add_argument("--dtype", choices=("float64", "float32"), default="float64")
-    parser.add_argument("--platform", choices=("cpu", "gpu"), default=None)
+    parser.add_argument("--platform", choices=("cpu", "gpu", "cuda"), default=None)
     parser.add_argument("--force-gpu", action="store_true")
     parser.add_argument(
         "--qme-algorithm",

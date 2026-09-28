@@ -378,7 +378,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--include-gradient", action="store_true")
     parser.add_argument("--gradient-reps", type=int, default=3)
     parser.add_argument("--dtype", choices=("float64", "float32"), default="float64")
-    parser.add_argument("--platform", choices=("cpu", "gpu"), default=None)
+    parser.add_argument("--platform", choices=("cpu", "gpu", "cuda"), default=None)
     parser.add_argument("--force-gpu", action="store_true")
     parser.add_argument(
         "--qme-algorithm",

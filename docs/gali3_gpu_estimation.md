@@ -60,8 +60,8 @@ python benchmarks/posterior_sampling_speed.py \
   --samples 128 \
   --chains 32 \
   --chain-method vectorized \
-  --dtype float32 \
-  --platform gpu \
+  --dtype float64 \
+  --platform cuda \
   --force-gpu \
   --qme-algorithm doubling \
   --preflight \
@@ -74,6 +74,17 @@ python benchmarks/posterior_sampling_speed.py \
 Use `--qme-algorithm doubling` for the fully JAX-native fast path. Keep
 `--schur-support-draws` positive so the output reports whether any doubling
 draws are accepted outside Schur/QZ unique-stable support.
+
+The Gali smoke currently defaults to float64 on GPU because the synthetic data
+are generated from a Schur-certified first-order solve. Float32 can be used for
+downstream kernels after adding a separate certified-data setup path, but it is
+not the release smoke setting.
+
+On a GPUHUB NVIDIA RTX 6000D instance with JAX 0.11.2/CUDA 13.2, the 32-period,
+four-parameter Gali HMC smoke passed Schur support auditing at 8, 32, 64, 128,
+256, and 512 vectorized chains. Throughput increased from 7.6 draws/s at 8
+chains to 355.3 draws/s at 512 chains, with min ESS/s increasing from 15.9 to
+896.5.
 
 ## Sufficiency
 
