@@ -1,14 +1,15 @@
 # GPUHUB HLT Nonlinear ResNN Runbook
 
 This runbook prepares the current executable HLT nonlinear SEP/ResNN pipeline
-for GPUHUB. It is a staged paid-run workflow: setup, smoke, calibration, pilot,
-then full.
+for GPUHUB. It is a staged paid-run workflow: setup, smoke, calibration,
+pilot, estimation-pilot, then `final_nonlinear`.
 
-Current estimator caveat: the default posterior stage samples the trained
-surrogate inversion likelihood with a fixed reference steady state and fixed
-first-order ROM matrices. Use `--likelihood-runtime-mode full-jax` only as an
-experimental diagnostic because full parameter-specific SS/ROM differentiation
-is still compile-heavy.
+Important distinction: `MODE=estimation_pilot` is a speed/stress run and can use
+fixed-reference shortcuts. `MODE=final_nonlinear` is the correctness-first run:
+it samples the Julia-comparable narrow 18-parameter support, solves
+parameter-specific steady states when possible, requires full SEP target paths,
+trains only on fully successful theta draws, evaluates the full-JAX SS/ROM
+surrogate likelihood, and rejects the run if any quality gate fails.
 
 ## First Command After Restart
 
@@ -69,11 +70,14 @@ draws tried to allocate a `f64[32,9768,9768]` Jacobian and OOMed on a 32 GB
 5090D. A chunk size of 4 reached about 31 GB VRAM and was still slow in the
 first target-generation period.
 
-The runner therefore defaults `HLT_SEP_BATCH_CHUNK_SIZE=2` whenever
-`HLT_TARGET_BUILDER=batched-sep` and no explicit chunk size is provided. The
-output JSON records a `target_diagnostics.memory_estimate` block with the
-estimated dense Jacobian and rough workspace sizes. Treat this estimate as a
-preflight warning, not an exact allocator forecast.
+The new `MODE=estimation_pilot` deliberately uses a shorter 4-period SEP horizon
+and defaults `HLT_SEP_BATCH_CHUNK_SIZE=8`, which should keep rough QR workspace
+near 12.8 GiB per chunk for 128 theta draws while still testing batched target
+generation. The heavier `MODE=full` keeps the 8-period horizon and defaults
+chunk size 2, roughly 17.1 GiB per chunk for the same 128-draw thought
+experiment. The output JSON records a `target_diagnostics.memory_estimate` block
+with the estimated dense Jacobian and rough workspace sizes. Treat this estimate
+as a preflight warning, not an exact allocator forecast.
 
 ## Pilot After Calibration
 
@@ -106,9 +110,129 @@ default. A local HLT smoke accepted targets with the robust QR + line-search
 solver, while the aggressive normal-equations/no-line-search shortcut generated
 zero accepted SEP targets.
 
+## Estimation-Like Parallel Pilot
+
+This is the recommended large GPU test before `MODE=full`. It is intended to be
+large enough that a local CPU run can take hours, while a 32GB+ GPU should expose
+parallel SEP target generation, ResNN training, batched log-density evaluation,
+and vectorized HMC chains.
+
+Default `MODE=estimation_pilot` settings:
+
+- `HLT_PARAMETER_SET=sw07_safe_27`
+- `HLT_THETA_DRAWS=128`
+- `HLT_PERIODS=4`
+- `SEP_PERIODS=4`
+- `SEP_ORDER=1`
+- `SEP_NNODES=3`
+- `HLT_TARGET_BUILDER=batched-sep`
+- `HLT_SEP_BATCH_CHUNK_SIZE=8`
+- `EPOCHS=200`
+- `HIDDEN=192`
+- `BLOCKS=4`
+- `TRAIN_BATCH_SIZE=2048`
+- `LIKELIHOOD_PERIODS=80`
+- `JAX_LOG_DENSITY_BATCH_SIZE=2048`
+- `HMC_WARMUP=256`
+- `HMC_SAMPLES=512`
+- `HMC_CHAINS=64`
+
+Dry-run locally or on GPUHUB to verify resolved settings without launching:
+
+```bash
+MODE=estimation_pilot DRY_RUN=1 bash benchmarks/run_hlt_gpu_estimation.sh
+```
+
+Run smoke first, then the estimation pilot:
+
+```bash
+RUN_LABEL="estimation_pilot_$(date -u +%Y%m%dT%H%M%SZ)"
+RESULTS_BASE="benchmarks/results/gpuhub_hlt_resnn_${RUN_LABEL}"
+mkdir -p "$RESULTS_BASE"
+nohup python scripts/gpuhub_hlt_resnn_runner.py \
+  --mode smoke_then_estimation_pilot \
+  --skip-repo-sync \
+  --skip-install \
+  --jax-extra auto \
+  --likelihood-runtime-mode fixed-reference \
+  --steady-state-mode fixed-reference \
+  --run-label "$RUN_LABEL" \
+  > "$RESULTS_BASE/master.log" 2>&1 &
+echo $! > "$RESULTS_BASE/runner.pid"
+tail -f "$RESULTS_BASE/master.log"
+```
+
+On 16 GB GPUs, add `--env HLT_SEP_BATCH_CHUNK_SIZE=4`. On 48 GB or larger
+GPUs, try `--env HLT_SEP_BATCH_CHUNK_SIZE=16` only after the default completes.
+For a stronger chain-parallel HMC stress, add `--env HMC_CHAINS=128`; keep all
+other settings fixed so the speed comparison remains interpretable.
+
+## Final Nonlinear Estimation Run
+
+Use this after `smoke_then_estimation_pilot` has passed. This is the first mode
+intended to be interpreted as a full nonlinear HLT ResNN estimation attempt.
+
+Default `MODE=final_nonlinear` settings:
+
+- `HLT_PARAMETER_SET=phase1_18params_narrow`
+- `HLT_THETA_DESIGN=prior`
+- `HLT_THETA_INCLUDE_REFERENCE=1`
+- `HLT_TARGET_BUILDER=adaptive-sep`
+- `HLT_THETA_DRAWS=128`
+- `HLT_PERIODS=4`
+- `SEP_PERIODS=4`
+- `SEP_MAX_ITER=20`
+- `ONLY_FULL_SUCCESS=1`
+- `HLT_STEADY_STATE_MODE=solve-or-reference`
+- `LIKELIHOOD_RUNTIME_MODE=full-jax`
+- `LIKELIHOOD_QME_ALGORITHM=schur_gpu`
+- `HMC_WARMUP=500`
+- `HMC_SAMPLES=1000`
+- `HMC_CHAINS=64`
+
+The final mode writes the full JSON and `summary.txt` even when a quality gate
+fails, then exits nonzero by default (`FAIL_ON_QUALITY_GATE=1`). A valid final
+run must have:
+
+- `status ok`
+- `quality_gate_status ok`
+- `target_theta_full_success_count == theta_draws`
+- `jax_log_density_status ok` and `parity_ok True`
+- `hmc_status ok`
+- `hmc_accepted_share <= HLT_MAX_HMC_ACCEPTED_SHARE`
+- no solved-steady-state fallback if `HLT_REQUIRE_SOLVED_STEADY_STATE=1`
+
+Dry-run the resolved final settings first:
+
+```bash
+MODE=final_nonlinear DRY_RUN=1 bash benchmarks/run_hlt_gpu_estimation.sh
+```
+
+Launch final mode through the staged runner:
+
+```bash
+RUN_LABEL="final_nonlinear_$(date -u +%Y%m%dT%H%M%SZ)"
+RESULTS_BASE="benchmarks/results/gpuhub_hlt_resnn_${RUN_LABEL}"
+mkdir -p "$RESULTS_BASE"
+nohup python scripts/gpuhub_hlt_resnn_runner.py \
+  --mode smoke_then_final_nonlinear \
+  --skip-repo-sync \
+  --skip-install \
+  --jax-extra auto \
+  --run-label "$RUN_LABEL" \
+  > "$RESULTS_BASE/master.log" 2>&1 &
+echo $! > "$RESULTS_BASE/runner.pid"
+tail -f "$RESULTS_BASE/master.log"
+```
+
+If the solved-steady-state gate fails but all other gates pass, rerun with
+`--env HLT_REQUIRE_SOLVED_STEADY_STATE=0` only for diagnostic profiling. Do not
+use that override for the final claim.
+
 ## More Aggressive Full Overrides
 
-The script defaults for `MODE=full` are:
+The older script defaults for `MODE=full` are retained as an aggressive
+all-parameter stress profile, not as the current correctness-first final mode:
 
 - `HLT_PARAMETER_SET=all`
 - `HLT_THETA_DRAWS=288`

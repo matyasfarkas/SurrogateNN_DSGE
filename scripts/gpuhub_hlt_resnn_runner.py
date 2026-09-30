@@ -62,16 +62,24 @@ def _parse_env_overrides(values: Sequence[str]) -> dict[str, str]:
 def stage_sequence(mode: str) -> tuple[str, ...]:
     if mode == "setup":
         return ()
-    if mode in {"smoke", "calibration", "pilot", "full"}:
+    if mode in {"smoke", "calibration", "pilot", "estimation_pilot", "final_nonlinear", "full"}:
         return (mode,)
     if mode == "smoke_then_calibration":
         return ("smoke", "calibration")
     if mode == "smoke_then_pilot":
         return ("smoke", "pilot")
+    if mode == "smoke_then_estimation_pilot":
+        return ("smoke", "estimation_pilot")
+    if mode == "smoke_then_final_nonlinear":
+        return ("smoke", "final_nonlinear")
     if mode == "smoke_then_full":
         return ("smoke", "full")
     if mode == "smoke_pilot_full":
         return ("smoke", "pilot", "full")
+    if mode == "smoke_estimation_pilot_full":
+        return ("smoke", "estimation_pilot", "full")
+    if mode == "smoke_estimation_pilot_final":
+        return ("smoke", "estimation_pilot", "final_nonlinear")
     raise ValueError(f"Unknown HLT run mode {mode!r}.")
 
 
@@ -126,6 +134,7 @@ def summarize_hlt_result(output: Path) -> dict[str, Any]:
     log_density = result.get("jax_surrogate_log_density", {}) or {}
     hmc = result.get("surrogate_hmc", {}) or {}
     likelihood = result.get("surrogate_inversion_likelihood", {}) or {}
+    quality = result.get("quality_gate", {}) or {}
     return {
         "status": result.get("status"),
         "output": str(output),
@@ -139,8 +148,15 @@ def summarize_hlt_result(output: Path) -> dict[str, Any]:
         "target_builder": target.get("builder"),
         "target_status": target.get("status"),
         "accepted_samples": target.get("accepted_samples"),
+        "runtime_prepared_theta_draws": target.get("runtime_prepared_theta_draws"),
+        "runtime_dropped_theta_count": target.get("runtime_dropped_theta_count"),
         "theta_full_success_count": target.get("theta_full_success_count"),
         "fallback_share": target.get("fallback_share"),
+        "steady_state_solved_count": result.get("steady_state_solved_count"),
+        "steady_state_fallback_count": result.get("steady_state_fallback_count"),
+        "steady_state_attempted_solved_count": result.get("steady_state_attempted_solved_count"),
+        "steady_state_attempted_fallback_count": result.get("steady_state_attempted_fallback_count"),
+        "strict_solved_steady_state_preflight": result.get("strict_solved_steady_state_preflight"),
         "likelihood_status": likelihood.get("status"),
         "likelihood": likelihood.get("total_loglikelihood"),
         "jax_log_density_status": log_density.get("status"),
@@ -152,6 +168,10 @@ def summarize_hlt_result(output: Path) -> dict[str, Any]:
         "hmc_draws_per_second": hmc.get("draws_per_second"),
         "hmc_accepted_share": hmc.get("accepted_share"),
         "hmc_retry_count": hmc.get("retry_count"),
+        "quality_gate_status": quality.get("status"),
+        "quality_gate_issues": quality.get("issues"),
+        "validation_improvement_mean": result.get("validation_improvement_mean"),
+        "validation_rmse_mean": result.get("validation_rmse_mean"),
     }
 
 
@@ -173,11 +193,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "smoke",
             "calibration",
             "pilot",
+            "estimation_pilot",
+            "final_nonlinear",
             "full",
             "smoke_then_calibration",
             "smoke_then_pilot",
+            "smoke_then_estimation_pilot",
+            "smoke_then_final_nonlinear",
             "smoke_then_full",
             "smoke_pilot_full",
+            "smoke_estimation_pilot_full",
+            "smoke_estimation_pilot_final",
         ),
         default="setup",
     )

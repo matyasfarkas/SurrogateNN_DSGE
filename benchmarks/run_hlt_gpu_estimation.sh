@@ -6,6 +6,8 @@ set -euo pipefail
 # Usage:
 #   MODE=smoke bash benchmarks/run_hlt_gpu_estimation.sh
 #   MODE=pilot HLT_THETA_DRAWS=64 HMC_SAMPLES=64 bash benchmarks/run_hlt_gpu_estimation.sh
+#   MODE=estimation_pilot bash benchmarks/run_hlt_gpu_estimation.sh
+#   MODE=final_nonlinear bash benchmarks/run_hlt_gpu_estimation.sh
 #   MODE=full bash benchmarks/run_hlt_gpu_estimation.sh
 #
 # The current posterior stage samples the trained-surrogate inversion likelihood
@@ -46,6 +48,8 @@ fi
 
 case "$MODE" in
   smoke)
+    DEFAULT_HLT_TARGET_BUILDER="${DEFAULT_HLT_TARGET_BUILDER:-batched-sep}"
+    DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE="${DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE:-16}"
     HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-payload}"
     HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-1}"
     HLT_PERIODS="${HLT_PERIODS:-1}"
@@ -65,6 +69,8 @@ case "$MODE" in
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.001}"
     ;;
   calibration)
+    DEFAULT_HLT_TARGET_BUILDER="${DEFAULT_HLT_TARGET_BUILDER:-adaptive-sep}"
+    DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE="${DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE:-0}"
     HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-payload}"
     HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-8}"
     HLT_PERIODS="${HLT_PERIODS:-2}"
@@ -84,6 +90,8 @@ case "$MODE" in
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.003}"
     ;;
   pilot)
+    DEFAULT_HLT_TARGET_BUILDER="${DEFAULT_HLT_TARGET_BUILDER:-adaptive-sep}"
+    DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE="${DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE:-2}"
     HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-payload}"
     HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-32}"
     HLT_PERIODS="${HLT_PERIODS:-8}"
@@ -102,7 +110,97 @@ case "$MODE" in
     HMC_LEAPFROG_STEPS="${HMC_LEAPFROG_STEPS:-4}"
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.005}"
     ;;
+  estimation_pilot)
+    # A larger, estimation-like HLT/SEP/ResNN run meant to expose GPU
+    # parallelism without jumping directly to the very expensive all-parameter
+    # full profile. Defaults target 32GB+ CUDA GPUs; lower
+    # HLT_SEP_BATCH_CHUNK_SIZE to 4 or 2 on smaller devices.
+    DEFAULT_HLT_TARGET_BUILDER="${DEFAULT_HLT_TARGET_BUILDER:-batched-sep}"
+    DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE="${DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE:-8}"
+    HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-sw07_safe_27}"
+    HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-128}"
+    HLT_PERIODS="${HLT_PERIODS:-4}"
+    HLT_PARAMETER_PERTURBATION="${HLT_PARAMETER_PERTURBATION:-0.0025}"
+    HLT_TARGET_MIN_STABLE_PERIODS="${HLT_TARGET_MIN_STABLE_PERIODS:-1}"
+    SEP_PERIODS="${SEP_PERIODS:-4}"
+    SEP_ORDER="${SEP_ORDER:-1}"
+    SEP_NNODES="${SEP_NNODES:-3}"
+    SEP_MAX_ITER="${SEP_MAX_ITER:-8}"
+    EPOCHS="${EPOCHS:-200}"
+    HIDDEN="${HIDDEN:-192}"
+    BLOCKS="${BLOCKS:-4}"
+    TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2048}"
+    LIKELIHOOD_PERIODS="${LIKELIHOOD_PERIODS:-80}"
+    JAX_LOG_DENSITY_REPEAT_EVALS="${JAX_LOG_DENSITY_REPEAT_EVALS:-10}"
+    JAX_LOG_DENSITY_BATCH_SIZE="${JAX_LOG_DENSITY_BATCH_SIZE:-2048}"
+    JAX_LOG_DENSITY_BATCH_REPEAT_EVALS="${JAX_LOG_DENSITY_BATCH_REPEAT_EVALS:-10}"
+    HMC_WARMUP="${HMC_WARMUP:-256}"
+    HMC_SAMPLES="${HMC_SAMPLES:-512}"
+    HMC_CHAINS="${HMC_CHAINS:-64}"
+    HMC_LEAPFROG_STEPS="${HMC_LEAPFROG_STEPS:-6}"
+    HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.0005}"
+    HMC_MAX_RETRIES="${HMC_MAX_RETRIES:-4}"
+    HMC_RETRY_STEP_SIZE_FACTOR="${HMC_RETRY_STEP_SIZE_FACTOR:-0.25}"
+    ;;
+  final_nonlinear)
+    # Correctness-first HLT nonlinear estimation pipeline. This mode is meant
+    # for the final run, not a throughput smoke test: it samples the Julia-
+    # comparable narrow 18-parameter support, requires full SEP target paths,
+    # trains only on fully successful theta draws, uses the GPU-batched HLT SEP
+    # target builder, and checks the full-JAX likelihood/HMC path.
+    DEFAULT_HLT_TARGET_BUILDER="${DEFAULT_HLT_TARGET_BUILDER:-batched-sep}"
+    DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE="${DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE:-16}"
+    HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-phase1_18params_narrow}"
+    HLT_THETA_DESIGN="${HLT_THETA_DESIGN:-prior}"
+    HLT_THETA_DESIGN_SET="${HLT_THETA_DESIGN_SET:-phase1_18params_narrow}"
+    HLT_THETA_INCLUDE_REFERENCE="${HLT_THETA_INCLUDE_REFERENCE:-1}"
+    HLT_DROP_RUNTIME_FAILURES="${HLT_DROP_RUNTIME_FAILURES:-1}"
+    HLT_MIN_RUNTIME_SUCCESSFUL_THETA="${HLT_MIN_RUNTIME_SUCCESSFUL_THETA:-64}"
+    HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-128}"
+    HLT_PERIODS="${HLT_PERIODS:-4}"
+    HLT_SHOCK_SCALE="${HLT_SHOCK_SCALE:-0.05}"
+    HLT_PARAMETER_PERTURBATION="${HLT_PARAMETER_PERTURBATION:-0}"
+    HLT_TARGET_MIN_STABLE_PERIODS="${HLT_TARGET_MIN_STABLE_PERIODS:--1}"
+    HLT_REQUIRE_FULL_TARGET_SUCCESS="${HLT_REQUIRE_FULL_TARGET_SUCCESS:-1}"
+    HLT_MIN_FULL_SUCCESS_SHARE="${HLT_MIN_FULL_SUCCESS_SHARE:-1.0}"
+    HLT_MIN_ACCEPTED_SAMPLES="${HLT_MIN_ACCEPTED_SAMPLES:-$((HLT_MIN_RUNTIME_SUCCESSFUL_THETA * HLT_PERIODS))}"
+    HLT_MIN_VALIDATION_IMPROVEMENT_MEAN="${HLT_MIN_VALIDATION_IMPROVEMENT_MEAN:-0.10}"
+    HLT_REQUIRE_JAX_PARITY="${HLT_REQUIRE_JAX_PARITY:-1}"
+    HLT_REQUIRE_HMC="${HLT_REQUIRE_HMC:-1}"
+    HLT_MAX_HMC_ACCEPTED_SHARE="${HLT_MAX_HMC_ACCEPTED_SHARE:-0.995}"
+    HLT_REQUIRE_SOLVED_STEADY_STATE="${HLT_REQUIRE_SOLVED_STEADY_STATE:-1}"
+    FAIL_ON_QUALITY_GATE="${FAIL_ON_QUALITY_GATE:-1}"
+    HLT_STEADY_STATE_MODE="${HLT_STEADY_STATE_MODE:-solve-or-reference}"
+    LIKELIHOOD_RUNTIME_MODE="${LIKELIHOOD_RUNTIME_MODE:-full-jax}"
+    LIKELIHOOD_QME_ALGORITHM="${LIKELIHOOD_QME_ALGORITHM:-schur_gpu}"
+    LIKELIHOOD_STATIC_ROWS_MODE="${LIKELIHOOD_STATIC_ROWS_MODE:-reference}"
+    ONLY_FULL_SUCCESS="${ONLY_FULL_SUCCESS:-1}"
+    SEP_PERIODS="${SEP_PERIODS:-4}"
+    SEP_ORDER="${SEP_ORDER:-1}"
+    SEP_NNODES="${SEP_NNODES:-3}"
+    SEP_MAX_ITER="${SEP_MAX_ITER:-20}"
+    SEP_ACCEPT_TOL="${SEP_ACCEPT_TOL:-1e-4}"
+    SEP_LINEAR_SOLVER="${SEP_LINEAR_SOLVER:-qr}"
+    EPOCHS="${EPOCHS:-300}"
+    HIDDEN="${HIDDEN:-192}"
+    BLOCKS="${BLOCKS:-4}"
+    TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2048}"
+    VALIDATION_FRACTION="${VALIDATION_FRACTION:-0.1}"
+    LIKELIHOOD_PERIODS="${LIKELIHOOD_PERIODS:-80}"
+    JAX_LOG_DENSITY_REPEAT_EVALS="${JAX_LOG_DENSITY_REPEAT_EVALS:-4}"
+    JAX_LOG_DENSITY_BATCH_SIZE="${JAX_LOG_DENSITY_BATCH_SIZE:-512}"
+    JAX_LOG_DENSITY_BATCH_REPEAT_EVALS="${JAX_LOG_DENSITY_BATCH_REPEAT_EVALS:-4}"
+    HMC_WARMUP="${HMC_WARMUP:-500}"
+    HMC_SAMPLES="${HMC_SAMPLES:-1000}"
+    HMC_CHAINS="${HMC_CHAINS:-64}"
+    HMC_LEAPFROG_STEPS="${HMC_LEAPFROG_STEPS:-6}"
+    HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.003}"
+    HMC_MAX_RETRIES="${HMC_MAX_RETRIES:-4}"
+    HMC_RETRY_STEP_SIZE_FACTOR="${HMC_RETRY_STEP_SIZE_FACTOR:-0.5}"
+    ;;
   full)
+    DEFAULT_HLT_TARGET_BUILDER="${DEFAULT_HLT_TARGET_BUILDER:-batched-sep}"
+    DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE="${DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE:-2}"
     HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-all}"
     HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-288}"
     HLT_PERIODS="${HLT_PERIODS:-8}"
@@ -122,17 +220,17 @@ case "$MODE" in
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.003}"
     ;;
   *)
-    echo "Unknown MODE=$MODE. Use smoke, calibration, pilot, or full." >&2
+    echo "Unknown MODE=$MODE. Use smoke, calibration, pilot, estimation_pilot, final_nonlinear, or full." >&2
     exit 2
     ;;
 esac
 
-HLT_TARGET_BUILDER_EFFECTIVE="${HLT_TARGET_BUILDER:-adaptive-sep}"
+HLT_TARGET_BUILDER_EFFECTIVE="${HLT_TARGET_BUILDER:-$DEFAULT_HLT_TARGET_BUILDER}"
 if [[ -z "${HLT_SEP_BATCH_CHUNK_SIZE:-}" ]]; then
   if [[ "$HLT_TARGET_BUILDER_EFFECTIVE" == "batched-sep" ]]; then
-    # HLT horizon-8/order-1 forms large dense SEP Jacobians; one all-theta
-    # batch OOMs on 32GB GPUs, while small microbatches preserve parity.
-    HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE="2"
+    # HLT sparse-tree SEP still forms dense Newton Jacobians. Chunking theta
+    # draws preserves the batched GPU path while bounding QR workspace.
+    HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE="$DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE"
   else
     HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE="0"
   fi
@@ -140,7 +238,107 @@ else
   HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE="$HLT_SEP_BATCH_CHUNK_SIZE"
 fi
 
+OPTIONAL_FLAGS=()
+if [[ "${ONLY_FULL_SUCCESS:-0}" == "1" ]]; then
+  OPTIONAL_FLAGS+=(--only-full-success)
+fi
+if [[ "${HLT_THETA_INCLUDE_REFERENCE:-0}" == "1" ]]; then
+  OPTIONAL_FLAGS+=(--hlt-theta-include-reference)
+else
+  OPTIONAL_FLAGS+=(--no-hlt-theta-include-reference)
+fi
+if [[ "${HLT_DROP_RUNTIME_FAILURES:-0}" == "1" ]]; then
+  OPTIONAL_FLAGS+=(--hlt-drop-runtime-failures)
+else
+  OPTIONAL_FLAGS+=(--no-hlt-drop-runtime-failures)
+fi
+if [[ "${HLT_REQUIRE_FULL_TARGET_SUCCESS:-0}" == "1" ]]; then
+  OPTIONAL_FLAGS+=(--hlt-require-full-target-success)
+else
+  OPTIONAL_FLAGS+=(--no-hlt-require-full-target-success)
+fi
+if [[ "${HLT_REQUIRE_JAX_PARITY:-0}" == "1" ]]; then
+  OPTIONAL_FLAGS+=(--hlt-require-jax-parity)
+else
+  OPTIONAL_FLAGS+=(--no-hlt-require-jax-parity)
+fi
+if [[ "${HLT_REQUIRE_HMC:-0}" == "1" ]]; then
+  OPTIONAL_FLAGS+=(--hlt-require-hmc)
+else
+  OPTIONAL_FLAGS+=(--no-hlt-require-hmc)
+fi
+if [[ "${HLT_REQUIRE_SOLVED_STEADY_STATE:-0}" == "1" ]]; then
+  OPTIONAL_FLAGS+=(--hlt-require-solved-steady-state)
+else
+  OPTIONAL_FLAGS+=(--no-hlt-require-solved-steady-state)
+fi
+if [[ -n "${HLT_MIN_VALIDATION_IMPROVEMENT_MEAN:-}" ]]; then
+  OPTIONAL_FLAGS+=(--hlt-min-validation-improvement-mean "$HLT_MIN_VALIDATION_IMPROVEMENT_MEAN")
+fi
+if [[ -n "${HLT_MAX_VALIDATION_RMSE_MEAN:-}" ]]; then
+  OPTIONAL_FLAGS+=(--hlt-max-validation-rmse-mean "$HLT_MAX_VALIDATION_RMSE_MEAN")
+fi
+if [[ -n "${HLT_MAX_HMC_ACCEPTED_SHARE:-}" ]]; then
+  OPTIONAL_FLAGS+=(--hlt-max-hmc-accepted-share "$HLT_MAX_HMC_ACCEPTED_SHARE")
+fi
+
 mkdir -p "$RESULT_ROOT"
+
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  cat <<EOF
+HLT_GPU_ESTIMATION_DRY_RUN=1
+MODE=$MODE
+DEVICE=$DEVICE
+REQUIRE_GPU=$REQUIRE_GPU
+RESULT_ROOT=$RESULT_ROOT
+HLT_TARGET_BUILDER=$HLT_TARGET_BUILDER_EFFECTIVE
+HLT_SEP_BATCH_CHUNK_SIZE=$HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE
+HLT_PARAMETER_SET=$HLT_PARAMETER_SET
+HLT_THETA_DESIGN=${HLT_THETA_DESIGN:-perturbation}
+HLT_THETA_DESIGN_SET=${HLT_THETA_DESIGN_SET:-auto}
+HLT_THETA_INCLUDE_REFERENCE=${HLT_THETA_INCLUDE_REFERENCE:-0}
+HLT_DROP_RUNTIME_FAILURES=${HLT_DROP_RUNTIME_FAILURES:-0}
+HLT_MIN_RUNTIME_SUCCESSFUL_THETA=${HLT_MIN_RUNTIME_SUCCESSFUL_THETA:-1}
+HLT_THETA_DRAWS=$HLT_THETA_DRAWS
+HLT_PERIODS=$HLT_PERIODS
+HLT_SHOCK_SCALE=${HLT_SHOCK_SCALE:-0.02}
+HLT_PARAMETER_PERTURBATION=${HLT_PARAMETER_PERTURBATION:-1e-6}
+HLT_TARGET_MIN_STABLE_PERIODS=${HLT_TARGET_MIN_STABLE_PERIODS:--1}
+HLT_REQUIRE_FULL_TARGET_SUCCESS=${HLT_REQUIRE_FULL_TARGET_SUCCESS:-0}
+HLT_MIN_FULL_SUCCESS_SHARE=${HLT_MIN_FULL_SUCCESS_SHARE:-0.0}
+HLT_MIN_ACCEPTED_SAMPLES=${HLT_MIN_ACCEPTED_SAMPLES:-1}
+HLT_MIN_VALIDATION_IMPROVEMENT_MEAN=${HLT_MIN_VALIDATION_IMPROVEMENT_MEAN:-}
+HLT_REQUIRE_JAX_PARITY=${HLT_REQUIRE_JAX_PARITY:-0}
+HLT_REQUIRE_HMC=${HLT_REQUIRE_HMC:-0}
+HLT_REQUIRE_SOLVED_STEADY_STATE=${HLT_REQUIRE_SOLVED_STEADY_STATE:-0}
+HLT_MAX_HMC_ACCEPTED_SHARE=${HLT_MAX_HMC_ACCEPTED_SHARE:-}
+SEP_PERIODS=$SEP_PERIODS
+SEP_ORDER=$SEP_ORDER
+SEP_NNODES=$SEP_NNODES
+SEP_MAX_ITER=$SEP_MAX_ITER
+SEP_LINEAR_SOLVER=${SEP_LINEAR_SOLVER:-qr}
+SEP_LINE_SEARCH=${SEP_LINE_SEARCH:-1}
+EPOCHS=$EPOCHS
+HIDDEN=$HIDDEN
+BLOCKS=$BLOCKS
+TRAIN_BATCH_SIZE=$TRAIN_BATCH_SIZE
+LIKELIHOOD_PERIODS=$LIKELIHOOD_PERIODS
+LIKELIHOOD_RUNTIME_MODE=${LIKELIHOOD_RUNTIME_MODE:-fixed-reference}
+LIKELIHOOD_QME_ALGORITHM=${LIKELIHOOD_QME_ALGORITHM:-schur}
+LIKELIHOOD_STATIC_ROWS_MODE=${LIKELIHOOD_STATIC_ROWS_MODE:-reference}
+JAX_LOG_DENSITY_REPEAT_EVALS=${JAX_LOG_DENSITY_REPEAT_EVALS:-0}
+JAX_LOG_DENSITY_BATCH_SIZE=${JAX_LOG_DENSITY_BATCH_SIZE:-0}
+JAX_LOG_DENSITY_BATCH_REPEAT_EVALS=${JAX_LOG_DENSITY_BATCH_REPEAT_EVALS:-0}
+HMC_WARMUP=$HMC_WARMUP
+HMC_SAMPLES=$HMC_SAMPLES
+HMC_CHAINS=$HMC_CHAINS
+HMC_LEAPFROG_STEPS=$HMC_LEAPFROG_STEPS
+HMC_STEP_SIZE=$HMC_STEP_SIZE
+HMC_MAX_RETRIES=${HMC_MAX_RETRIES:-3}
+FAIL_ON_QUALITY_GATE=${FAIL_ON_QUALITY_GATE:-0}
+EOF
+  exit 0
+fi
 
 if [[ "$INSTALL_DEPS" == "1" ]]; then
   "$PYTHON" -m pip install --upgrade pip wheel setuptools
@@ -176,9 +374,15 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --hlt-steady-state-max-iter "${HLT_STEADY_STATE_MAX_ITER:-100}" \
   --hlt-theta-draws "$HLT_THETA_DRAWS" \
   --hlt-periods "$HLT_PERIODS" \
+  --hlt-shock-scale "${HLT_SHOCK_SCALE:-0.02}" \
   --hlt-parameter-perturbation "${HLT_PARAMETER_PERTURBATION:-1e-6}" \
+  --hlt-theta-design "${HLT_THETA_DESIGN:-perturbation}" \
+  --hlt-theta-design-set "${HLT_THETA_DESIGN_SET:-auto}" \
+  --hlt-min-runtime-successful-theta "${HLT_MIN_RUNTIME_SUCCESSFUL_THETA:-1}" \
   --hlt-target-builder "$HLT_TARGET_BUILDER_EFFECTIVE" \
   --hlt-target-min-stable-periods "${HLT_TARGET_MIN_STABLE_PERIODS:--1}" \
+  --hlt-min-full-success-share "${HLT_MIN_FULL_SUCCESS_SHARE:-0.0}" \
+  --hlt-min-accepted-samples "${HLT_MIN_ACCEPTED_SAMPLES:-1}" \
   --hlt-sep-batch-chunk-size "$HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE" \
   --hlt-sep-order-ladder "${HLT_SEP_ORDER_LADDER:-auto}" \
   --hlt-sep-periods-ladder "${HLT_SEP_PERIODS_LADDER:-auto}" \
@@ -230,6 +434,7 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --hlt-surrogate-hmc-max-retries "${HMC_MAX_RETRIES:-3}" \
   --hlt-surrogate-hmc-retry-step-size-factor "${HMC_RETRY_STEP_SIZE_FACTOR:-0.25}" \
   --hlt-surrogate-hmc-seed "${HMC_SEED:-20260923}" \
+  "${OPTIONAL_FLAGS[@]}" \
   --output "$RESULT_ROOT/hlt_${MODE}_surrogate_estimation.json" \
   2>&1 | tee "$RESULT_ROOT/hlt_${MODE}_surrogate_estimation.log"
 
@@ -252,9 +457,16 @@ print("theta_draws", result["theta_draws"])
 print("train_size", result["train_size"], "val_size", result["val_size"])
 print("pipeline_s", result["pipeline_s"])
 print("target_builder", target.get("builder"), "accepted_samples", target.get("accepted_samples"))
+print("target_runtime_prepared_theta", target.get("runtime_prepared_theta_draws"))
+print("target_runtime_dropped_theta", target.get("runtime_dropped_theta_count"))
 print("target_theta_full_success_count", target.get("theta_full_success_count"))
 print("target_fallback_share", target.get("fallback_share"))
 print("target_accepted_by_order", target.get("accepted_by_branching_order"))
+print("steady_state_solved_count", result.get("steady_state_solved_count"))
+print("steady_state_fallback_count", result.get("steady_state_fallback_count"))
+print("steady_state_attempted_solved_count", result.get("steady_state_attempted_solved_count"))
+print("steady_state_attempted_fallback_count", result.get("steady_state_attempted_fallback_count"))
+print("strict_solved_steady_state_preflight", result.get("strict_solved_steady_state_preflight"))
 print("likelihood_status", lik.get("status"), "likelihood", lik.get("total_loglikelihood"))
 print("jax_log_density_status", log_density.get("status"), "parity_ok", log_density.get("parity_ok"))
 print("hmc_status", hmc.get("status"))
@@ -262,7 +474,26 @@ print("hmc_draws", hmc.get("post_warmup_draws"), "hmc_elapsed_s", hmc.get("elaps
 print("hmc_draws_per_second", hmc.get("draws_per_second"))
 print("hmc_accepted_share", hmc.get("accepted_share"))
 print("hmc_retry_count", hmc.get("retry_count"), "hmc_initial_step_size", hmc.get("initial_step_size"))
+quality = result.get("quality_gate", {})
+print("quality_gate_status", quality.get("status"))
+print("quality_gate_issues", quality.get("issues"))
+print("validation_improvement_mean", result.get("validation_improvement_mean"))
+print("validation_rmse_mean", result.get("validation_rmse_mean"))
 print("output", path)
 PY
+
+if [[ "${FAIL_ON_QUALITY_GATE:-0}" == "1" ]]; then
+  "$PYTHON" - "$RESULT_ROOT/hlt_${MODE}_surrogate_estimation.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+payload = json.load(open(path))
+result = payload["results"]["hlt_fixed_ss_smoke"]
+quality = result.get("quality_gate", {})
+if result.get("status") != "ok" or quality.get("status") == "failed":
+    print("Quality gate failed; see summary.txt and the full JSON for diagnostics.", file=sys.stderr)
+    sys.exit(1)
+PY
+fi
 
 echo "Wrote $RESULT_ROOT"

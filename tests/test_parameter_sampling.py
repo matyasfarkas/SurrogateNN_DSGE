@@ -9,6 +9,7 @@ from surrogatenn_dsge import (
     parameter_grid,
     sample_lhs_parameters,
     sample_parameter_design,
+    sample_prior_parameters,
     summarize_parameter_design,
 )
 
@@ -68,6 +69,18 @@ def test_sample_lhs_parameters_bounds_and_summary_for_phase1() -> None:
     assert summary["mean_abs_corr"] < 0.15
 
 
+def test_sample_prior_parameters_is_bounded_and_reproducible() -> None:
+    design_a = sample_prior_parameters("phase1_18params_narrow", 16, seed=11)
+    design_b = sample_parameter_design("phase1_18params_narrow", method="prior", n_samples=16, seed=11)
+
+    assert design_a.method == "prior"
+    assert design_a.theta.shape == (18, 16)
+    np.testing.assert_allclose(design_a.theta, design_b.theta, rtol=0, atol=0)
+    assert np.all(design_a.theta >= design_a.lower[:, None])
+    assert np.all(design_a.theta <= design_a.upper[:, None])
+    assert np.isfinite(design_a.theta).all()
+
+
 def test_parameter_grid_matches_julia_legacy_nested_loop_order() -> None:
     design = parameter_grid("legacy_3params", points_per_dim=5)
 
@@ -85,11 +98,13 @@ def test_parameter_grid_refuses_accidental_high_dimensional_explosion() -> None:
 
 def test_sample_parameter_design_dispatch_and_validation() -> None:
     lhs_design = sample_parameter_design("legacy_3params", method="lhs", n_samples=4, seed=1, centered=True)
+    prior_design = sample_parameter_design("legacy_3params", method="prior", n_samples=4, seed=1)
     grid_design = sample_parameter_design("legacy_3params", method="grid", points_per_dim=2)
 
     assert lhs_design.theta.shape == (3, 4)
+    assert prior_design.theta.shape == (3, 4)
     assert grid_design.theta.shape == (3, 8)
     with pytest.raises(ValueError, match="n_samples is required"):
         sample_parameter_design("legacy_3params", method="lhs")
-    with pytest.raises(ValueError, match="Unknown parameter-design method"):
-        sample_parameter_design("legacy_3params", method="prior", n_samples=4)
+    with pytest.raises(ValueError, match="n_samples is required"):
+        sample_parameter_design("legacy_3params", method="prior")

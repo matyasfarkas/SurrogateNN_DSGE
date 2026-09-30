@@ -50,6 +50,8 @@ from surrogatenn_dsge import (
     parse_macro_model,
     predict_frozen_batch,
     resolve_jax_device,
+    get_parameter_names,
+    sample_parameter_design,
     solve_batched_stochastic_extended_path_model,
     solve_batched_stochastic_extended_path_residual_expectation,
     solve_first_order_model_jax,
@@ -351,9 +353,12 @@ def _select_hlt_parameter_subset(
     elif normalized == "all":
         names = tuple(str(name) for name in model.parameter_names)
     else:
-        names = tuple(part.strip() for part in normalized.split(",") if part.strip())
-        if not names:
-            raise ValueError("hlt_parameter_set must not be empty.")
+        try:
+            names = tuple(get_parameter_names(normalized))
+        except ValueError:
+            names = tuple(part.strip() for part in normalized.split(",") if part.strip())
+            if not names:
+                raise ValueError("hlt_parameter_set must not be empty.")
     unknown = tuple(name for name in names if name not in model.parameter_names)
     if unknown:
         raise ValueError("Unknown HLT parameter names: " + ", ".join(unknown))
@@ -1674,17 +1679,95 @@ def _make_hlt_theta_design(
     subset_names: Sequence[str],
     draws: int,
     perturbation: float,
-) -> tuple[np.ndarray, list[int]]:
+    design: str = "perturbation",
+    design_set: str = "auto",
+    seed: int = 20260918,
+    include_reference: bool = False,
+) -> tuple[np.ndarray, list[int], dict[str, Any]]:
     if draws < 1:
         raise ValueError(f"hlt_theta_draws must be >= 1, got {draws}.")
     subset_idx = [tuple(parameter_names).index(name) for name in subset_names]
     base_subset = np.asarray(base_parameters[subset_idx], dtype=np.float64)
-    theta = np.repeat(base_subset[:, None], int(draws), axis=1)
-    if draws > 1 and perturbation != 0.0:
-        grid = np.linspace(-1.0, 1.0, int(draws), dtype=np.float64)
-        signs = np.where(np.arange(base_subset.size) % 2 == 0, 1.0, -1.0)
-        theta *= 1.0 + float(perturbation) * signs[:, None] * grid[None, :]
-    return theta, subset_idx
+    design_mode = str(design).strip().lower()
+    diagnostics: dict[str, Any] = {
+        "design": design_mode,
+        "requested_draws": int(draws),
+        "include_reference": bool(include_reference),
+        "subset_names": tuple(str(name) for name in subset_names),
+    }
+    if design_mode == "perturbation":
+        theta = np.repeat(base_subset[:, None], int(draws), axis=1)
+        if draws > 1 and perturbation != 0.0:
+            grid = np.linspace(-1.0, 1.0, int(draws), dtype=np.float64)
+            signs = np.where(np.arange(base_subset.size) % 2 == 0, 1.0, -1.0)
+            theta *= 1.0 + float(perturbation) * signs[:, None] * grid[None, :]
+        diagnostics["perturbation"] = float(perturbation)
+        diagnostics["actual_draws"] = int(theta.shape[1])
+        return theta, subset_idx, diagnostics
+
+    if design_mode in {"centered-lhs", "centered_lhs"}:
+        sample_method = "lhs"
+        centered = True
+    else:
+        sample_method = design_mode
+        centered = False
+    if sample_method not in {"lhs", "prior", "grid"}:
+        raise ValueError(
+            "hlt_theta_design must be perturbation, lhs, centered-lhs, prior, or grid; "
+            f"got {design!r}."
+        )
+
+    requested_design_set = str(design_set).strip()
+    if requested_design_set in {"", "auto"}:
+        raise ValueError(
+            "hlt_theta_design_set must be a named Python parameter set when "
+            f"hlt_theta_design={design_mode!r}; use e.g. phase1_18params_narrow."
+        )
+    sample_count = max(0, int(draws) - (1 if include_reference else 0))
+    columns: list[np.ndarray] = []
+    if include_reference:
+        columns.append(base_subset[:, None])
+    design_summary: dict[str, Any] | None = None
+    if sample_count > 0:
+        sampled = sample_parameter_design(
+            requested_design_set,
+            method=sample_method,
+            n_samples=sample_count if sample_method != "grid" else None,
+            seed=int(seed),
+            centered=centered,
+        )
+        sampled_names = tuple(str(name) for name in sampled.names)
+        if sampled_names != tuple(str(name) for name in subset_names):
+            raise ValueError(
+                "Sampled theta design names do not match the HLT parameter subset: "
+                f"sampled={sampled_names}, subset={tuple(subset_names)}."
+            )
+        columns.append(np.asarray(sampled.theta, dtype=np.float64))
+        design_summary = {
+            "method": sampled.method,
+            "parameter_set": requested_design_set,
+            "sample_count": int(sampled.theta.shape[1]),
+            "min": np.min(sampled.theta, axis=1).tolist(),
+            "max": np.max(sampled.theta, axis=1).tolist(),
+        }
+    theta = np.concatenate(columns, axis=1) if columns else base_subset[:, None]
+    if theta.shape[1] > int(draws):
+        theta = theta[:, : int(draws)]
+    if theta.shape[1] != int(draws):
+        raise ValueError(f"theta design produced {theta.shape[1]} draws, expected {draws}.")
+    diagnostics.update(
+        {
+            "design_set": requested_design_set,
+            "sample_method": sample_method,
+            "centered": bool(centered),
+            "seed": int(seed),
+            "actual_draws": int(theta.shape[1]),
+            "sample_summary": design_summary,
+        }
+    )
+    if not np.isfinite(theta).all():
+        raise ValueError("HLT theta design contains non-finite values.")
+    return theta, subset_idx, diagnostics
 
 
 @dataclass(frozen=True)
@@ -2334,13 +2417,18 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
     reference_steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
     base_parameters = np.asarray(model.parameter_values, dtype=np.float64)
     parameter_subset = list(_select_hlt_parameter_subset(model, case, str(args.hlt_parameter_set)))
-    theta, subset_idx = _make_hlt_theta_design(
+    theta, subset_idx, theta_design_diagnostics = _make_hlt_theta_design(
         base_parameters=base_parameters,
         parameter_names=model.parameter_names,
         subset_names=parameter_subset,
         draws=int(args.hlt_theta_draws),
         perturbation=float(args.hlt_parameter_perturbation),
+        design=str(args.hlt_theta_design),
+        design_set=str(args.hlt_theta_design_set),
+        seed=int(args.seed),
+        include_reference=bool(args.hlt_theta_include_reference),
     )
+    original_theta_draws = int(theta.shape[1])
 
     periods = int(args.hlt_periods)
     shock_dim = int(model.timings.nExo)
@@ -2465,6 +2553,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             "steady_state": steady_state,
             "state_transition": state_transition,
             "shock_impact": shock_impact,
+            "steady_state_status": ss_status,
+            "steady_state_converged": ss_converged,
+            "steady_state_residual_norm": ss_residual_norm,
+            "first_order_converged": bool(first_order.solution.converged),
         }
         runtime_cache[key] = runtime
         steady_state_diagnostics.append(
@@ -2483,21 +2575,54 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         return runtime
 
     runtime_prepare_started = time.perf_counter()
-    initial_states = np.column_stack(
-        [
-            runtime_for_theta(theta[:, theta_idx], theta_index=theta_idx)["steady_state"]
-            for theta_idx in range(theta.shape[1])
-        ]
-    )
+    runtime_failures: list[dict[str, Any]] = []
+    runtime_successes: list[dict[str, Any]] = []
+    initial_state_columns: list[np.ndarray] = []
+    kept_theta_indices: list[int] = []
+    strict_solved_steady_state = bool(args.hlt_require_solved_steady_state)
+    for theta_idx in range(theta.shape[1]):
+        try:
+            runtime = runtime_for_theta(theta[:, theta_idx], theta_index=theta_idx)
+            if strict_solved_steady_state and runtime.get("steady_state_status") != "solved":
+                raise RuntimeError(
+                    "HLT strict runtime preflight rejected theta because steady-state "
+                    f"status={runtime.get('steady_state_status')!r}; use "
+                    "--no-hlt-require-solved-steady-state to allow reference fallback."
+                )
+        except Exception as exc:
+            if not bool(args.hlt_drop_runtime_failures):
+                raise
+            runtime_failures.append(
+                {
+                    "theta_index": int(theta_idx),
+                    "theta": np.asarray(theta[:, theta_idx], dtype=np.float64).tolist(),
+                    "error": repr(exc),
+                }
+            )
+            _progress(f"dropped theta {theta_idx} during runtime preparation: {exc!r}")
+            continue
+        runtime_successes.append(runtime)
+        initial_state_columns.append(np.asarray(runtime["steady_state"], dtype=np.float64))
+        kept_theta_indices.append(int(theta_idx))
+    if not initial_state_columns:
+        raise RuntimeError("No HLT theta draw survived steady-state/first-order runtime preparation.")
+    if len(initial_state_columns) < int(args.hlt_min_runtime_successful_theta):
+        raise RuntimeError(
+            "Too few HLT theta draws survived runtime preparation: "
+            f"{len(initial_state_columns)} < {args.hlt_min_runtime_successful_theta}."
+        )
+    if runtime_failures:
+        kept = np.asarray(kept_theta_indices, dtype=np.int64)
+        theta = theta[:, kept]
+        shocks = shocks[kept, :, :]
+        theta_design_diagnostics["runtime_kept_original_indices"] = kept_theta_indices
+    initial_states = np.column_stack(initial_state_columns)
     runtime_prepare_s = time.perf_counter() - runtime_prepare_started
     _progress(
-        f"prepared {theta.shape[1]} theta runtimes in {runtime_prepare_s:.3f}s; "
+        f"prepared {theta.shape[1]}/{original_theta_draws} theta runtimes in {runtime_prepare_s:.3f}s; "
         f"starting ROM/FOM surrogate target generation and training"
     )
-    theta_runtimes = [
-        runtime_for_theta(theta[:, theta_idx], theta_index=theta_idx)
-        for theta_idx in range(theta.shape[1])
-    ]
+    theta_runtimes = runtime_successes
     full_parameter_values_by_theta = np.stack(
         [np.asarray(runtime["parameter_values"], dtype=np.float64) for runtime in theta_runtimes],
         axis=0,
@@ -2718,6 +2843,11 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
     else:
         raise ValueError("hlt_target_builder must be 'adaptive-sep', 'batched-sep', or 'callback'.")
     pipeline_s = time.perf_counter() - pipeline_started
+    target_diagnostics["theta_design"] = theta_design_diagnostics
+    target_diagnostics["original_theta_draws"] = int(original_theta_draws)
+    target_diagnostics["runtime_prepared_theta_draws"] = int(theta.shape[1])
+    target_diagnostics["runtime_dropped_theta_count"] = int(len(runtime_failures))
+    target_diagnostics["runtime_failures"] = runtime_failures[: int(args.hlt_target_max_logged_failures)]
     _progress(
         f"finished surrogate pipeline in {pipeline_s:.3f}s "
         f"train_size={result.training.split.train_size} val_size={result.training.split.val_size}"
@@ -3226,9 +3356,114 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     "reason": "Python surrogate likelihood failed before surrogate HMC.",
                 }
 
+    quality_issues: list[str] = []
+    accepted_samples = int(target_diagnostics.get("accepted_samples", 0) or 0)
+    full_success_count = int(target_diagnostics.get("theta_full_success_count", 0) or 0)
+    runtime_prepared_count = int(target_diagnostics.get("runtime_prepared_theta_draws", theta.shape[1]) or 0)
+    full_success_share = (
+        float(full_success_count / runtime_prepared_count)
+        if runtime_prepared_count > 0
+        else 0.0
+    )
+    if bool(args.hlt_require_full_target_success) and full_success_count != runtime_prepared_count:
+        quality_issues.append(
+            "Not all runtime-prepared theta draws generated full SEP paths "
+            f"({full_success_count}/{runtime_prepared_count})."
+        )
+    if float(args.hlt_min_full_success_share) > 0.0 and full_success_share < float(args.hlt_min_full_success_share):
+        quality_issues.append(
+            "Full-path theta share below gate: "
+            f"{full_success_share:.6g} < {float(args.hlt_min_full_success_share):.6g}."
+        )
+    if int(args.hlt_min_accepted_samples) > 0 and accepted_samples < int(args.hlt_min_accepted_samples):
+        quality_issues.append(
+            f"Accepted target samples below gate: {accepted_samples} < {args.hlt_min_accepted_samples}."
+        )
+    validation_improvement_mean = (
+        None
+        if result.training.validation_improvement is None
+        else float(np.nanmean(result.training.validation_improvement))
+    )
+    validation_rmse_mean = (
+        None
+        if result.training.validation_rmse is None
+        else float(np.mean(result.training.validation_rmse))
+    )
+    if args.hlt_min_validation_improvement_mean is not None:
+        if validation_improvement_mean is None:
+            quality_issues.append("Validation improvement gate requested but no validation set was evaluated.")
+        elif validation_improvement_mean < float(args.hlt_min_validation_improvement_mean):
+            quality_issues.append(
+                "Mean validation improvement below gate: "
+                f"{validation_improvement_mean:.6g} < {float(args.hlt_min_validation_improvement_mean):.6g}."
+            )
+    if args.hlt_max_validation_rmse_mean is not None:
+        if validation_rmse_mean is None:
+            quality_issues.append("Validation RMSE gate requested but no validation set was evaluated.")
+        elif validation_rmse_mean > float(args.hlt_max_validation_rmse_mean):
+            quality_issues.append(
+                "Mean validation RMSE above gate: "
+                f"{validation_rmse_mean:.6g} > {float(args.hlt_max_validation_rmse_mean):.6g}."
+            )
+    if bool(args.hlt_require_jax_parity) and jax_log_density_result.get("parity_ok") is not True:
+        quality_issues.append("JAX-vs-Python surrogate log-density parity gate failed.")
+    if bool(args.hlt_require_hmc) and surrogate_hmc_result.get("status") != "ok":
+        quality_issues.append("HMC gate requested but surrogate HMC did not finish with status ok.")
+    kept_theta_index_set = {int(idx) for idx in kept_theta_indices}
+    steady_state_diagnostics_for_gate = [
+        row
+        for row in steady_state_diagnostics
+        if row.get("theta_index") is None or int(row["theta_index"]) in kept_theta_index_set
+    ]
+    steady_statuses_for_gate = [
+        str(row["steady_state_status"]) for row in steady_state_diagnostics_for_gate
+    ]
+    steady_fallback_count_for_gate = sum(status.startswith("fallback") for status in steady_statuses_for_gate)
+    steady_solved_count_for_gate = sum(status == "solved" for status in steady_statuses_for_gate)
+    if bool(args.hlt_require_solved_steady_state):
+        if steady_state_mode == "fixed-reference":
+            quality_issues.append("Solved steady-state gate requested but steady_state_mode=fixed-reference.")
+        if steady_fallback_count_for_gate > 0:
+            quality_issues.append(
+                "Solved steady-state gate failed because "
+                f"{steady_fallback_count_for_gate} theta draws used a reference fallback."
+            )
+        if steady_solved_count_for_gate != runtime_prepared_count:
+            quality_issues.append(
+                "Solved steady-state gate failed because solved count does not match prepared theta count: "
+                f"{steady_solved_count_for_gate}/{runtime_prepared_count}."
+            )
+    if args.hlt_max_hmc_accepted_share is not None and surrogate_hmc_result.get("accepted_share") is not None:
+        accepted_share = float(surrogate_hmc_result["accepted_share"])
+        if accepted_share > float(args.hlt_max_hmc_accepted_share):
+            quality_issues.append(
+                "HMC accepted-share gate indicates a too-conservative chain: "
+                f"{accepted_share:.6g} > {float(args.hlt_max_hmc_accepted_share):.6g}."
+            )
+    quality_gate = {
+        "status": "ok" if not quality_issues else "failed",
+        "issues": quality_issues,
+        "require_full_target_success": bool(args.hlt_require_full_target_success),
+        "full_success_share": full_success_share,
+        "min_full_success_share": float(args.hlt_min_full_success_share),
+        "accepted_samples": accepted_samples,
+        "min_accepted_samples": int(args.hlt_min_accepted_samples),
+        "validation_improvement_mean": validation_improvement_mean,
+        "min_validation_improvement_mean": args.hlt_min_validation_improvement_mean,
+        "validation_rmse_mean": validation_rmse_mean,
+        "max_validation_rmse_mean": args.hlt_max_validation_rmse_mean,
+        "require_jax_parity": bool(args.hlt_require_jax_parity),
+        "require_hmc": bool(args.hlt_require_hmc),
+        "max_hmc_accepted_share": args.hlt_max_hmc_accepted_share,
+        "require_solved_steady_state": bool(args.hlt_require_solved_steady_state),
+        "steady_state_solved_count": int(steady_solved_count_for_gate),
+        "steady_state_fallback_count": int(steady_fallback_count_for_gate),
+    }
+    status = "ok" if not quality_issues else "quality_gate_failed"
+
     steady_statuses = [str(row["steady_state_status"]) for row in steady_state_diagnostics]
-    fallback_count = sum(status.startswith("fallback") for status in steady_statuses)
-    solved_count = sum(status == "solved" for status in steady_statuses)
+    attempted_fallback_count = sum(status.startswith("fallback") for status in steady_statuses)
+    attempted_solved_count = sum(status == "solved" for status in steady_statuses)
     target_builder_summary = str(args.hlt_target_builder).strip().lower()
     caveats = [
         "The likelihood block evaluates a trained-surrogate inversion likelihood.",
@@ -3268,7 +3503,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         caveats.append("Requires parameter-specific steady states; any failed solve aborts the run.")
 
     return {
-        "status": "ok",
+        "status": status,
         "kind": "actual_hlt_surrogate_pipeline",
         "backend": jax.default_backend(),
         "target_device": None if target_device is None else str(target_device),
@@ -3279,19 +3514,23 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         "runtime_prepare_s": runtime_prepare_s,
         "steady_state_s": steady_state_s,
         "first_order_s": first_order_s,
+        "strict_solved_steady_state_preflight": strict_solved_steady_state,
         "pipeline_s": pipeline_s,
         "n_vars": int(model.timings.nVars),
         "n_exo": int(model.timings.nExo),
         "parameter_subset": parameter_subset,
         "hlt_parameter_set": str(args.hlt_parameter_set),
         "theta_draws": int(theta.shape[1]),
+        "original_theta_draws": int(original_theta_draws),
         "steady_state_mode": steady_state_mode,
         "first_order_qme_algorithm": str(args.hlt_first_order_qme_algorithm),
         "likelihood_runtime_mode": likelihood_runtime_mode_summary,
         "likelihood_qme_algorithm": str(args.hlt_likelihood_qme_algorithm),
         "likelihood_static_rows_mode": str(args.hlt_likelihood_static_rows_mode),
-        "steady_state_solved_count": int(solved_count),
-        "steady_state_fallback_count": int(fallback_count),
+        "steady_state_solved_count": int(steady_solved_count_for_gate),
+        "steady_state_fallback_count": int(steady_fallback_count_for_gate),
+        "steady_state_attempted_solved_count": int(attempted_solved_count),
+        "steady_state_attempted_fallback_count": int(attempted_fallback_count),
         "steady_state_diagnostics": steady_state_diagnostics,
         "periods": periods,
         "sep_config": {
@@ -3307,12 +3546,9 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         "dataset_summary": result.dataset_summary,
         "train_size": int(result.training.train_size),
         "val_size": int(result.training.val_size),
-        "validation_rmse_mean": None
-        if result.training.validation_rmse is None
-        else float(np.mean(result.training.validation_rmse)),
-        "validation_improvement_mean": None
-        if result.training.validation_improvement is None
-        else float(np.nanmean(result.training.validation_improvement)),
+        "validation_rmse_mean": validation_rmse_mean,
+        "validation_improvement_mean": validation_improvement_mean,
+        "quality_gate": quality_gate,
         "surrogate_inversion_likelihood": likelihood_result,
         "jax_surrogate_log_density": jax_log_density_result,
         "surrogate_hmc": surrogate_hmc_result,
@@ -3493,6 +3729,38 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-shock-scale", type=float, default=0.02)
     parser.add_argument("--hlt-parameter-perturbation", type=float, default=1e-6)
     parser.add_argument(
+        "--hlt-theta-design",
+        choices=("perturbation", "lhs", "centered-lhs", "prior", "grid"),
+        default="perturbation",
+        help=(
+            "Theta design for HLT target generation. 'perturbation' preserves the old "
+            "deterministic local grid; 'prior' and LHS methods require --hlt-theta-design-set."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-theta-design-set",
+        default="auto",
+        help="Named parameter set used by non-perturbation theta designs, e.g. phase1_18params_narrow.",
+    )
+    parser.add_argument(
+        "--hlt-theta-include-reference",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Prepend the model reference parameter vector to sampled theta designs.",
+    )
+    parser.add_argument(
+        "--hlt-drop-runtime-failures",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Drop theta draws whose steady-state or first-order runtime preparation fails.",
+    )
+    parser.add_argument(
+        "--hlt-min-runtime-successful-theta",
+        type=int,
+        default=1,
+        help="Minimum theta draws that must survive runtime preparation.",
+    )
+    parser.add_argument(
         "--hlt-target-builder",
         choices=("adaptive-sep", "batched-sep", "callback"),
         default="adaptive-sep",
@@ -3556,6 +3824,19 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--hlt-target-max-logged-failures", type=int, default=20)
     parser.add_argument(
+        "--hlt-require-full-target-success",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Quality gate: require every runtime-prepared theta draw to produce a full SEP target path.",
+    )
+    parser.add_argument("--hlt-min-full-success-share", type=float, default=0.0)
+    parser.add_argument("--hlt-min-accepted-samples", type=int, default=1)
+    parser.add_argument("--hlt-min-validation-improvement-mean", type=float, default=None)
+    parser.add_argument("--hlt-max-validation-rmse-mean", type=float, default=None)
+    parser.add_argument("--hlt-require-jax-parity", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--hlt-require-hmc", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--hlt-max-hmc-accepted-share", type=float, default=None)
+    parser.add_argument(
         "--hlt-steady-state-mode",
         choices=("fixed-reference", "solve", "solve-or-reference"),
         default="fixed-reference",
@@ -3568,6 +3849,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--hlt-steady-state-tol", type=float, default=1e-10)
     parser.add_argument("--hlt-steady-state-max-iter", type=int, default=100)
+    parser.add_argument(
+        "--hlt-require-solved-steady-state",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Quality gate: require every runtime-prepared theta draw to use a solved parameter-specific steady state.",
+    )
     parser.add_argument(
         "--hlt-first-order-qme-algorithm",
         choices=("doubling", "schur", "schur_gpu"),
@@ -3727,8 +4014,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         stamp = time.strftime("%Y%m%dT%H%M%S")
         out_path = DEFAULT_RESULTS_DIR / f"{args.mode}_{stamp}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True), encoding="utf-8")
-    print(json.dumps(_jsonable(payload), indent=2, sort_keys=True))
+    json_payload = json.dumps(_jsonable(payload), indent=2, sort_keys=True)
+    out_path.write_text(json_payload, encoding="utf-8")
+    suppress_stdout = str(os.environ.get("PROFILE_SUPPRESS_JSON_STDOUT", "0")).strip().lower()
+    if suppress_stdout not in {"1", "true", "yes", "on"}:
+        print(json_payload)
+    else:
+        _progress(f"suppressed full JSON stdout; payload is in {out_path}")
     print(f"wrote {out_path}", flush=True)
 
 

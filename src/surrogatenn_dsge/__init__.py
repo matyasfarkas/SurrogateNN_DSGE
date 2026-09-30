@@ -206,6 +206,7 @@ from .parameter_sampling import (
     parameter_grid,
     sample_lhs_parameters,
     sample_parameter_design,
+    sample_prior_parameters,
     summarize_parameter_design,
 )
 from .pipeline_artifacts import (
@@ -550,6 +551,7 @@ __all__ = [
     "run_chunked_sampling",
     "sample_lhs_parameters",
     "sample_parameter_design",
+    "sample_prior_parameters",
     "save_surrogate_bundle",
     "save_hlt_pipeline_artifact_payload",
     "second_order_state_update",

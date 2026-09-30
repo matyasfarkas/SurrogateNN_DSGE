@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 
 
@@ -30,6 +32,91 @@ def test_stage_sequence_runs_smoke_before_full() -> None:
     assert module.stage_sequence("smoke_then_calibration") == ("smoke", "calibration")
     assert module.stage_sequence("smoke_then_full") == ("smoke", "full")
     assert module.stage_sequence("smoke_pilot_full") == ("smoke", "pilot", "full")
+    assert module.stage_sequence("estimation_pilot") == ("estimation_pilot",)
+    assert module.stage_sequence("smoke_then_estimation_pilot") == ("smoke", "estimation_pilot")
+    assert module.stage_sequence("smoke_then_final_nonlinear") == ("smoke", "final_nonlinear")
+    assert module.stage_sequence("smoke_estimation_pilot_full") == (
+        "smoke",
+        "estimation_pilot",
+        "full",
+    )
+    assert module.stage_sequence("smoke_estimation_pilot_final") == (
+        "smoke",
+        "estimation_pilot",
+        "final_nonlinear",
+    )
+
+
+def test_hlt_estimation_pilot_dry_run_resolves_parallel_defaults(tmp_path: Path) -> None:
+    script = _ROOT / "benchmarks" / "run_hlt_gpu_estimation.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=_ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "MODE": "estimation_pilot",
+            "DRY_RUN": "1",
+            "RESULT_ROOT": str(tmp_path),
+        },
+    )
+
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+    assert lines["HLT_GPU_ESTIMATION_DRY_RUN"] == "1"
+    assert lines["MODE"] == "estimation_pilot"
+    assert lines["HLT_TARGET_BUILDER"] == "batched-sep"
+    assert lines["HLT_PARAMETER_SET"] == "sw07_safe_27"
+    assert lines["HLT_THETA_DRAWS"] == "128"
+    assert lines["HLT_PERIODS"] == "4"
+    assert lines["SEP_PERIODS"] == "4"
+    assert lines["HLT_SEP_BATCH_CHUNK_SIZE"] == "8"
+    assert lines["EPOCHS"] == "200"
+    assert lines["HIDDEN"] == "192"
+    assert lines["BLOCKS"] == "4"
+    assert lines["TRAIN_BATCH_SIZE"] == "2048"
+    assert lines["JAX_LOG_DENSITY_BATCH_SIZE"] == "2048"
+    assert lines["HMC_CHAINS"] == "64"
+    assert lines["HMC_SAMPLES"] == "512"
+
+
+def test_hlt_final_nonlinear_dry_run_enables_correctness_gates(tmp_path: Path) -> None:
+    script = _ROOT / "benchmarks" / "run_hlt_gpu_estimation.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=_ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "MODE": "final_nonlinear",
+            "DRY_RUN": "1",
+            "RESULT_ROOT": str(tmp_path),
+        },
+    )
+
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+    assert lines["MODE"] == "final_nonlinear"
+    assert lines["HLT_TARGET_BUILDER"] == "batched-sep"
+    assert lines["HLT_SEP_BATCH_CHUNK_SIZE"] == "16"
+    assert lines["HLT_PARAMETER_SET"] == "phase1_18params_narrow"
+    assert lines["HLT_THETA_DESIGN"] == "prior"
+    assert lines["HLT_THETA_DESIGN_SET"] == "phase1_18params_narrow"
+    assert lines["HLT_THETA_INCLUDE_REFERENCE"] == "1"
+    assert lines["HLT_DROP_RUNTIME_FAILURES"] == "1"
+    assert lines["HLT_MIN_RUNTIME_SUCCESSFUL_THETA"] == "64"
+    assert lines["HLT_MIN_ACCEPTED_SAMPLES"] == "256"
+    assert lines["HLT_REQUIRE_FULL_TARGET_SUCCESS"] == "1"
+    assert lines["HLT_REQUIRE_JAX_PARITY"] == "1"
+    assert lines["HLT_REQUIRE_HMC"] == "1"
+    assert lines["HLT_REQUIRE_SOLVED_STEADY_STATE"] == "1"
+    assert lines["LIKELIHOOD_RUNTIME_MODE"] == "full-jax"
+    assert lines["LIKELIHOOD_QME_ALGORITHM"] == "schur_gpu"
+    assert lines["FAIL_ON_QUALITY_GATE"] == "1"
 
 
 def test_build_hlt_stage_environment_sets_gpu_and_runtime_modes(tmp_path: Path) -> None:
@@ -81,10 +168,17 @@ def test_summarize_hlt_result_extracts_release_metrics(tmp_path: Path) -> None:
                         "train_size": 64,
                         "val_size": 8,
                         "pipeline_s": 12.5,
+                        "steady_state_solved_count": 8,
+                        "steady_state_fallback_count": 0,
+                        "steady_state_attempted_solved_count": 8,
+                        "steady_state_attempted_fallback_count": 2,
+                        "strict_solved_steady_state_preflight": True,
                         "target_diagnostics": {
                             "builder": "adaptive_sep",
                             "status": "ok",
                             "accepted_samples": 64,
+                            "runtime_prepared_theta_draws": 8,
+                            "runtime_dropped_theta_count": 2,
                             "theta_full_success_count": 8,
                             "fallback_share": 0.25,
                         },
@@ -118,5 +212,12 @@ def test_summarize_hlt_result_extracts_release_metrics(tmp_path: Path) -> None:
     assert summary["backend"] == "gpu"
     assert summary["parameter_count"] == 2
     assert summary["accepted_samples"] == 64
+    assert summary["runtime_prepared_theta_draws"] == 8
+    assert summary["runtime_dropped_theta_count"] == 2
+    assert summary["steady_state_solved_count"] == 8
+    assert summary["steady_state_fallback_count"] == 0
+    assert summary["steady_state_attempted_solved_count"] == 8
+    assert summary["steady_state_attempted_fallback_count"] == 2
+    assert summary["strict_solved_steady_state_preflight"] is True
     assert summary["jax_log_density_parity_ok"] is True
     assert summary["hmc_draws_per_second"] == 34.13

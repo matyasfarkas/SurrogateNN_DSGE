@@ -58,6 +58,14 @@ Gali three-equation posterior smoke in
 smoke for GPU-based first-order estimation, not a substitute for full HLT/SW07
 nonlinear SEP/residual-surrogate profiling.
 
+For the larger HLT nonlinear SEP/ResNN path, use `MODE=estimation_pilot` only as
+a speed/stress profile. Use `MODE=final_nonlinear` in
+`benchmarks/run_hlt_gpu_estimation.sh` for the correctness-first run with narrow
+18-parameter prior sampling, full SEP target-path gates, full-success-only
+training, full-JAX SS/ROM likelihood evaluation, JAX parity checks, and HMC
+quality gates. The staged GPUHUB workflow is documented in
+[docs/gpuhub_hlt_resnn_estimation.md](docs/gpuhub_hlt_resnn_estimation.md).
+
 ## Current status
 
 Implemented:

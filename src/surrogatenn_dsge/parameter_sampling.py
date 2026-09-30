@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import itertools
-from typing import Mapping, Optional, Sequence, Union
+from typing import Callable, Mapping, Optional, Sequence, Union
 
 import numpy as np
 
@@ -119,6 +119,91 @@ def sample_lhs_parameters(
     )
 
 
+def _sample_truncated_by_rejection(
+    draw_fn: Callable[[int], np.ndarray],
+    *,
+    lower: float,
+    upper: float,
+    n_samples: int,
+    max_rounds: int = 128,
+) -> np.ndarray:
+    values = np.empty((int(n_samples),), dtype=np.float64)
+    filled = 0
+    rounds = 0
+    while filled < int(n_samples) and rounds < int(max_rounds):
+        rounds += 1
+        remaining = int(n_samples) - filled
+        raw = np.asarray(draw_fn(max(remaining * 2, 16)), dtype=np.float64).reshape(-1)
+        accepted = raw[np.isfinite(raw) & (raw >= float(lower)) & (raw <= float(upper))]
+        take = min(remaining, accepted.size)
+        if take:
+            values[filled : filled + take] = accepted[:take]
+            filled += take
+    if filled < int(n_samples):
+        raise RuntimeError(
+            "Could not draw enough bounded prior samples after "
+            f"{max_rounds} rejection rounds for bounds ({lower}, {upper})."
+        )
+    return values
+
+
+def sample_prior_parameters(
+    parameter_set_or_specs: Union[str, Sequence[ParameterSpec]],
+    n_samples: int,
+    *,
+    seed: Optional[int] = None,
+) -> ParameterDesign:
+    """Draw an independent bounded prior design using the local ParameterSpec table."""
+
+    if n_samples < 1:
+        raise ValueError(f"n_samples must be >= 1, got {n_samples}.")
+    specs = _coerce_specs(parameter_set_or_specs)
+    rng = np.random.default_rng(seed)
+    theta = np.empty((len(specs), int(n_samples)), dtype=np.float64)
+    lower, upper = parameter_bounds_array(specs)
+
+    for idx, spec in enumerate(specs):
+        lo = float(lower[idx])
+        hi = float(upper[idx])
+        params = spec.prior_params
+        if spec.prior_type == "Beta":
+            alpha = float(params["alpha"])
+            beta = float(params["beta"])
+            unit = rng.beta(alpha, beta, size=int(n_samples))
+            theta[idx, :] = lo + (hi - lo) * unit
+        elif spec.prior_type == "Normal":
+            mu = float(params["mu"])
+            sigma = float(params["sigma"])
+            theta[idx, :] = _sample_truncated_by_rejection(
+                lambda size, mu=mu, sigma=sigma: rng.normal(mu, sigma, size=size),
+                lower=lo,
+                upper=hi,
+                n_samples=int(n_samples),
+            )
+        elif spec.prior_type == "InvGamma":
+            alpha = float(params["alpha"])
+            theta_rate = float(params["theta"])
+            theta[idx, :] = _sample_truncated_by_rejection(
+                lambda size, alpha=alpha, theta_rate=theta_rate: theta_rate
+                / rng.gamma(alpha, 1.0, size=size),
+                lower=lo,
+                upper=hi,
+                n_samples=int(n_samples),
+            )
+        elif spec.prior_type == "Uniform":
+            theta[idx, :] = rng.uniform(lo, hi, size=int(n_samples))
+        else:  # pragma: no cover - ParameterSpec validates this.
+            raise ValueError(f"Unsupported prior_type={spec.prior_type!r}.")
+
+    return ParameterDesign(
+        theta=theta,
+        names=tuple(spec.name for spec in specs),
+        lower=lower,
+        upper=upper,
+        method="prior",
+    )
+
+
 def parameter_grid(
     parameter_set_or_specs: Union[str, Sequence[ParameterSpec]],
     *,
@@ -198,6 +283,10 @@ def sample_parameter_design(
         if n_samples is None:
             raise ValueError("n_samples is required for method='lhs'.")
         return sample_lhs_parameters(parameter_set_or_specs, n_samples, seed=seed, centered=centered)
+    if normalized == "prior":
+        if n_samples is None:
+            raise ValueError("n_samples is required for method='prior'.")
+        return sample_prior_parameters(parameter_set_or_specs, n_samples, seed=seed)
     if normalized == "grid":
         return parameter_grid(parameter_set_or_specs, points_per_dim=points_per_dim, max_points=max_points)
-    raise ValueError(f"Unknown parameter-design method {method!r}. Supported methods: 'lhs', 'grid'.")
+    raise ValueError(f"Unknown parameter-design method {method!r}. Supported methods: 'lhs', 'prior', 'grid'.")

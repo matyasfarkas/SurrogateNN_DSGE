@@ -52,6 +52,52 @@ def test_memory_estimate_counts_core_arrays() -> None:
     assert memory["total_core_arrays"] == memory["X"] + 2 * memory["Y"] + memory["theta_ids"]
 
 
+def test_hlt_theta_design_prior_includes_reference_column() -> None:
+    mod = _load_profile_module()
+    subset_names = (
+        "crhoa",
+        "crhob",
+        "crhog",
+        "crhoqs",
+        "crhopinf",
+        "crhow",
+        "crhoms",
+        "z_ea",
+        "z_eb",
+        "z_eg",
+        "z_eqs",
+        "z_epinf",
+        "z_ew",
+        "z_em",
+        "cprobp",
+        "cindp",
+        "curvp",
+        "cprobw",
+    )
+    parameter_names = tuple(["unused", *subset_names])
+    base_parameters = np.arange(len(parameter_names), dtype=np.float64) + 0.25
+
+    theta, subset_idx, diagnostics = mod._make_hlt_theta_design(
+        base_parameters=base_parameters,
+        parameter_names=parameter_names,
+        subset_names=subset_names,
+        draws=5,
+        perturbation=0.0,
+        design="prior",
+        design_set="phase1_18params_narrow",
+        seed=123,
+        include_reference=True,
+    )
+
+    assert theta.shape == (18, 5)
+    assert subset_idx == list(range(1, 19))
+    np.testing.assert_allclose(theta[:, 0], base_parameters[subset_idx], rtol=0, atol=0)
+    assert diagnostics["design"] == "prior"
+    assert diagnostics["include_reference"] is True
+    assert diagnostics["sample_summary"]["sample_count"] == 4
+    assert np.isfinite(theta).all()
+
+
 def test_training_profile_tiny_cpu_smoke() -> None:
     mod = _load_profile_module()
     args = mod.parse_args(
