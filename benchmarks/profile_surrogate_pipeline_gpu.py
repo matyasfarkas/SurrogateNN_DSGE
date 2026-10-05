@@ -43,10 +43,12 @@ from surrogatenn_dsge import (
     SurrogateDataset,
     SurrogatePipelineResult,
     build_surrogate_residual_arrays_from_batched_sep_jax,
+    build_surrogate_residual_arrays_from_batched_sep_feature_grid_jax,
     build_surrogate_residual_arrays_jax,
     build_surrogate_residual_dataset,
     bounded_log_abs_det_jacobian,
     bounded_to_unconstrained,
+    fit_surrogate_pipeline_from_batched_arrays_jax,
     fit_surrogate_pipeline_from_batched_sep_jax,
     fit_surrogate_pipeline,
     load_surrogate_bundle,
@@ -61,6 +63,7 @@ from surrogatenn_dsge import (
     solve_first_order_model_jax,
     solve_stochastic_extended_path_residual_expectation,
     static_hmc_sample,
+    summarize_batched_surrogate_arrays,
     summarize_surrogate_dataset,
     surrogate_inversion_loglik_per_period,
     surrogate_inversion_loglikelihood_jax,
@@ -2557,6 +2560,192 @@ def _build_batched_hlt_sep_dataset(
     return dataset, diagnostics
 
 
+def _build_grid_batched_hlt_sep_arrays(
+    *,
+    model: Any,
+    parameter_values_by_theta: np.ndarray,
+    theta_features_by_theta: np.ndarray,
+    steady_states_by_theta: np.ndarray,
+    state_transition_by_theta: np.ndarray,
+    shock_impact_by_theta: np.ndarray,
+    initial_states: np.ndarray,
+    shocks: np.ndarray,
+    config: SEPConfig,
+    target_mode: str,
+    min_stable_periods: int,
+    observable_idx: Sequence[int],
+    state_idx: Sequence[int],
+    target_device: Any,
+    batch_chunk_size: int | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Build HLT targets from a ROM-generated adaptive grid using batched SEP.
+
+    This path changes the parallelization axis from "theta path period" to
+    independent ``(theta, state, shock)`` support points. The grid is generated
+    by rolling the ROM forward, then every support point is labeled by a batched
+    SEP solve. The output remains a fixed-shape JAX array object with masks, so
+    the ResNN trainer can stay on the selected JAX device.
+    """
+
+    theta_parameter_matrix = np.asarray(parameter_values_by_theta, dtype=np.float64)
+    theta_feature_matrix = np.asarray(theta_features_by_theta, dtype=np.float64)
+    steady_matrix = np.asarray(steady_states_by_theta, dtype=np.float64)
+    transition_tensor = np.asarray(state_transition_by_theta, dtype=np.float64)
+    impact_tensor = np.asarray(shock_impact_by_theta, dtype=np.float64)
+    initial_array = np.asarray(initial_states, dtype=np.float64)
+    shock_array = np.asarray(shocks, dtype=np.float64)
+    obs_idx = np.asarray(observable_idx, dtype=np.int64)
+    state_index = np.asarray(state_idx, dtype=np.int64)
+
+    n_theta = int(theta_parameter_matrix.shape[0])
+    periods = int(shock_array.shape[2])
+    feature_columns: list[np.ndarray] = []
+    full_parameter_rows: list[np.ndarray] = []
+    steady_rows: list[np.ndarray] = []
+    steady_reference_rows: list[np.ndarray] = []
+    rom_obs_rows: list[np.ndarray] = []
+    rom_next_rows: list[np.ndarray] = []
+    theta_ids: list[int] = []
+    period_ids: list[int] = []
+
+    for theta_idx in range(n_theta):
+        state = initial_array[:, theta_idx].copy()
+        for period in range(periods):
+            shock_t = shock_array[theta_idx, :, period]
+            state_dev = state[state_index] - steady_matrix[theta_idx, state_index]
+            rom_next = (
+                steady_matrix[theta_idx]
+                + _mv(transition_tensor[theta_idx], state_dev)
+                + _mv(impact_tensor[theta_idx], shock_t)
+            )
+            if not np.isfinite(rom_next).all():
+                rom_next = steady_matrix[theta_idx].copy()
+            feature_columns.append(np.concatenate([state, shock_t, theta_feature_matrix[theta_idx]]))
+            full_parameter_rows.append(theta_parameter_matrix[theta_idx])
+            steady_rows.append(steady_matrix[theta_idx])
+            steady_reference_rows.append(model._steady_reference_values(steady_matrix[theta_idx]))
+            rom_next_rows.append(rom_next)
+            rom_obs_rows.append(rom_next[obs_idx])
+            theta_ids.append(theta_idx)
+            period_ids.append(period)
+            state = rom_next
+
+    if not feature_columns:
+        raise ValueError("HLT grid-batched SEP target generation received an empty ROM grid.")
+
+    feature_grid = np.column_stack(feature_columns)
+    full_parameter_matrix = np.asarray(full_parameter_rows, dtype=np.float64)
+    steady_sample_matrix = np.asarray(steady_rows, dtype=np.float64)
+    steady_reference_matrix = np.asarray(steady_reference_rows, dtype=np.float64)
+    rom_obs_matrix = np.asarray(rom_obs_rows, dtype=np.float64)
+    rom_next_matrix = np.asarray(rom_next_rows, dtype=np.float64)
+    total_points = int(feature_grid.shape[1])
+    if batch_chunk_size is None or int(batch_chunk_size) <= 0:
+        effective_chunk_size = total_points
+    else:
+        effective_chunk_size = min(int(batch_chunk_size), total_points)
+    memory_estimate = _estimate_batched_sep_dense_memory(
+        config=config,
+        state_dim=int(model.timings.nVars),
+        shock_dim=int(model.timings.nExo),
+        total_batch_size=total_points,
+        chunk_size=effective_chunk_size,
+    )
+    _progress(
+        "grid-batched HLT SEP dense-memory estimate "
+        f"points={total_points} unknowns={memory_estimate['stacked_unknowns']} "
+        f"chunk={effective_chunk_size}/{total_points} "
+        f"dense_chunk_gib={memory_estimate['chunk_dense_jacobian_gib']:.3f} "
+        f"rough_workspace_gib={memory_estimate['rough_chunk_workspace_gib']:.3f} "
+        f"solver={config.linear_solver}"
+    )
+
+    def rom_predict_unused(_state: Any, _shock_t: Any, _theta_t: Any) -> tuple[np.ndarray, np.ndarray]:
+        raise RuntimeError("grid-batched HLT SEP uses precomputed ROM targets.")
+
+    def conditional_residual(
+        lag_state: jax.Array,
+        current_state: jax.Array,
+        lead_state: jax.Array,
+        current_shock: jax.Array,
+        params: object,
+    ) -> jax.Array:
+        parameter_values_one, steady_reference_values_one = params
+        return model._evaluate_dynamic_residual_with_context(
+            lag_state,
+            current_state,
+            lead_state,
+            current_shock,
+            parameter_values=parameter_values_one,
+            steady_reference_values=steady_reference_values_one,
+        )
+
+    solve_context = nullcontext() if target_device is None else jax.default_device(target_device)
+    started = time.perf_counter()
+    with solve_context:
+        arrays, diagnostics = build_surrogate_residual_arrays_from_batched_sep_feature_grid_jax(
+            rom_predict_unused,
+            conditional_residual,
+            feature_grid,
+            state_dim=int(model.timings.nVars),
+            shock_dim=int(model.timings.nExo),
+            terminal_state=steady_sample_matrix,
+            config=config,
+            observable_indices=obs_idx,
+            target_mode=target_mode,
+            min_successful_samples=1,
+            min_stable_periods=min_stable_periods,
+            params=(
+                jnp.asarray(full_parameter_matrix, dtype=jnp.float64),
+                jnp.asarray(steady_reference_matrix, dtype=jnp.float64),
+            ),
+            params_batched=True,
+            rom_obs=rom_obs_matrix,
+            rom_state_next=rom_next_matrix,
+            chunk_size=effective_chunk_size,
+        )
+    _block_until_ready_tree(arrays)
+    elapsed = time.perf_counter() - started
+    arrays = arrays._replace(period_ids=jnp.asarray(period_ids, dtype=jnp.int32))
+    diagnostics = {
+        **diagnostics,
+        "builder": "grid_batched_sep",
+        "status": "ok",
+        "elapsed_s": float(elapsed),
+        "grid_point_count": total_points,
+        "theta_draws": n_theta,
+        "periods": periods,
+        "batch_chunk_size": int(effective_chunk_size),
+        "memory_estimate": memory_estimate,
+        "theta_ids_original": theta_ids,
+        "period_ids_original": period_ids,
+        "fallback_samples": 0,
+        "fallback_share": 0.0,
+        "theta_full_success_count": None,
+        "accepted_by_branching_order": {
+            str(int(config.branching_order)): int(diagnostics.get("accepted_samples", 0))
+        },
+        "sep_config": {
+            "periods": int(config.periods),
+            "branching_order": int(config.branching_order),
+            "nnodes": int(config.nnodes),
+            "shock_scale": float(config.shock_scale),
+            "sparse_tree": bool(config.sparse_tree),
+            "max_iter": int(config.max_iter),
+            "tol": float(config.tol),
+            "accept_tol": None if config.accept_tol is None else float(config.accept_tol),
+            "batch_chunk_size": int(effective_chunk_size),
+        },
+        "caveat": (
+            "Grid-batched SEP labels independent ROM-generated support points. "
+            "It intentionally does not advance the grid with FOM states; the goal "
+            "is high-throughput adaptive-grid target generation around the ROM/HMC "
+            "support."
+        ),
+    }
+    return arrays, diagnostics
+
+
 def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, Any]:
     """Run the actual HLT model through a tiny ROM/FOM surrogate path.
 
@@ -3172,8 +3361,55 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         )
         target_diagnostics["target_min_stable_periods"] = int(target_min_stable_periods)
         target_diagnostics["effective_validation_fraction"] = float(validation_fraction)
+    elif target_builder in {"grid-batched-sep", "grid_batched_sep", "feature-grid-batched-sep"}:
+        _progress(
+            "grid-batched HLT target generation "
+            f"theta_draws={theta.shape[1]} periods={periods} sep_periods={sep_config.periods}"
+        )
+        arrays, target_diagnostics = _build_grid_batched_hlt_sep_arrays(
+            model=model,
+            parameter_values_by_theta=full_parameter_values_by_theta,
+            theta_features_by_theta=theta.T,
+            steady_states_by_theta=steady_states_by_theta,
+            state_transition_by_theta=state_transition_by_theta,
+            shock_impact_by_theta=shock_impact_by_theta,
+            initial_states=initial_states,
+            shocks=shocks,
+            config=sep_config,
+            target_mode="fom_full",
+            min_stable_periods=1,
+            observable_idx=observable_idx,
+            state_idx=state_idx,
+            target_device=target_device,
+            batch_chunk_size=int(args.hlt_sep_batch_chunk_size),
+        )
+        array_summary = summarize_batched_surrogate_arrays(arrays)
+        batched_result = fit_surrogate_pipeline_from_batched_arrays_jax(
+            arrays,
+            architecture="resnet",
+            rom_residual=True,
+            only_full_success=bool(args.only_full_success),
+            d_hidden=int(args.hidden),
+            n_blocks=int(args.blocks),
+            nepoch=int(args.epochs),
+            eta_init=float(args.learning_rate),
+            batch_size=int(args.batch_size),
+            device=target_device,
+            train_dtype=args.train_dtype,
+        )
+        result = SimpleNamespace(
+            training=batched_result.training,
+            dataset_summary=array_summary,
+            bundle_path=batched_result.bundle_path,
+        )
+        target_diagnostics["target_min_stable_periods"] = 1
+        target_diagnostics["effective_validation_fraction"] = 0.0
+        target_diagnostics["training_input"] = "BatchedSurrogateRolloutArrays"
     else:
-        raise ValueError("hlt_target_builder must be 'adaptive-sep', 'batched-sep', or 'callback'.")
+        raise ValueError(
+            "hlt_target_builder must be 'adaptive-sep', 'batched-sep', "
+            "'grid-batched-sep', or 'callback'."
+        )
     if not surrogate_bundle_reused and surrogate_bundle_path is not None:
         bundle_metadata = {
             "pipeline": "run_hlt_fixed_steady_state_profile",
@@ -3831,6 +4067,15 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             1,
             "The batched target builder does not run the adaptive fallback ladder or auxiliary OBC-shock reinjection.",
         )
+    elif target_builder_summary in {"grid-batched-sep", "grid_batched_sep", "feature-grid-batched-sep"}:
+        caveats.insert(
+            0,
+            "SEP target generation labels independent ROM/adaptive-grid support points with batched JAX solves and trains from masked JAX arrays.",
+        )
+        caveats.insert(
+            1,
+            "The grid-batched target builder does not run the adaptive fallback ladder or auxiliary OBC-shock reinjection.",
+        )
     else:
         caveats.insert(
             0,
@@ -3999,6 +4244,7 @@ def build_plan(args: argparse.Namespace, shape: SyntheticHLTShape) -> dict[str, 
             "Synthetic fixed-shape batched rollout training can be profiled with --mode batched-training.",
             "Synthetic batched SEP target generation plus training can be profiled with --mode batched-sep-training.",
             "Actual parsed HLT target generation can use --hlt-target-builder batched-sep for fixed-config batched SEP across theta draws per period.",
+            "Use --hlt-target-builder grid-batched-sep to label independent ROM/adaptive-grid support points with batched SEP and train directly from masked JAX arrays.",
             "Adaptive fallback ladders and auxiliary OBC-shock reinjection still use the sequential target-generation path.",
         ],
     }
@@ -4181,12 +4427,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--hlt-target-builder",
-        choices=("adaptive-sep", "batched-sep", "callback"),
+        choices=("adaptive-sep", "batched-sep", "grid-batched-sep", "callback"),
         default="adaptive-sep",
         help=(
             "How to build HLT surrogate targets. 'adaptive-sep' tries an ordered "
             "ladder of accepted SEP solves per theta-period and records diagnostics; "
             "'batched-sep' uses one fixed parsed-model batched SEP solve per period; "
+            "'grid-batched-sep' labels independent ROM-grid support points with "
+            "batched SEP and trains from fixed-shape JAX arrays; "
             "'callback' preserves the original one-config callback path."
         ),
     )
@@ -4204,9 +4452,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=0,
         help=(
-            "For --hlt-target-builder batched-sep, split theta draws into GPU "
-            "microbatches of this size before forming dense SEP Jacobians. "
-            "Use 0 to solve all theta draws in one batch."
+            "For --hlt-target-builder batched-sep or grid-batched-sep, split "
+            "theta/grid draws into GPU microbatches of this size before forming "
+            "dense SEP Jacobians. Use 0 to solve all draws in one batch."
         ),
     )
     parser.add_argument(

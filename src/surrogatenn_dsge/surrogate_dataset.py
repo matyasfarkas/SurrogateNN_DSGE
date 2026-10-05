@@ -8,10 +8,16 @@ import jax.numpy as jnp
 import numpy as np
 
 from .parameter_sampling import ParameterDesign
-from .sep import BatchedSEPSolution
+from .sep import (
+    BatchedSEPSolution,
+    SEPConditionalResidualFn,
+    SEPConfig,
+    solve_batched_stochastic_extended_path_residual_expectation,
+)
 
 
 PredictTupleFn = Callable[[Any, Any, Any], tuple[Any, Any]]
+PredictBatchTupleFn = Callable[[Any, Any, Any], tuple[Any, Any]]
 _TARGET_MODES = ("residual_obs", "residual_full", "fom_obs", "fom_full")
 
 
@@ -330,6 +336,94 @@ def _target_arrays_jax(
     return y, y_rom
 
 
+def _concatenate_batched_surrogate_arrays(
+    chunks: Sequence[BatchedSurrogateRolloutArrays],
+) -> BatchedSurrogateRolloutArrays:
+    if not chunks:
+        raise ValueError("At least one batched surrogate chunk is required.")
+    if len(chunks) == 1:
+        return chunks[0]
+
+    x_dim = int(chunks[0].X.shape[0])
+    y_dim = int(chunks[0].Y.shape[0])
+    y_rom_dim = int(chunks[0].Y_rom.shape[0])
+    theta_dim = int(chunks[0].theta.shape[0])
+    theta_offset = 0
+    theta_ids = []
+    for chunk in chunks:
+        if int(chunk.X.shape[0]) != x_dim:
+            raise ValueError("Cannot concatenate batched surrogate chunks with different X dimensions.")
+        if int(chunk.Y.shape[0]) != y_dim or int(chunk.Y_rom.shape[0]) != y_rom_dim:
+            raise ValueError("Cannot concatenate batched surrogate chunks with different Y dimensions.")
+        if int(chunk.theta.shape[0]) != theta_dim:
+            raise ValueError("Cannot concatenate batched surrogate chunks with different theta dimensions.")
+        theta_ids.append(jnp.asarray(chunk.theta_ids, dtype=jnp.int32) + int(theta_offset))
+        theta_offset += int(chunk.theta.shape[1])
+
+    return BatchedSurrogateRolloutArrays(
+        X=jnp.concatenate([chunk.X for chunk in chunks], axis=1),
+        Y=jnp.concatenate([chunk.Y for chunk in chunks], axis=1),
+        Y_rom=jnp.concatenate([chunk.Y_rom for chunk in chunks], axis=1),
+        theta=jnp.concatenate([chunk.theta for chunk in chunks], axis=1),
+        theta_ids=jnp.concatenate(theta_ids, axis=0),
+        period_ids=jnp.concatenate([chunk.period_ids for chunk in chunks], axis=0),
+        sample_mask=jnp.concatenate([chunk.sample_mask for chunk in chunks], axis=0),
+        theta_success=jnp.concatenate([chunk.theta_success for chunk in chunks], axis=0),
+        theta_stable_periods=jnp.concatenate([chunk.theta_stable_periods for chunk in chunks], axis=0),
+    )
+
+
+def _evaluate_rom_batch(
+    rom_predict: PredictTupleFn,
+    states: np.ndarray,
+    shocks: np.ndarray,
+    theta_samples: np.ndarray,
+    *,
+    rom_predict_batch: Optional[PredictBatchTupleFn] = None,
+    rom_predict_is_jax: bool = False,
+) -> tuple[jax.Array, jax.Array]:
+    if rom_predict_batch is not None:
+        obs, next_state = rom_predict_batch(
+            jnp.asarray(states, dtype=jnp.float64),
+            jnp.asarray(shocks, dtype=jnp.float64),
+            jnp.asarray(theta_samples, dtype=jnp.float64),
+        )
+        obs_arr = jnp.asarray(obs, dtype=jnp.float64)
+        next_arr = jnp.asarray(next_state, dtype=jnp.float64)
+    elif bool(rom_predict_is_jax):
+        obs_arr, next_arr = jax.vmap(rom_predict)(
+            jnp.asarray(states, dtype=jnp.float64),
+            jnp.asarray(shocks, dtype=jnp.float64),
+            jnp.asarray(theta_samples, dtype=jnp.float64),
+        )
+        obs_arr = jnp.asarray(obs_arr, dtype=jnp.float64)
+        next_arr = jnp.asarray(next_arr, dtype=jnp.float64)
+    else:
+        obs_rows = []
+        next_rows = []
+        for sample_idx in range(states.shape[0]):
+            obs, next_state = _call_predict_tuple(
+                rom_predict,
+                states[sample_idx],
+                shocks[sample_idx],
+                theta_samples[sample_idx],
+                label="rom_predict",
+            )
+            obs_rows.append(obs)
+            next_rows.append(next_state)
+        obs_arr = jnp.asarray(np.vstack(obs_rows), dtype=jnp.float64)
+        next_arr = jnp.asarray(np.vstack(next_rows), dtype=jnp.float64)
+
+    if obs_arr.ndim != 2:
+        raise ValueError(f"ROM observations must have shape (batch, obs_dim), got {obs_arr.shape}.")
+    if next_arr.shape != (states.shape[0], states.shape[1]):
+        raise ValueError(
+            "ROM next-state batch must have shape "
+            f"({states.shape[0]}, {states.shape[1]}), got {next_arr.shape}."
+        )
+    return obs_arr, next_arr
+
+
 def _sample_periods(
     available: int,
     samples_per_theta: Optional[int],
@@ -550,6 +644,240 @@ def build_surrogate_residual_arrays_from_batched_sep_jax(
         target_mode=target_mode,
         min_stable_periods=min_stable_periods,
     )
+
+
+def build_surrogate_residual_arrays_from_batched_sep_feature_grid_jax(
+    rom_predict: PredictTupleFn,
+    conditional_residual_fn: SEPConditionalResidualFn,
+    feature_grid: Any,
+    *,
+    state_dim: int,
+    shock_dim: int,
+    terminal_state: Any,
+    config: SEPConfig,
+    observable_indices: Sequence[int],
+    target_mode: str = "residual_full",
+    min_successful_samples: int = 1,
+    min_stable_periods: int = 1,
+    params: object = None,
+    params_batched: Optional[bool] = None,
+    initial_guess: Optional[Any] = None,
+    rom_obs: Optional[Any] = None,
+    rom_state_next: Optional[Any] = None,
+    rom_predict_batch: Optional[PredictBatchTupleFn] = None,
+    rom_predict_is_jax: bool = False,
+    chunk_size: Optional[int] = None,
+) -> tuple[BatchedSurrogateRolloutArrays, dict[str, object]]:
+    """Generate SEP FOM targets for an adaptive feature grid with batched JAX solves.
+
+    ``feature_grid`` columns must be ``[state; shock; theta]``. Each selected
+    column is treated as an independent current state/shock/parameter support
+    point. The expensive FOM label is produced by one batched SEP solve per
+    chunk, while ROM labels are evaluated either through a vectorized JAX
+    ``rom_predict_batch``/``rom_predict`` or a scalar Python fallback.
+
+    This is the GPU-native companion to
+    :func:`build_surrogate_residual_dataset_from_feature_grid`: instead of
+    spending one sequential FOM/SEP call per grid point, it maps the grid into
+    a fixed-shape ``BatchedSurrogateRolloutArrays`` object suitable for direct
+    JAX/ResNN training. Only the first SEP transition is emitted as a supervised
+    target for each grid column; longer ``config.periods`` values still improve
+    the nonlinear SEP look-ahead used to compute that first transition.
+    """
+
+    grid = np.asarray(feature_grid, dtype=np.float64)
+    if grid.ndim != 2:
+        raise ValueError(f"feature_grid must have shape (features, samples), got {grid.shape}.")
+    state_count = int(state_dim)
+    shock_count = int(shock_dim)
+    if state_count < 1:
+        raise ValueError(f"state_dim must be positive, got {state_dim}.")
+    if shock_count < 0:
+        raise ValueError(f"shock_dim must be nonnegative, got {shock_dim}.")
+    theta_dim = int(grid.shape[0]) - state_count - shock_count
+    if theta_dim < 1:
+        raise ValueError(
+            "feature_grid must contain at least one theta row after state/shock rows; "
+            f"got feature dimension {grid.shape[0]}, state_dim={state_dim}, shock_dim={shock_dim}."
+        )
+    attempted = int(grid.shape[1])
+    if attempted < 1:
+        raise ValueError("feature_grid must contain at least one candidate column.")
+    if not np.isfinite(grid).all():
+        raise ValueError("feature_grid must be finite.")
+    if int(min_successful_samples) < 1:
+        raise ValueError(f"min_successful_samples must be >= 1, got {min_successful_samples}.")
+    if int(min_stable_periods) < 0:
+        raise ValueError(f"min_stable_periods must be nonnegative, got {min_stable_periods}.")
+
+    target_mode_norm = _normalize_target_mode(target_mode)
+    effective_chunk_size = attempted if chunk_size is None or int(chunk_size) <= 0 else int(chunk_size)
+    if effective_chunk_size < 1:
+        raise ValueError(f"chunk_size must be positive when provided, got {chunk_size}.")
+
+    states_all = grid[:state_count].T.copy()
+    shocks_all = grid[state_count : state_count + shock_count].T.copy()
+    theta_all = grid[state_count + shock_count :].T.copy()
+    rom_obs_all = None if rom_obs is None else np.asarray(rom_obs, dtype=np.float64)
+    rom_state_next_all = None if rom_state_next is None else np.asarray(rom_state_next, dtype=np.float64)
+    if (rom_obs_all is None) != (rom_state_next_all is None):
+        raise ValueError("rom_obs and rom_state_next must either both be provided or both be omitted.")
+    if rom_obs_all is not None:
+        if rom_obs_all.ndim != 2 or int(rom_obs_all.shape[0]) != attempted:
+            raise ValueError(
+                "rom_obs must have shape (samples, obs_dim) when provided, "
+                f"got {rom_obs_all.shape}."
+            )
+        if rom_state_next_all is None:
+            raise AssertionError("rom_state_next_all unexpectedly missing.")
+        if rom_state_next_all.shape != (attempted, state_count):
+            raise ValueError(
+                "rom_state_next must have shape "
+                f"({attempted}, {state_count}) when provided, got {rom_state_next_all.shape}."
+            )
+    terminal_array = np.asarray(terminal_state, dtype=np.float64)
+    if terminal_array.ndim == 1 and terminal_array.shape[0] != state_count:
+        raise ValueError(
+            f"terminal_state must have length state_dim={state_count}, got {terminal_array.shape}."
+        )
+    if terminal_array.ndim == 2 and terminal_array.shape not in {
+        (attempted, state_count),
+        (state_count, attempted),
+    }:
+        raise ValueError(
+            "Batched terminal_state must have shape "
+            f"({attempted}, {state_count}) or ({state_count}, {attempted}), got {terminal_array.shape}."
+        )
+
+    initial_guess_array = None if initial_guess is None else np.asarray(initial_guess, dtype=np.float64)
+
+    def infer_params_batched(values: object) -> bool:
+        leaves = jax.tree_util.tree_leaves(values)
+        array_leaves = [np.asarray(leaf) for leaf in leaves if leaf is not None]
+        if not array_leaves:
+            return False
+        return all(array.ndim >= 1 and int(array.shape[0]) == attempted for array in array_leaves)
+
+    explicit_params_are_batched = (
+        False if params is None else infer_params_batched(params) if params_batched is None else bool(params_batched)
+    )
+
+    def params_for_chunk(start_idx: int, end_idx: int) -> object:
+        if params is None:
+            return None
+        if not explicit_params_are_batched:
+            return params
+
+        def slice_leaf(leaf: Any) -> Any:
+            array = jnp.asarray(leaf, dtype=jnp.float64)
+            if array.ndim < 1 or int(array.shape[0]) != attempted:
+                raise ValueError(
+                    "params_batched=True requires every params leaf to have leading "
+                    f"dimension {attempted}; got leaf shape {array.shape}."
+                )
+            return array[start_idx:end_idx]
+
+        return jax.tree_util.tree_map(slice_leaf, params)
+    chunks: list[BatchedSurrogateRolloutArrays] = []
+    residual_norm_parts: list[np.ndarray] = []
+    accepted_parts: list[np.ndarray] = []
+    iteration_parts: list[np.ndarray] = []
+
+    for start in range(0, attempted, effective_chunk_size):
+        end = min(start + effective_chunk_size, attempted)
+        states = states_all[start:end]
+        shocks = shocks_all[start:end]
+        theta_samples = theta_all[start:end]
+        batch = int(end - start)
+
+        deterministic = np.zeros((batch, int(config.periods), shock_count), dtype=np.float64)
+        if shock_count:
+            deterministic[:, 0, :] = shocks
+
+        if terminal_array.ndim == 2:
+            terminal_chunk = terminal_array[start:end] if terminal_array.shape[0] == attempted else terminal_array[:, start:end].T
+        else:
+            terminal_chunk = terminal_array
+
+        if initial_guess_array is None:
+            initial_guess_chunk = None
+        elif initial_guess_array.shape[0] == attempted:
+            initial_guess_chunk = initial_guess_array[start:end]
+        else:
+            initial_guess_chunk = initial_guess_array
+
+        params_chunk = params_for_chunk(start, end)
+        if params_chunk is None:
+            params_chunk = jnp.asarray(theta_samples, dtype=jnp.float64)
+
+        sep_solution = solve_batched_stochastic_extended_path_residual_expectation(
+            conditional_residual_fn,
+            initial_state=states,
+            terminal_state=terminal_chunk,
+            shock_dim=shock_count,
+            deterministic_shocks=deterministic,
+            config=config,
+            params=params_chunk,
+            initial_guess=initial_guess_chunk,
+        )
+        if rom_obs_all is not None and rom_state_next_all is not None:
+            rom_obs_chunk = jnp.asarray(rom_obs_all[start:end], dtype=jnp.float64)
+            rom_state_next_chunk = jnp.asarray(rom_state_next_all[start:end], dtype=jnp.float64)
+        else:
+            rom_obs_chunk, rom_state_next_chunk = _evaluate_rom_batch(
+                rom_predict,
+                states,
+                shocks,
+                theta_samples,
+                rom_predict_batch=rom_predict_batch,
+                rom_predict_is_jax=rom_predict_is_jax,
+            )
+        arrays = build_surrogate_residual_arrays_from_batched_sep_jax(
+            jnp.asarray(states[:, None, :], dtype=jnp.float64),
+            jnp.asarray(shocks[:, None, :], dtype=jnp.float64),
+            jnp.asarray(theta_samples.T, dtype=jnp.float64),
+            rom_obs_chunk[:, None, :],
+            rom_state_next_chunk[:, None, :],
+            sep_solution,
+            observable_indices=observable_indices,
+            target_mode=target_mode_norm,
+            min_stable_periods=min_stable_periods,
+            require_accepted=True,
+        )
+        chunks.append(arrays)
+        residual_norm_parts.append(np.asarray(sep_solution.residual_norm, dtype=np.float64).reshape(-1))
+        accepted_parts.append(np.asarray(sep_solution.accepted, dtype=bool).reshape(-1))
+        iteration_parts.append(np.asarray(sep_solution.iterations, dtype=np.int64).reshape(-1))
+
+    result = _concatenate_batched_surrogate_arrays(chunks)
+    sample_mask = np.asarray(result.sample_mask, dtype=bool).reshape(-1)
+    accepted = int(np.count_nonzero(sample_mask))
+    residual_norm = np.concatenate(residual_norm_parts) if residual_norm_parts else np.zeros((0,), dtype=np.float64)
+    accepted_sep = np.concatenate(accepted_parts) if accepted_parts else np.zeros((0,), dtype=bool)
+    iterations = np.concatenate(iteration_parts) if iteration_parts else np.zeros((0,), dtype=np.int64)
+    finite_residuals = residual_norm[np.isfinite(residual_norm)]
+    diagnostics = {
+        "builder": "batched_sep_feature_grid",
+        "status": "ok" if accepted >= int(min_successful_samples) else "error",
+        "attempted_count": attempted,
+        "accepted_samples": accepted,
+        "masked_samples": int(sample_mask.size - accepted),
+        "sep_accepted_count": int(np.count_nonzero(accepted_sep)),
+        "chunk_count": int(len(chunks)),
+        "chunk_size": int(effective_chunk_size),
+        "params_batched": bool(explicit_params_are_batched),
+        "target_mode": target_mode_norm,
+        "residual_p50": float(np.percentile(finite_residuals, 50)) if finite_residuals.size else None,
+        "residual_p90": float(np.percentile(finite_residuals, 90)) if finite_residuals.size else None,
+        "residual_max": float(np.max(finite_residuals)) if finite_residuals.size else None,
+        "iterations_max": int(np.max(iterations)) if iterations.size else 0,
+    }
+    if accepted < int(min_successful_samples):
+        raise ValueError(
+            "Batched SEP feature-grid target generation produced fewer than "
+            f"{int(min_successful_samples)} successful samples. Diagnostics: {diagnostics}"
+        )
+    return result, diagnostics
 
 
 def build_surrogate_residual_dataset(

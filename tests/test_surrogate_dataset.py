@@ -9,6 +9,7 @@ from surrogatenn_dsge import (
     BatchedSurrogateRolloutArrays,
     ParameterDesign,
     build_surrogate_residual_arrays_from_batched_sep_jax,
+    build_surrogate_residual_arrays_from_batched_sep_feature_grid_jax,
     build_surrogate_residual_arrays_jax,
     build_surrogate_residual_dataset,
     build_surrogate_residual_dataset_from_feature_grid,
@@ -79,6 +80,21 @@ def _fom_predict_jax(state, shock, theta):
     obs_delta = jnp.asarray([0.1 * state[0] ** 2 + 0.05 * theta[1]], dtype=jnp.float64)
     state_delta = jnp.asarray([0.2 * shock[0] ** 2, -0.1 * state[1] * shock[0]], dtype=jnp.float64)
     return obs_rom + obs_delta, state_rom + state_delta
+
+
+def _rom_predict_state_obs(state, shock, theta):
+    _, next_state = _rom_predict(state, shock, theta)
+    return next_state[:1], next_state
+
+
+def _fom_predict_state_obs(state, shock, theta):
+    _, next_state = _fom_predict(state, shock, theta)
+    return next_state[:1], next_state
+
+
+def _rom_predict_state_obs_jax(state, shock, theta):
+    _, next_state = _rom_predict_jax(state, shock, theta)
+    return next_state[:1], next_state
 
 
 def _batched_toy_rollouts(theta, initial_states, shocks_by_period):
@@ -191,6 +207,151 @@ def test_feature_grid_dataset_spends_fom_calls_only_on_selected_columns() -> Non
     fom_obs, fom_state_next = _fom_predict(feature_grid[:2, 0], feature_grid[2:3, 0], feature_grid[3:, 0])
     expected = np.concatenate([fom_obs - rom_obs, fom_state_next - rom_state_next])
     np.testing.assert_allclose(dataset.Y[:, 0], expected, rtol=0, atol=1e-12)
+
+
+def test_batched_sep_feature_grid_matches_sequential_feature_grid_targets() -> None:
+    feature_grid = np.asarray(
+        [
+            [1.0, -0.5, 0.25, 0.4],
+            [0.2, 0.4, -0.1, 0.1],
+            [0.3, -0.2, 0.1, -0.05],
+            [0.1, 0.1, 0.2, 0.2],
+            [1.0, 1.0, 1.5, 1.5],
+        ],
+        dtype=np.float64,
+    )
+
+    def conditional_residual(y_prev, y_curr, _y_next, shock, theta):
+        _, fom_next = _fom_predict_jax(y_prev, shock, theta)
+        return y_curr - fom_next
+
+    arrays, diagnostics = build_surrogate_residual_arrays_from_batched_sep_feature_grid_jax(
+        _rom_predict_state_obs,
+        conditional_residual,
+        feature_grid,
+        state_dim=2,
+        shock_dim=1,
+        terminal_state=np.zeros((2,), dtype=np.float64),
+        config=SEPConfig(periods=1, branching_order=0, nnodes=1, max_iter=20, tol=1e-12),
+        observable_indices=[0],
+        target_mode="residual_full",
+        params=jnp.asarray(feature_grid[3:].T, dtype=jnp.float64),
+        params_batched=True,
+        chunk_size=2,
+    )
+    sequential, _ = build_surrogate_residual_dataset_from_feature_grid(
+        _rom_predict_state_obs,
+        _fom_predict_state_obs,
+        feature_grid,
+        state_dim=2,
+        shock_dim=1,
+        target_mode="residual_full",
+    )
+
+    mask = np.asarray(arrays.sample_mask, dtype=bool)
+    assert diagnostics["builder"] == "batched_sep_feature_grid"
+    assert diagnostics["chunk_count"] == 2
+    assert diagnostics["params_batched"] is True
+    assert diagnostics["accepted_samples"] == feature_grid.shape[1]
+    assert diagnostics["residual_max"] is not None
+    np.testing.assert_allclose(np.asarray(arrays.X[:, mask]), sequential.X, rtol=0, atol=1e-10)
+    np.testing.assert_allclose(np.asarray(arrays.Y[:, mask]), sequential.Y, rtol=0, atol=1e-10)
+    np.testing.assert_allclose(np.asarray(arrays.Y_rom[:, mask]), sequential.Y_rom, rtol=0, atol=1e-12)
+
+
+def test_batched_sep_feature_grid_supports_jax_vectorized_rom() -> None:
+    feature_grid = np.asarray(
+        [
+            [0.1, 0.2, 0.3],
+            [0.0, -0.1, 0.1],
+            [0.05, -0.02, 0.03],
+            [0.25, 0.25, 0.35],
+            [1.0, 1.0, 1.25],
+        ],
+        dtype=np.float64,
+    )
+
+    def conditional_residual(y_prev, y_curr, _y_next, shock, theta):
+        _, fom_next = _fom_predict_jax(y_prev, shock, theta)
+        return y_curr - fom_next
+
+    unchunked, _ = build_surrogate_residual_arrays_from_batched_sep_feature_grid_jax(
+        _rom_predict_state_obs_jax,
+        conditional_residual,
+        feature_grid,
+        state_dim=2,
+        shock_dim=1,
+        terminal_state=np.zeros((2,), dtype=np.float64),
+        config=SEPConfig(periods=1, branching_order=0, nnodes=1, max_iter=20, tol=1e-12),
+        observable_indices=[0],
+        target_mode="fom_full",
+        rom_predict_is_jax=True,
+    )
+    chunked, diagnostics = build_surrogate_residual_arrays_from_batched_sep_feature_grid_jax(
+        _rom_predict_state_obs_jax,
+        conditional_residual,
+        feature_grid,
+        state_dim=2,
+        shock_dim=1,
+        terminal_state=np.zeros((2,), dtype=np.float64),
+        config=SEPConfig(periods=1, branching_order=0, nnodes=1, max_iter=20, tol=1e-12),
+        observable_indices=[0],
+        target_mode="fom_full",
+        rom_predict_is_jax=True,
+        chunk_size=1,
+    )
+
+    assert diagnostics["chunk_count"] == feature_grid.shape[1]
+    np.testing.assert_allclose(np.asarray(chunked.X), np.asarray(unchunked.X), rtol=0, atol=1e-12)
+    np.testing.assert_allclose(np.asarray(chunked.Y), np.asarray(unchunked.Y), rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(np.asarray(chunked.sample_mask), np.asarray(unchunked.sample_mask))
+
+
+def test_batched_sep_feature_grid_accepts_precomputed_rom_targets() -> None:
+    feature_grid = np.asarray(
+        [
+            [0.1, 0.2],
+            [0.0, -0.1],
+            [0.05, -0.02],
+            [0.25, 0.35],
+            [1.0, 1.25],
+        ],
+        dtype=np.float64,
+    )
+    rom_obs_rows = []
+    rom_next_rows = []
+    for sample_idx in range(feature_grid.shape[1]):
+        obs, next_state = _rom_predict_state_obs(
+            feature_grid[:2, sample_idx],
+            feature_grid[2:3, sample_idx],
+            feature_grid[3:, sample_idx],
+        )
+        rom_obs_rows.append(obs)
+        rom_next_rows.append(next_state)
+
+    def conditional_residual(y_prev, y_curr, _y_next, shock, theta):
+        _, fom_next = _fom_predict_jax(y_prev, shock, theta)
+        return y_curr - fom_next
+
+    def unused_rom(*_args):
+        raise AssertionError("precomputed ROM targets should skip rom_predict")
+
+    arrays, diagnostics = build_surrogate_residual_arrays_from_batched_sep_feature_grid_jax(
+        unused_rom,
+        conditional_residual,
+        feature_grid,
+        state_dim=2,
+        shock_dim=1,
+        terminal_state=np.zeros((2,), dtype=np.float64),
+        config=SEPConfig(periods=1, branching_order=0, nnodes=1, max_iter=20, tol=1e-12),
+        observable_indices=[0],
+        target_mode="fom_full",
+        rom_obs=np.vstack(rom_obs_rows),
+        rom_state_next=np.vstack(rom_next_rows),
+    )
+
+    assert diagnostics["accepted_samples"] == 2
+    np.testing.assert_array_equal(np.asarray(arrays.sample_mask), np.ones((2,), dtype=bool))
 
 
 def test_batched_jax_rollouts_match_sequential_dataset_with_theta_specific_shocks() -> None:
