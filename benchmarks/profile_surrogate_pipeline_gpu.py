@@ -159,6 +159,30 @@ def _finite_float_or_none(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _hlt_runtime_parameters_from_steady_state_result(
+    raw_parameter_values: Any,
+    steady_state_result: Any,
+) -> tuple[np.ndarray, bool, float]:
+    """Return parameters resolved by a successful HLT steady-state solve.
+
+    HLT contains calibrated parameters determined by steady-state/parameter
+    equations.  The solved steady state and ROM linearization must therefore use
+    the solver's returned parameter vector, not only the raw sampled theta
+    vector embedded in the full parameter vector.
+    """
+
+    raw = np.asarray(raw_parameter_values, dtype=np.float64)
+    try:
+        converged = bool(steady_state_result.converged)
+        candidate = np.asarray(steady_state_result.parameter_values, dtype=np.float64)
+    except Exception:
+        return raw, False, 0.0
+    if not converged or candidate.shape != raw.shape or not np.isfinite(candidate).all():
+        return raw, False, 0.0
+    max_delta = float(np.max(np.abs(candidate - raw))) if candidate.size else 0.0
+    return candidate, True, max_delta
+
+
 def _finite_quantile_summary(values: Sequence[float]) -> dict[str, float | None]:
     array = np.asarray(values, dtype=np.float64).reshape(-1)
     array = array[np.isfinite(array)]
@@ -2634,6 +2658,8 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         ss_residual_norm: float | None = None
         ss_error: str | None = None
         ss_elapsed = 0.0
+        parameter_values_resolved = False
+        parameter_values_max_abs_raw_delta = 0.0
 
         if steady_state_mode != "fixed-reference":
             ss_started = time.perf_counter()
@@ -2653,6 +2679,14 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 candidate = np.asarray(steady_state_result.steady_state, dtype=np.float64)
                 if ss_converged and np.isfinite(candidate).all():
                     steady_state = candidate
+                    (
+                        parameter_values,
+                        parameter_values_resolved,
+                        parameter_values_max_abs_raw_delta,
+                    ) = _hlt_runtime_parameters_from_steady_state_result(
+                        parameter_values,
+                        steady_state_result,
+                    )
                     ss_status = "solved"
                 elif steady_state_mode == "solve":
                     raise RuntimeError(
@@ -2701,6 +2735,8 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             "steady_state_status": ss_status,
             "steady_state_converged": ss_converged,
             "steady_state_residual_norm": ss_residual_norm,
+            "parameter_values_resolved_from_steady_state": parameter_values_resolved,
+            "parameter_values_max_abs_raw_delta": parameter_values_max_abs_raw_delta,
             "first_order_converged": bool(first_order.solution.converged),
         }
         runtime_cache[key] = runtime
@@ -2711,6 +2747,8 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 "steady_state_converged": ss_converged,
                 "steady_state_iterations": ss_iterations,
                 "steady_state_residual_norm": ss_residual_norm,
+                "parameter_values_resolved_from_steady_state": parameter_values_resolved,
+                "parameter_values_max_abs_raw_delta": parameter_values_max_abs_raw_delta,
                 "steady_state_s": ss_elapsed,
                 "steady_state_error": ss_error,
                 "first_order_s": first_order_elapsed,

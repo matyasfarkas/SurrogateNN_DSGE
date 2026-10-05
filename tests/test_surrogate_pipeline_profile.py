@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -99,6 +100,60 @@ def test_hlt_theta_design_prior_includes_reference_column() -> None:
     assert diagnostics["include_reference"] is True
     assert diagnostics["sample_summary"]["sample_count"] == 4
     assert np.isfinite(theta).all()
+
+
+def test_hlt_runtime_uses_steady_state_resolved_calibration_parameters() -> None:
+    mod = _load_profile_module()
+    root = Path(__file__).resolve().parents[1]
+    case = mod._load_hlt_payload_case(
+        SimpleNamespace(
+            hlt_payload=root / "benchmarks" / "results" / "test_payloads.json",
+            hlt_case_name="medium_sw07_hlt",
+        )
+    )
+    model = mod.parse_macro_model(
+        (root / "benchmarks" / "model_sources" / "Smets_Wouters_2007_HLT.jl").read_text()
+    )
+    reference_steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
+    base_parameters = np.asarray(model.parameter_values, dtype=np.float64)
+    parameter_subset = list(mod._select_hlt_parameter_subset(model, case, "phase1_18params_narrow"))
+    theta, subset_idx, _ = mod._make_hlt_theta_design(
+        base_parameters=base_parameters,
+        parameter_names=model.parameter_names,
+        subset_names=parameter_subset,
+        draws=16,
+        perturbation=0.0,
+        design="prior",
+        design_set="phase1_18params_narrow",
+        seed=20260918,
+        include_reference=True,
+    )
+    raw_parameters = base_parameters.copy()
+    raw_parameters[subset_idx] = theta[:, 0]
+
+    steady_state_result = model.solve_steady_state(
+        parameter_values=raw_parameters,
+        initial_guess=reference_steady_state,
+        tol=1e-10,
+        max_iter=200,
+    )
+    resolved, used_resolved, max_delta = mod._hlt_runtime_parameters_from_steady_state_result(
+        raw_parameters,
+        steady_state_result,
+    )
+
+    name_to_index = {name: idx for idx, name in enumerate(model.parameter_names)}
+    assert steady_state_result.converged
+    assert used_resolved is True
+    assert max_delta > 0.1
+    np.testing.assert_allclose(
+        resolved,
+        np.asarray(steady_state_result.parameter_values, dtype=np.float64),
+        rtol=0,
+        atol=0,
+    )
+    assert not np.isclose(resolved[name_to_index["cpie"]], raw_parameters[name_to_index["cpie"]])
+    assert not np.isclose(resolved[name_to_index["mcflex"]], raw_parameters[name_to_index["mcflex"]])
 
 
 def test_hlt_runtime_preflight_only_flag_is_parsed() -> None:
