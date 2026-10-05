@@ -281,6 +281,31 @@ def test_train_mlp_accepts_zero_weight_masked_nonfinite_columns() -> None:
     assert np.isfinite(Y_pred).all()
 
 
+def test_train_mlp_float32_training_accepts_padded_remainder_batch() -> None:
+    rng = np.random.default_rng(126)
+    X = rng.normal(size=(3, 10))
+    Y = np.asarray([[0.3, -0.2, 0.1]], dtype=np.float64) @ X
+
+    frozen = train_mlp(
+        X,
+        Y,
+        d_hidden=8,
+        d_hidden2=None,
+        nepoch=2,
+        eta_init=1e-3,
+        batch_size=6,
+        seed=10,
+        train_dtype="float32",
+    )
+
+    Y_pred = np.asarray(predict_frozen_batch(frozen, X[:, :4]), dtype=np.float64)
+    assert np.isfinite(Y_pred).all()
+    assert frozen.W1.dtype == jnp.float64
+
+    with pytest.raises(ValueError, match="train_dtype"):
+        train_mlp(X, Y, nepoch=1, batch_size=6, train_dtype="bfloat16")
+
+
 def test_train_resnet_accepts_zero_weight_masked_nonfinite_columns() -> None:
     rng = np.random.default_rng(125)
     X_good = rng.normal(size=(5, 24))

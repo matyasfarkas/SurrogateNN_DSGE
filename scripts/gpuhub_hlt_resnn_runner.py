@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Bootstrap and run the GPUHub HLT nonlinear SEP/ResNN pipeline.
 
-This runner is deliberately staged. Use ``smoke_then_full`` only after the
-small smoke stage passes on the selected GPU. The production estimator currently
-uses the fixed-reference steady-state/fixed-ROM surrogate likelihood unless
-``--likelihood-runtime-mode full-jax`` is requested explicitly.
+This runner is deliberately staged. Use expensive modes only after the small
+smoke stage passes on the selected GPU. Runtime-mode arguments default to the
+selected shell stage; pass explicit overrides only for diagnostic runs.
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ def _parse_env_overrides(values: Sequence[str]) -> dict[str, str]:
 def stage_sequence(mode: str) -> tuple[str, ...]:
     if mode == "setup":
         return ()
-    if mode in {"smoke", "calibration", "pilot", "estimation_pilot", "final_nonlinear", "full"}:
+    if mode in {"smoke", "calibration", "pilot", "estimation_pilot", "final_nonlinear", "full_hlt", "full"}:
         return (mode,)
     if mode == "smoke_then_calibration":
         return ("smoke", "calibration")
@@ -72,6 +71,8 @@ def stage_sequence(mode: str) -> tuple[str, ...]:
         return ("smoke", "estimation_pilot")
     if mode == "smoke_then_final_nonlinear":
         return ("smoke", "final_nonlinear")
+    if mode == "smoke_then_full_hlt":
+        return ("smoke", "full_hlt")
     if mode == "smoke_then_full":
         return ("smoke", "full")
     if mode == "smoke_pilot_full":
@@ -80,6 +81,8 @@ def stage_sequence(mode: str) -> tuple[str, ...]:
         return ("smoke", "estimation_pilot", "full")
     if mode == "smoke_estimation_pilot_final":
         return ("smoke", "estimation_pilot", "final_nonlinear")
+    if mode == "smoke_estimation_pilot_full_hlt":
+        return ("smoke", "estimation_pilot", "full_hlt")
     raise ValueError(f"Unknown HLT run mode {mode!r}.")
 
 
@@ -95,10 +98,10 @@ def build_hlt_stage_environment(
     allow_cpu: bool,
     hlt_target_builder: str | None,
     hlt_parameter_set: str | None,
-    steady_state_mode: str,
-    likelihood_runtime_mode: str,
-    likelihood_qme_algorithm: str,
-    likelihood_static_rows_mode: str,
+    steady_state_mode: str | None,
+    likelihood_runtime_mode: str | None,
+    likelihood_qme_algorithm: str | None,
+    likelihood_static_rows_mode: str | None,
     jax_log_density_gradient: bool,
     differentiate_shocks: bool,
     extra_env: dict[str, str],
@@ -110,13 +113,19 @@ def build_hlt_stage_environment(
         "REQUIRE_GPU": "0" if allow_cpu else "1",
         "INSTALL_DEPS": "0",
         "RESULT_ROOT": str(result_root),
-        "HLT_STEADY_STATE_MODE": steady_state_mode,
-        "LIKELIHOOD_RUNTIME_MODE": likelihood_runtime_mode,
-        "LIKELIHOOD_QME_ALGORITHM": likelihood_qme_algorithm,
-        "LIKELIHOOD_STATIC_ROWS_MODE": likelihood_static_rows_mode,
         "JAX_LOG_DENSITY_GRADIENT": "1" if jax_log_density_gradient else "0",
         "DIFFERENTIATE_SHOCKS": "1" if differentiate_shocks else "0",
+        "VERBOSE_PROGRESS": "1",
+        "PROGRESS_CHUNK_INTERVAL": "1",
     }
+    if steady_state_mode is not None:
+        env["HLT_STEADY_STATE_MODE"] = steady_state_mode
+    if likelihood_runtime_mode is not None:
+        env["LIKELIHOOD_RUNTIME_MODE"] = likelihood_runtime_mode
+    if likelihood_qme_algorithm is not None:
+        env["LIKELIHOOD_QME_ALGORITHM"] = likelihood_qme_algorithm
+    if likelihood_static_rows_mode is not None:
+        env["LIKELIHOOD_STATIC_ROWS_MODE"] = likelihood_static_rows_mode
     if hlt_target_builder is not None:
         env["HLT_TARGET_BUILDER"] = hlt_target_builder
     if hlt_parameter_set is not None:
@@ -145,6 +154,8 @@ def summarize_hlt_result(output: Path) -> dict[str, Any]:
         "train_size": result.get("train_size"),
         "val_size": result.get("val_size"),
         "pipeline_s": result.get("pipeline_s"),
+        "surrogate_bundle_path": result.get("surrogate_bundle_path"),
+        "surrogate_bundle_reused": result.get("surrogate_bundle_reused"),
         "target_builder": target.get("builder"),
         "target_status": target.get("status"),
         "accepted_samples": target.get("accepted_samples"),
@@ -195,15 +206,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "pilot",
             "estimation_pilot",
             "final_nonlinear",
+            "full_hlt",
             "full",
             "smoke_then_calibration",
             "smoke_then_pilot",
             "smoke_then_estimation_pilot",
             "smoke_then_final_nonlinear",
+            "smoke_then_full_hlt",
             "smoke_then_full",
             "smoke_pilot_full",
             "smoke_estimation_pilot_full",
             "smoke_estimation_pilot_final",
+            "smoke_estimation_pilot_full_hlt",
         ),
         default="setup",
     )
@@ -220,23 +234,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-parameter-set", default=None)
     parser.add_argument(
         "--steady-state-mode",
-        choices=("fixed-reference", "solve", "solve-or-reference"),
-        default="fixed-reference",
+        choices=("stage-default", "fixed-reference", "solve", "solve-or-reference"),
+        default="stage-default",
     )
     parser.add_argument(
         "--likelihood-runtime-mode",
-        choices=("fixed-reference", "full-jax"),
-        default="fixed-reference",
+        choices=("stage-default", "fixed-reference", "full-jax"),
+        default="stage-default",
     )
     parser.add_argument(
         "--likelihood-qme-algorithm",
-        choices=("schur", "schur_gpu", "doubling"),
-        default="schur",
+        choices=("stage-default", "schur", "schur_gpu", "doubling"),
+        default="stage-default",
     )
     parser.add_argument(
         "--likelihood-static-rows-mode",
-        choices=("reference", "none"),
-        default="reference",
+        choices=("stage-default", "reference", "none"),
+        default="stage-default",
     )
     parser.add_argument("--no-jax-log-density-gradient", action="store_true")
     parser.add_argument("--differentiate-shocks", action="store_true")
@@ -253,7 +267,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
-    if not (args.allow_cpu and args.skip_install):
+    if not args.dry_run and not (args.allow_cpu and args.skip_install):
         ensure_python_version()
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.85")
@@ -269,16 +283,26 @@ def main(argv: Sequence[str] | None = None) -> None:
         smi = run(["nvidia-smi"], check=False)
         smi_text = (smi.stdout or "") + (smi.stderr or "")
     except FileNotFoundError:
-        if not args.allow_cpu:
+        if not (args.allow_cpu or args.dry_run):
             raise
         smi_text = ""
     smi_info = parse_nvidia_smi(smi_text)
     print("nvidia-smi parsed:", json.dumps(smi_info, indent=2), flush=True)
-    jax_requirement = choose_jax_requirement(
-        "cpu" if args.allow_cpu else args.jax_extra,
-        cuda_version=smi_info.get("cuda_version"),
-        driver_version=smi_info.get("driver_version"),
-    )
+    try:
+        jax_requirement = choose_jax_requirement(
+            "cpu" if args.allow_cpu else args.jax_extra,
+            cuda_version=smi_info.get("cuda_version"),
+            driver_version=smi_info.get("driver_version"),
+        )
+    except RuntimeError:
+        if not args.dry_run:
+            raise
+        jax_requirement = {
+            "cpu": "jax>=0.6",
+            "cuda12": "jax[cuda12]>=0.6",
+            "cuda13": "jax[cuda13]>=0.6",
+            "auto": "jax[cuda13]>=0.6",
+        }[str(args.jax_extra)]
     print(f"Selected JAX requirement: {jax_requirement}", flush=True)
     apply_environment_updates(
         sanitize_jax_runtime_environment(
@@ -328,17 +352,82 @@ def main(argv: Sequence[str] | None = None) -> None:
             allow_cpu=bool(args.allow_cpu),
             hlt_target_builder=args.hlt_target_builder,
             hlt_parameter_set=args.hlt_parameter_set,
-            steady_state_mode=str(args.steady_state_mode),
-            likelihood_runtime_mode=str(args.likelihood_runtime_mode),
-            likelihood_qme_algorithm=str(args.likelihood_qme_algorithm),
-            likelihood_static_rows_mode=str(args.likelihood_static_rows_mode),
+            steady_state_mode=None if args.steady_state_mode == "stage-default" else str(args.steady_state_mode),
+            likelihood_runtime_mode=(
+                None if args.likelihood_runtime_mode == "stage-default" else str(args.likelihood_runtime_mode)
+            ),
+            likelihood_qme_algorithm=(
+                None if args.likelihood_qme_algorithm == "stage-default" else str(args.likelihood_qme_algorithm)
+            ),
+            likelihood_static_rows_mode=(
+                None if args.likelihood_static_rows_mode == "stage-default" else str(args.likelihood_static_rows_mode)
+            ),
             jax_log_density_gradient=not bool(args.no_jax_log_density_gradient),
             differentiate_shocks=bool(args.differentiate_shocks),
             extra_env=extra_env,
         )
         print(f"Starting HLT stage={stage} result_root={result_root}", flush=True)
+        write_master_summary(
+            results_base / "master_summary.json",
+            {
+                "status": "running",
+                "mode": args.mode,
+                "run_label": run_label,
+                "branch": args.branch,
+                "root": str(args.root),
+                "results_base": str(results_base),
+                "jax_requirement": jax_requirement,
+                "nvidia_smi": smi_info,
+                "elapsed_s": time.perf_counter() - started,
+                "current_stage": stage,
+                "stage_result_root": str(result_root),
+                "stages": stage_summaries,
+                "stage_environment": {
+                    key: env[key]
+                    for key in sorted(env)
+                    if key
+                    in {
+                        "MODE",
+                        "DEVICE",
+                        "REQUIRE_GPU",
+                        "RESULT_ROOT",
+                        "HLT_TARGET_BUILDER",
+                        "HLT_PARAMETER_SET",
+                        "HLT_STEADY_STATE_MODE",
+                        "LIKELIHOOD_RUNTIME_MODE",
+                        "LIKELIHOOD_QME_ALGORITHM",
+                        "LIKELIHOOD_STATIC_ROWS_MODE",
+                        "VERBOSE_PROGRESS",
+                        "PROGRESS_CHUNK_INTERVAL",
+                    }
+                    or key.startswith(("HLT_", "SEP_", "HMC_"))
+                },
+            },
+        )
         stage_started = time.perf_counter()
-        run(["bash", "benchmarks/run_hlt_gpu_estimation.sh"], cwd=args.root, env=env, stream=True)
+        try:
+            run(["bash", "benchmarks/run_hlt_gpu_estimation.sh"], cwd=args.root, env=env, stream=True)
+        except Exception as exc:
+            write_master_summary(
+                results_base / "master_summary.json",
+                {
+                    "status": "failed",
+                    "mode": args.mode,
+                    "run_label": run_label,
+                    "branch": args.branch,
+                    "root": str(args.root),
+                    "results_base": str(results_base),
+                    "jax_requirement": jax_requirement,
+                    "nvidia_smi": smi_info,
+                    "elapsed_s": time.perf_counter() - started,
+                    "current_stage": stage,
+                    "stage_result_root": str(result_root),
+                    "stage_wall_s": time.perf_counter() - stage_started,
+                    "error": repr(exc),
+                    "stages": stage_summaries,
+                },
+            )
+            raise
         summary = summarize_hlt_result(stage_output_path(result_root, stage))
         summary["stage"] = stage
         summary["stage_wall_s"] = time.perf_counter() - stage_started

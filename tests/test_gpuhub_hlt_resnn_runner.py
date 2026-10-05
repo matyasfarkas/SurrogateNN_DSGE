@@ -33,8 +33,10 @@ def test_stage_sequence_runs_smoke_before_full() -> None:
     assert module.stage_sequence("smoke_then_full") == ("smoke", "full")
     assert module.stage_sequence("smoke_pilot_full") == ("smoke", "pilot", "full")
     assert module.stage_sequence("estimation_pilot") == ("estimation_pilot",)
+    assert module.stage_sequence("full_hlt") == ("full_hlt",)
     assert module.stage_sequence("smoke_then_estimation_pilot") == ("smoke", "estimation_pilot")
     assert module.stage_sequence("smoke_then_final_nonlinear") == ("smoke", "final_nonlinear")
+    assert module.stage_sequence("smoke_then_full_hlt") == ("smoke", "full_hlt")
     assert module.stage_sequence("smoke_estimation_pilot_full") == (
         "smoke",
         "estimation_pilot",
@@ -44,6 +46,11 @@ def test_stage_sequence_runs_smoke_before_full() -> None:
         "smoke",
         "estimation_pilot",
         "final_nonlinear",
+    )
+    assert module.stage_sequence("smoke_estimation_pilot_full_hlt") == (
+        "smoke",
+        "estimation_pilot",
+        "full_hlt",
     )
 
 
@@ -77,6 +84,7 @@ def test_hlt_estimation_pilot_dry_run_resolves_parallel_defaults(tmp_path: Path)
     assert lines["HIDDEN"] == "192"
     assert lines["BLOCKS"] == "4"
     assert lines["TRAIN_BATCH_SIZE"] == "2048"
+    assert lines["TRAIN_DTYPE"] == "float32"
     assert lines["JAX_LOG_DENSITY_BATCH_SIZE"] == "2048"
     assert lines["HMC_CHAINS"] == "64"
     assert lines["HMC_SAMPLES"] == "512"
@@ -108,14 +116,93 @@ def test_hlt_final_nonlinear_dry_run_enables_correctness_gates(tmp_path: Path) -
     assert lines["HLT_THETA_DESIGN_SET"] == "phase1_18params_narrow"
     assert lines["HLT_THETA_INCLUDE_REFERENCE"] == "1"
     assert lines["HLT_DROP_RUNTIME_FAILURES"] == "1"
+    assert lines["HLT_RUNTIME_PREFLIGHT_ONLY"] == "0"
     assert lines["HLT_MIN_RUNTIME_SUCCESSFUL_THETA"] == "64"
+    assert lines["HLT_THETA_DRAWS"] == "192"
     assert lines["HLT_MIN_ACCEPTED_SAMPLES"] == "256"
+    assert lines["HLT_SURROGATE_BUNDLE_PATH"] == str(tmp_path / "hlt_final_nonlinear_surrogate_bundle.snn.npz")
+    assert lines["HLT_REUSE_SURROGATE_BUNDLE"] == "0"
     assert lines["HLT_REQUIRE_FULL_TARGET_SUCCESS"] == "1"
     assert lines["HLT_REQUIRE_JAX_PARITY"] == "1"
     assert lines["HLT_REQUIRE_HMC"] == "1"
     assert lines["HLT_REQUIRE_SOLVED_STEADY_STATE"] == "1"
+    assert lines["HLT_STEADY_STATE_MAX_ITER"] == "200"
     assert lines["LIKELIHOOD_RUNTIME_MODE"] == "full-jax"
     assert lines["LIKELIHOOD_QME_ALGORITHM"] == "schur_gpu"
+    assert lines["JAX_LOG_DENSITY_BATCH_SIZE"] == "0"
+    assert lines["JAX_LOG_DENSITY_BATCH_REPEAT_EVALS"] == "0"
+    assert lines["TRAIN_DTYPE"] == "float32"
+    assert lines["FAIL_ON_QUALITY_GATE"] == "1"
+
+
+def test_hlt_final_nonlinear_dry_run_can_enable_runtime_preflight_only(tmp_path: Path) -> None:
+    script = _ROOT / "benchmarks" / "run_hlt_gpu_estimation.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=_ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "MODE": "final_nonlinear",
+            "DRY_RUN": "1",
+            "RESULT_ROOT": str(tmp_path),
+            "HLT_RUNTIME_PREFLIGHT_ONLY": "1",
+        },
+    )
+
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+    assert lines["MODE"] == "final_nonlinear"
+    assert lines["HLT_RUNTIME_PREFLIGHT_ONLY"] == "1"
+    assert lines["HLT_THETA_DRAWS"] == "192"
+    assert lines["HLT_MIN_RUNTIME_SUCCESSFUL_THETA"] == "64"
+
+
+def test_hlt_full_hlt_dry_run_enables_all_parameter_strict_profile(tmp_path: Path) -> None:
+    script = _ROOT / "benchmarks" / "run_hlt_gpu_estimation.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=_ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "MODE": "full_hlt",
+            "DRY_RUN": "1",
+            "RESULT_ROOT": str(tmp_path),
+        },
+    )
+
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+    assert lines["MODE"] == "full_hlt"
+    assert lines["HLT_TARGET_BUILDER"] == "batched-sep"
+    assert lines["HLT_SEP_BATCH_CHUNK_SIZE"] == "2"
+    assert lines["HLT_PARAMETER_SET"] == "all"
+    assert lines["HLT_THETA_DESIGN"] == "perturbation"
+    assert lines["HLT_DROP_RUNTIME_FAILURES"] == "1"
+    assert lines["HLT_MIN_RUNTIME_SUCCESSFUL_THETA"] == "128"
+    assert lines["HLT_THETA_DRAWS"] == "288"
+    assert lines["HLT_PERIODS"] == "8"
+    assert lines["SEP_PERIODS"] == "8"
+    assert lines["HLT_SURROGATE_BUNDLE_PATH"] == str(tmp_path / "hlt_full_hlt_surrogate_bundle.snn.npz")
+    assert lines["HLT_REUSE_SURROGATE_BUNDLE"] == "0"
+    assert lines["HLT_MIN_ACCEPTED_SAMPLES"] == "1024"
+    assert lines["HLT_REQUIRE_FULL_TARGET_SUCCESS"] == "1"
+    assert lines["HLT_REQUIRE_JAX_PARITY"] == "1"
+    assert lines["HLT_REQUIRE_HMC"] == "1"
+    assert lines["HLT_REQUIRE_SOLVED_STEADY_STATE"] == "1"
+    assert lines["HLT_STEADY_STATE_MAX_ITER"] == "200"
+    assert lines["LIKELIHOOD_RUNTIME_MODE"] == "full-jax"
+    assert lines["LIKELIHOOD_QME_ALGORITHM"] == "schur_gpu"
+    assert lines["JAX_LOG_DENSITY_BATCH_SIZE"] == "0"
+    assert lines["JAX_LOG_DENSITY_BATCH_REPEAT_EVALS"] == "0"
+    assert lines["HMC_CHAINS"] == "64"
+    assert lines["HMC_SAMPLES"] == "1000"
+    assert lines["TRAIN_DTYPE"] == "float32"
     assert lines["FAIL_ON_QUALITY_GATE"] == "1"
 
 
@@ -152,6 +239,32 @@ def test_build_hlt_stage_environment_sets_gpu_and_runtime_modes(tmp_path: Path) 
     assert env["HMC_CHAINS"] == "64"
 
 
+def test_build_hlt_stage_environment_can_preserve_stage_defaults(tmp_path: Path) -> None:
+    module = _load_module()
+
+    env = module.build_hlt_stage_environment(
+        stage="full_hlt",
+        python="/opt/venv/bin/python",
+        result_root=tmp_path,
+        allow_cpu=False,
+        hlt_target_builder=None,
+        hlt_parameter_set=None,
+        steady_state_mode=None,
+        likelihood_runtime_mode=None,
+        likelihood_qme_algorithm=None,
+        likelihood_static_rows_mode=None,
+        jax_log_density_gradient=True,
+        differentiate_shocks=False,
+        extra_env={},
+    )
+
+    assert env["MODE"] == "full_hlt"
+    assert "HLT_STEADY_STATE_MODE" not in env
+    assert "LIKELIHOOD_RUNTIME_MODE" not in env
+    assert "LIKELIHOOD_QME_ALGORITHM" not in env
+    assert "LIKELIHOOD_STATIC_ROWS_MODE" not in env
+
+
 def test_summarize_hlt_result_extracts_release_metrics(tmp_path: Path) -> None:
     module = _load_module()
     output = tmp_path / "hlt_full_surrogate_estimation.json"
@@ -168,6 +281,8 @@ def test_summarize_hlt_result_extracts_release_metrics(tmp_path: Path) -> None:
                         "train_size": 64,
                         "val_size": 8,
                         "pipeline_s": 12.5,
+                        "surrogate_bundle_path": "/tmp/hlt_bundle.snn.npz",
+                        "surrogate_bundle_reused": True,
                         "steady_state_solved_count": 8,
                         "steady_state_fallback_count": 0,
                         "steady_state_attempted_solved_count": 8,
@@ -214,6 +329,8 @@ def test_summarize_hlt_result_extracts_release_metrics(tmp_path: Path) -> None:
     assert summary["accepted_samples"] == 64
     assert summary["runtime_prepared_theta_draws"] == 8
     assert summary["runtime_dropped_theta_count"] == 2
+    assert summary["surrogate_bundle_path"] == "/tmp/hlt_bundle.snn.npz"
+    assert summary["surrogate_bundle_reused"] is True
     assert summary["steady_state_solved_count"] == 8
     assert summary["steady_state_fallback_count"] == 0
     assert summary["steady_state_attempted_solved_count"] == 8

@@ -2,7 +2,7 @@
 
 This runbook prepares the current executable HLT nonlinear SEP/ResNN pipeline
 for GPUHUB. It is a staged paid-run workflow: setup, smoke, calibration,
-pilot, estimation-pilot, then `final_nonlinear`.
+pilot, estimation-pilot, `final_nonlinear`, then `full_hlt`.
 
 Important distinction: `MODE=estimation_pilot` is a speed/stress run and can use
 fixed-reference shortcuts. `MODE=final_nonlinear` is the correctness-first run:
@@ -10,12 +10,18 @@ it samples the Julia-comparable narrow 18-parameter support, solves
 parameter-specific steady states when possible, requires full SEP target paths,
 trains only on fully successful theta draws, evaluates the full-JAX SS/ROM
 surrogate likelihood, and rejects the run if any quality gate fails.
+`MODE=full_hlt` is the expensive all-parameter HLT stress run: it uses the full
+parsed HLT parameter vector, an 8-period SEP horizon, GPU Schur, strict quality
+gates, and a smoke-first staged launch. Use it only after `final_nonlinear`
+passes or when you explicitly want to test the full HLT envelope.
 
 ## First Command After Restart
 
 Run this in SSH or a GPUHUB JupyterLab terminal:
 
 ```bash
+# Cancel any stale safety shutdown left by a previous profiling wrapper.
+shutdown -c || true
 cd /root/autodl-tmp
 if [ ! -d SurrogateNN_DSGE ]; then
   git clone --branch codex/nonlinear-sep-surrogate-port \
@@ -177,15 +183,17 @@ Default `MODE=final_nonlinear` settings:
 - `HLT_PARAMETER_SET=phase1_18params_narrow`
 - `HLT_THETA_DESIGN=prior`
 - `HLT_THETA_INCLUDE_REFERENCE=1`
-- `HLT_TARGET_BUILDER=adaptive-sep`
-- `HLT_THETA_DRAWS=128`
+- `HLT_TARGET_BUILDER=batched-sep`
+- `HLT_THETA_DRAWS=192`
 - `HLT_PERIODS=4`
 - `SEP_PERIODS=4`
 - `SEP_MAX_ITER=20`
 - `ONLY_FULL_SUCCESS=1`
 - `HLT_STEADY_STATE_MODE=solve-or-reference`
+- `HLT_STEADY_STATE_MAX_ITER=200`
 - `LIKELIHOOD_RUNTIME_MODE=full-jax`
 - `LIKELIHOOD_QME_ALGORITHM=schur_gpu`
+- `JAX_LOG_DENSITY_BATCH_SIZE=0`
 - `HMC_WARMUP=500`
 - `HMC_SAMPLES=1000`
 - `HMC_CHAINS=64`
@@ -229,10 +237,88 @@ If the solved-steady-state gate fails but all other gates pass, rerun with
 `--env HLT_REQUIRE_SOLVED_STEADY_STATE=0` only for diagnostic profiling. Do not
 use that override for the final claim.
 
+### Reusing a Saved ResNN Bundle
+
+Every non-preflight HLT stage now writes a portable NN bundle next to the JSON:
+
+```text
+$RESULT_ROOT/hlt_${MODE}_surrogate_bundle.snn.npz
+```
+
+The bundle stores the frozen ResNN weights, normalization statistics, validation
+diagnostics, parameter subset, input/output names, target diagnostics, and
+dataset summary. This lets a restarted GPUHUB VM debug likelihood/HMC without
+paying again for SEP target generation and training.
+
+Example: rerun final likelihood/HMC diagnostics using an existing final bundle:
+
+```bash
+MODE=final_nonlinear \
+HLT_REUSE_SURROGATE_BUNDLE=1 \
+HLT_SURROGATE_BUNDLE_PATH=/root/autodl-tmp/SurrogateNN_DSGE/benchmarks/results/<run>/final_nonlinear/hlt_final_nonlinear_surrogate_bundle.snn.npz \
+JAX_LOG_DENSITY_BATCH_SIZE=0 \
+JAX_LOG_DENSITY_BATCH_REPEAT_EVALS=0 \
+bash benchmarks/run_hlt_gpu_estimation.sh
+```
+
+The reuse path still reruns the HLT steady-state/first-order runtime preflight
+and validates the loaded bundle dimensions and parameter subset. The summary
+must show `surrogate_bundle_reused True` and `target_builder reused_bundle`.
+If the original bundle passed target-generation gates, those target diagnostics
+are preserved in the reused run. The currently recovered failed GPUHUB archive
+did not contain a bundle because this checkpointing was not enabled yet, so it
+cannot be reused retroactively.
+
 ## More Aggressive Full Overrides
 
 The older script defaults for `MODE=full` are retained as an aggressive
-all-parameter stress profile, not as the current correctness-first final mode:
+all-parameter stress profile, not as the current correctness-first final mode.
+Prefer `MODE=full_hlt` for an interpretable all-parameter HLT run.
+
+Default `MODE=full_hlt` settings:
+
+- `HLT_PARAMETER_SET=all`
+- `HLT_THETA_DRAWS=288`
+- `HLT_PERIODS=8`
+- `SEP_PERIODS=8`
+- `SEP_ORDER=1`
+- `SEP_NNODES=3`
+- `HLT_SEP_BATCH_CHUNK_SIZE=2`
+- `LIKELIHOOD_RUNTIME_MODE=full-jax`
+- `LIKELIHOOD_QME_ALGORITHM=schur_gpu`
+- `JAX_LOG_DENSITY_BATCH_SIZE=0`
+- `HMC_WARMUP=500`
+- `HMC_SAMPLES=1000`
+- `HMC_CHAINS=64`
+
+Dry-run the full HLT settings first:
+
+```bash
+MODE=full_hlt DRY_RUN=1 bash benchmarks/run_hlt_gpu_estimation.sh
+```
+
+Launch through the staged runner:
+
+```bash
+RUN_LABEL="full_hlt_$(date -u +%Y%m%dT%H%M%SZ)"
+RESULTS_BASE="benchmarks/results/gpuhub_hlt_resnn_${RUN_LABEL}"
+mkdir -p "$RESULTS_BASE"
+nohup python scripts/gpuhub_hlt_resnn_runner.py \
+  --mode smoke_then_full_hlt \
+  --skip-repo-sync \
+  --skip-install \
+  --jax-extra auto \
+  --run-label "$RUN_LABEL" \
+  > "$RESULTS_BASE/master.log" 2>&1 &
+echo $! > "$RESULTS_BASE/runner.pid"
+tail -f "$RESULTS_BASE/master.log"
+```
+
+For a 16 GB GPU, add `--env HLT_SEP_BATCH_CHUNK_SIZE=1`. For a 48 GB or larger
+GPU, try `--env HLT_SEP_BATCH_CHUNK_SIZE=4` only after the default chunk size
+has completed without OOM.
+
+The older `MODE=full` defaults are:
 
 - `HLT_PARAMETER_SET=all`
 - `HLT_THETA_DRAWS=288`

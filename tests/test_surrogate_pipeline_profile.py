@@ -5,6 +5,9 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import pytest
+
+from surrogatenn_dsge import FrozenMLP, NormStats, load_surrogate_bundle, save_surrogate_bundle
 
 
 def _load_profile_module():
@@ -98,6 +101,109 @@ def test_hlt_theta_design_prior_includes_reference_column() -> None:
     assert np.isfinite(theta).all()
 
 
+def test_hlt_runtime_preflight_only_flag_is_parsed() -> None:
+    mod = _load_profile_module()
+
+    args = mod.parse_args(
+        [
+            "--mode",
+            "hlt-fixed-ss-smoke",
+            "--hlt-runtime-preflight-only",
+        ]
+    )
+
+    assert args.hlt_runtime_preflight_only is True
+
+
+def test_hlt_surrogate_bundle_path_defaults_to_output_stem(tmp_path) -> None:
+    mod = _load_profile_module()
+    output = tmp_path / "hlt_debug.json"
+    explicit = tmp_path / "explicit_bundle.snn.npz"
+
+    default_args = mod.parse_args(
+        [
+            "--mode",
+            "hlt-fixed-ss-smoke",
+            "--output",
+            str(output),
+        ]
+    )
+    explicit_args = mod.parse_args(
+        [
+            "--mode",
+            "hlt-fixed-ss-smoke",
+            "--output",
+            str(output),
+            "--hlt-surrogate-bundle-path",
+            str(explicit),
+        ]
+    )
+
+    assert mod._bundle_path_from_args(default_args) == tmp_path / "hlt_debug_surrogate_bundle.snn.npz"
+    assert mod._bundle_path_from_args(explicit_args) == explicit
+
+
+def test_loaded_hlt_surrogate_bundle_adapter_and_validation(tmp_path) -> None:
+    mod = _load_profile_module()
+    norm = NormStats(
+        mu_x=np.zeros(3),
+        sigma_x=np.ones(3),
+        mu_y=np.zeros(2),
+        sigma_y=np.ones(2),
+    )
+    frozen = FrozenMLP(
+        W1=np.full((4, 3), 0.05),
+        b1=np.zeros(4),
+        W2=np.full((2, 4), 0.10),
+        b2=np.zeros(2),
+        W3=None,
+        b3=None,
+        norm=norm,
+        d_in=3,
+        d_out=2,
+    )
+    bundle_path = save_surrogate_bundle(
+        tmp_path / "hlt_bundle.snn.npz",
+        frozen,
+        metadata={
+            "parameter_subset": ["rho"],
+            "train_size": 5,
+            "val_size": 2,
+            "dataset_summary": {"n_samples": 7},
+        },
+    )
+
+    bundle = load_surrogate_bundle(bundle_path, device="cpu")
+    training = mod._training_namespace_from_bundle(bundle)
+
+    assert training.train_size == 5
+    assert training.val_size == 2
+    assert training.metadata["dataset_summary"] == {"n_samples": 7}
+    mod._validate_loaded_hlt_surrogate(
+        frozen=training.frozen,
+        input_names=("x", "eps", "rho"),
+        output_names=("y", "x[1]"),
+        parameter_subset=("rho",),
+        metadata=training.metadata,
+    )
+    with pytest.raises(ValueError, match="parameter subset"):
+        mod._validate_loaded_hlt_surrogate(
+            frozen=training.frozen,
+            input_names=("x", "eps", "rho"),
+            output_names=("y", "x[1]"),
+            parameter_subset=("beta",),
+            metadata=training.metadata,
+        )
+    with pytest.raises(ValueError, match="input dimension"):
+        mod._validate_loaded_hlt_surrogate(
+            frozen=training.frozen,
+            input_names=("x", "eps"),
+            output_names=("y", "x[1]"),
+            parameter_subset=("rho",),
+            metadata=training.metadata,
+        )
+
+
 def test_training_profile_tiny_cpu_smoke() -> None:
     mod = _load_profile_module()
     args = mod.parse_args(
@@ -134,6 +240,8 @@ def test_training_profile_tiny_cpu_smoke() -> None:
     assert result["status"] == "ok"
     assert result["samples"] == 32
     assert result["train_size"] > 0
+    assert result["train_dtype"] == "float64"
+    assert result["training_loop"] == "epoch_scan"
     assert result["train_s"] >= 0.0
 
 
@@ -186,6 +294,8 @@ def test_batched_training_profile_tiny_cpu_smoke() -> None:
             "2",
             "--batched-mask-fraction",
             "0.25",
+            "--train-dtype",
+            "float32",
         ]
     )
     shape = mod.SyntheticHLTShape(state_dim=4, shock_dim=2, theta_dim=3, obs_dim=2)
@@ -195,6 +305,8 @@ def test_batched_training_profile_tiny_cpu_smoke() -> None:
     assert result["kind"] == "synthetic_hlt_fixed_shape_batched_training"
     assert result["actual_samples"] == 16
     assert result["train_size"] > 0
+    assert result["train_dtype"] == "float32"
+    assert result["training_loop"] == "epoch_scan"
     assert result["sample_mask_false_count"] > 0
     assert result["masked_sample_count"] == result["sample_mask_false_count"]
     assert result["train_s"] >= 0.0

@@ -702,6 +702,40 @@ def test_batched_sep_reports_per_draw_acceptance_failures() -> None:
     assert np.asarray(solution.residual_norm)[1] > config.accept_tol
 
 
+def test_batched_sep_retries_lm_damping_within_outer_iteration() -> None:
+    deterministic_shocks = jnp.zeros((1, 1, 1), dtype=jnp.float64)
+
+    def residual(y_prev, y_curr, y_next, shock, params):
+        del y_prev, y_next, shock, params
+        return y_curr**2 - 4.0
+
+    solution = solve_batched_stochastic_extended_path_residual_expectation(
+        residual,
+        initial_state=jnp.zeros((1, 1), dtype=jnp.float64),
+        terminal_state=jnp.zeros((1,), dtype=jnp.float64),
+        shock_dim=1,
+        deterministic_shocks=deterministic_shocks,
+        initial_guess=jnp.asarray([[[0.1]]], dtype=jnp.float64),
+        config=SEPConfig(
+            periods=1,
+            branching_order=0,
+            nnodes=1,
+            max_iter=1,
+            tol=1e-10,
+            accept_tol=3.98,
+            line_search=True,
+            line_search_maxit=1,
+            newton_regularization=1e-8,
+            lm_lambda_scale=10.0,
+            lm_lambda_max=10.0,
+        ),
+    )
+
+    assert np.asarray(solution.accepted, dtype=bool)[0]
+    assert np.asarray(solution.iterations, dtype=np.int32)[0] == 1
+    assert np.asarray(solution.residual_norm, dtype=np.float64)[0] < 3.98
+
+
 def test_sep_warm_start_accepts_previous_solution_and_finishes_immediately() -> None:
     deterministic_shocks = jnp.asarray([[0.2], [0.0], [0.0]], dtype=jnp.float64)
 

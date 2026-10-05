@@ -162,13 +162,14 @@ def test_train_surrogate_from_dataset_resnet_dispatch_accepts_device_selector() 
         d_hidden=8,
         n_blocks=1,
         nepoch=4,
-        batch_size=16,
+        batch_size=64,
         device="cpu",
     )
 
     assert isinstance(result.frozen, FrozenResNet)
     assert result.val_size == 0
     assert result.metadata["jax_device_platform"] == "cpu"
+    assert result.metadata["training_loop"] == "full_batch_scan"
     assert _array_platform(result.frozen.W_embed) == "cpu"
 
 
@@ -209,12 +210,15 @@ def test_train_surrogate_from_batched_arrays_uses_masked_jax_rollouts() -> None:
         batch_size=1,
         seed=14,
         device="cpu",
+        train_dtype="float32",
     )
 
     assert result.train_size == 6
     assert result.val_size == 0
     assert result.metadata["masked_sample_count"] == 2
     assert result.metadata["jax_device_platform"] == "cpu"
+    assert result.metadata["train_dtype"] == "float32"
+    assert result.metadata["training_loop"] == "epoch_scan"
     assert _array_platform(result.frozen.W1) == "cpu"
     prediction = np.asarray(predict_frozen_batch(result.frozen, np.asarray(arrays.X)[:, :2]), dtype=np.float64)
     assert np.isfinite(prediction).all()
@@ -261,6 +265,7 @@ def test_fit_surrogate_pipeline_from_batched_arrays_jax_runs_without_compaction(
     assert result.array_summary["n_samples_total"] == 6
     assert result.array_summary["n_samples_valid"] == 6
     assert result.training.metadata["jax_device_platform"] == "cpu"
+    assert result.training.metadata["training_loop"] == "epoch_scan"
     assert _array_platform(result.training.frozen.W_embed) == "cpu"
 
 

@@ -218,6 +218,45 @@ def test_batched_parsed_model_sep_batches_parameters_and_steady_states() -> None
         )
 
 
+def test_batched_parsed_model_sep_uses_linear_warm_start() -> None:
+    model = parse_macro_model(PARAMETER_BATCH_SEP_SOURCE)
+    config = SEPConfig(periods=4, branching_order=1, nnodes=3, tol=1e-10, max_iter=1)
+    name_to_idx = {name: idx for idx, name in enumerate(model.parameter_names)}
+    params = np.zeros((2, len(model.parameter_names)), dtype=np.float64)
+    params[:, name_to_idx["rho"]] = np.asarray([0.20, 0.35], dtype=np.float64)
+    params[:, name_to_idx["mu"]] = np.asarray([0.9, 1.1], dtype=np.float64)
+    steady_states = params[:, name_to_idx["mu"]][:, None]
+    deterministic = np.asarray(
+        [
+            [[0.10], [0.00], [0.00], [0.00]],
+            [[-0.05], [0.02], [0.00], [0.00]],
+        ],
+        dtype=np.float64,
+    )
+
+    batched = solve_batched_stochastic_extended_path_model(
+        model,
+        parameter_values=params,
+        steady_state=steady_states,
+        initial_state=steady_states,
+        terminal_state=steady_states,
+        config=config,
+        deterministic_shocks=deterministic,
+    )
+
+    assert np.all(np.asarray(batched.solution.accepted, dtype=bool))
+    np.testing.assert_array_equal(
+        np.asarray(batched.solution.iterations),
+        np.zeros((2,), dtype=np.int32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(batched.solution.residual_norm, dtype=np.float64),
+        np.zeros((2,), dtype=np.float64),
+        rtol=0.0,
+        atol=1e-10,
+    )
+
+
 def test_batched_parsed_model_sep_requires_steady_states_for_parameter_batches() -> None:
     model = parse_macro_model(PARAMETER_BATCH_SEP_SOURCE)
     params = np.asarray(

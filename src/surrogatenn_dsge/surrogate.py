@@ -77,7 +77,7 @@ def _activation_fn(name: str) -> Callable[[jax.Array], jax.Array]:
     if activation == "tanh":
         return jnp.tanh
     if activation == "silu":
-        return silu
+        return jax.nn.silu
     raise ValueError(f"Unsupported activation {name!r}. Use 'tanh' or 'silu'.")
 
 
@@ -529,8 +529,75 @@ def _cosine_schedule_with_warmup(epoch: int, nepoch: int, lr_init: float, warmup
     return lr_init * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
-def _he_init(key: jax.Array, shape: tuple[int, ...], scale: float) -> jax.Array:
-    return scale * jax.random.normal(key, shape, dtype=jnp.float64)
+def normalize_training_dtype(dtype: Any = jnp.float64) -> type[np.float32] | type[np.float64]:
+    """Normalize supported NN training dtypes.
+
+    The deployed frozen surrogate is still materialized through the existing
+    float64 dataclasses; this dtype controls the optimizer/training kernels.
+    """
+
+    if dtype is None:
+        return np.float64
+    if isinstance(dtype, str):
+        normalized = dtype.strip().lower()
+        if normalized in {"float32", "fp32", "single"}:
+            return np.float32
+        if normalized in {"float64", "fp64", "double"}:
+            return np.float64
+        raise ValueError("train_dtype must be 'float64' or 'float32'.")
+    try:
+        np_dtype = np.dtype(dtype)
+    except TypeError as exc:
+        raise ValueError("train_dtype must be 'float64' or 'float32'.") from exc
+    if np_dtype == np.dtype(np.float32):
+        return np.float32
+    if np_dtype == np.dtype(np.float64):
+        return np.float64
+    raise ValueError("train_dtype must be 'float64' or 'float32'.")
+
+
+def _he_init(key: jax.Array, shape: tuple[int, ...], scale: float, *, dtype: Any = np.float64) -> jax.Array:
+    return scale * jax.random.normal(key, shape, dtype=dtype)
+
+
+def _padded_minibatch_indices(
+    indices: np.ndarray,
+    start: int,
+    batch: int,
+    weights: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray] | tuple[None, None]:
+    batch_idx = np.asarray(indices[start : start + batch], dtype=np.int64)
+    if not np.sum(weights[batch_idx]) > 0.0:
+        return None, None
+    active = np.ones((batch_idx.size,), dtype=np.float64)
+    if batch_idx.size < batch:
+        pad = batch - batch_idx.size
+        pad_value = int(batch_idx[0])
+        batch_idx = np.concatenate([batch_idx, np.full((pad,), pad_value, dtype=np.int64)])
+        active = np.concatenate([active, np.zeros((pad,), dtype=np.float64)])
+    return batch_idx, active
+
+
+def _epoch_minibatch_schedule(
+    indices: np.ndarray,
+    batch: int,
+    weights: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    n_samples = int(indices.shape[0])
+    n_batches = int(math.ceil(n_samples / batch))
+    batch_indices = np.empty((n_batches, batch), dtype=np.int64)
+    active = np.zeros((n_batches, batch), dtype=np.float64)
+    has_weight = np.zeros((n_batches,), dtype=bool)
+    for row, start in enumerate(range(0, n_samples, batch)):
+        raw = np.asarray(indices[start : start + batch], dtype=np.int64)
+        if raw.size < 1:
+            raise ValueError("Encountered an empty minibatch while building the training schedule.")
+        batch_indices[row, : raw.size] = raw
+        active[row, : raw.size] = 1.0
+        if raw.size < batch:
+            batch_indices[row, raw.size :] = int(raw[0])
+        has_weight[row] = bool(np.sum(weights[raw]) > 0.0)
+    return batch_indices, active, has_weight
 
 
 def resolve_jax_device(device: Optional[Any] = None) -> Optional[jax.Device]:
@@ -669,6 +736,7 @@ def train_mlp(
     activation: str = "silu",
     sample_weights: Optional[ArrayLike] = None,
     device: Optional[Any] = None,
+    train_dtype: Any = np.float64,
 ) -> FrozenMLP:
     """Train a Julia-compatible frozen MLP with JAX AdamW.
 
@@ -693,6 +761,7 @@ def train_mlp(
         raise ValueError(f"clip_norm must be nonnegative, got {clip_norm}.")
     activation = str(activation).lower()
     _activation_fn(activation)
+    training_dtype = normalize_training_dtype(train_dtype)
 
     X_std, Y_std, norm = standardize_xy(X, Y, copy=True, sample_weights=sample_weights)
     d_in, n_samples = X_std.shape
@@ -714,24 +783,24 @@ def train_mlp(
     key = _device_put(jax.random.PRNGKey(int(seed)), target_device)
     keys = jax.random.split(key, 3 if hidden2 is None else 4)
     params: dict[str, jax.Array] = {
-        "W1": _he_init(keys[0], (hidden1, d_in), 0.1),
-        "b1": jnp.zeros((hidden1,), dtype=jnp.float64),
+        "W1": _he_init(keys[0], (hidden1, d_in), 0.1, dtype=training_dtype),
+        "b1": jnp.zeros((hidden1,), dtype=training_dtype),
     }
     if hidden2 is None:
-        params["W2"] = _he_init(keys[1], (d_out, hidden1), 0.1)
-        params["b2"] = jnp.zeros((d_out,), dtype=jnp.float64)
+        params["W2"] = _he_init(keys[1], (d_out, hidden1), 0.1, dtype=training_dtype)
+        params["b2"] = jnp.zeros((d_out,), dtype=training_dtype)
     else:
-        params["W2"] = _he_init(keys[1], (hidden2, hidden1), 0.1)
-        params["b2"] = jnp.zeros((hidden2,), dtype=jnp.float64)
-        params["W3"] = _he_init(keys[2], (d_out, hidden2), 0.1)
-        params["b3"] = jnp.zeros((d_out,), dtype=jnp.float64)
+        params["W2"] = _he_init(keys[1], (hidden2, hidden1), 0.1, dtype=training_dtype)
+        params["b2"] = jnp.zeros((hidden2,), dtype=training_dtype)
+        params["W3"] = _he_init(keys[2], (d_out, hidden2), 0.1, dtype=training_dtype)
+        params["b3"] = jnp.zeros((d_out,), dtype=training_dtype)
 
     params = _device_put(params, target_device)
     opt_m = jax.tree_util.tree_map(jnp.zeros_like, params)
     opt_v = jax.tree_util.tree_map(jnp.zeros_like, params)
-    X_jax = _device_put(jnp.asarray(X_std, dtype=jnp.float64), target_device)
-    Y_jax = _device_put(jnp.asarray(Y_std, dtype=jnp.float64), target_device)
-    weights_jax = _device_put(jnp.asarray(weights_np, dtype=jnp.float64), target_device)
+    X_jax = _device_put(jnp.asarray(X_std, dtype=training_dtype), target_device)
+    Y_jax = _device_put(jnp.asarray(Y_std, dtype=training_dtype), target_device)
+    weights_jax = _device_put(jnp.asarray(weights_np, dtype=training_dtype), target_device)
     act = _activation_fn(activation)
 
     def forward(params_local: Mapping[str, jax.Array], X_batch: jax.Array) -> jax.Array:
@@ -745,61 +814,149 @@ def train_mlp(
         pred = forward(params_local, X_batch)
         diff_sq = jnp.sum((pred - Y_batch) ** 2, axis=0)
         weight_sum = jnp.sum(w_batch)
-        return jnp.sum(diff_sq * w_batch) / jnp.maximum(weight_sum, 1.0)
+        return jnp.sum(diff_sq * w_batch) / jnp.maximum(weight_sum, jnp.asarray(1.0, dtype=weight_sum.dtype))
 
-    value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
-
-    @jax.jit
-    def update_step(
+    def train_step_impl(
         params_local: Mapping[str, jax.Array],
         m_local: Mapping[str, jax.Array],
         v_local: Mapping[str, jax.Array],
-        grads: Mapping[str, jax.Array],
+        X_batch: jax.Array,
+        Y_batch: jax.Array,
+        w_batch: jax.Array,
         lr: jax.Array,
         step: jax.Array,
     ) -> tuple[dict[str, jax.Array], dict[str, jax.Array], dict[str, jax.Array]]:
+        _, grads = jax.value_and_grad(loss_fn)(params_local, X_batch, Y_batch, w_batch)
         leaves = [g for g in jax.tree_util.tree_leaves(grads) if g is not None]
         global_norm = jnp.sqrt(sum(jnp.sum(g * g) for g in leaves))
-        scale = jnp.where((clip_norm > 0.0) & (global_norm > clip_norm), clip_norm / (global_norm + 1e-12), 1.0)
+        clip_value = jnp.asarray(float(clip_norm), dtype=global_norm.dtype)
+        scale = jnp.where(
+            (clip_value > 0.0) & (global_norm > clip_value),
+            clip_value / (global_norm + jnp.asarray(1e-12, dtype=global_norm.dtype)),
+            jnp.asarray(1.0, dtype=global_norm.dtype),
+        )
         grads_scaled = jax.tree_util.tree_map(lambda g: g * scale, grads)
-        beta1, beta2, eps = 0.9, 0.999, 1e-8
+        beta1 = jnp.asarray(0.9, dtype=lr.dtype)
+        beta2 = jnp.asarray(0.999, dtype=lr.dtype)
+        eps = jnp.asarray(1e-8, dtype=lr.dtype)
+        decay = jnp.asarray(float(weight_decay), dtype=lr.dtype)
         m_next = jax.tree_util.tree_map(lambda m, g: beta1 * m + (1.0 - beta1) * g, m_local, grads_scaled)
         v_next = jax.tree_util.tree_map(lambda v, g: beta2 * v + (1.0 - beta2) * (g * g), v_local, grads_scaled)
         m_hat = jax.tree_util.tree_map(lambda m: m / (1.0 - beta1**step), m_next)
         v_hat = jax.tree_util.tree_map(lambda v: v / (1.0 - beta2**step), v_next)
         params_next = jax.tree_util.tree_map(
-            lambda p, m, v: p - lr * (m / (jnp.sqrt(v) + eps) + weight_decay * p),
+            lambda p, m, v: p - lr * (m / (jnp.sqrt(v) + eps) + decay * p),
             params_local,
             m_hat,
             v_hat,
         )
         return params_next, m_next, v_next
 
+    def full_batch_train_impl(
+        params_local: Mapping[str, jax.Array],
+        m_local: Mapping[str, jax.Array],
+        v_local: Mapping[str, jax.Array],
+        lr_values: jax.Array,
+        step_values: jax.Array,
+    ) -> tuple[dict[str, jax.Array], dict[str, jax.Array], dict[str, jax.Array]]:
+        def body(
+            carry: tuple[Mapping[str, jax.Array], Mapping[str, jax.Array], Mapping[str, jax.Array]],
+            xs: tuple[jax.Array, jax.Array],
+        ) -> tuple[
+            tuple[dict[str, jax.Array], dict[str, jax.Array], dict[str, jax.Array]],
+            None,
+        ]:
+            params_i, m_i, v_i = carry
+            lr_i, step_i = xs
+            return train_step_impl(params_i, m_i, v_i, X_jax, Y_jax, weights_jax, lr_i, step_i), None
+
+        (params_next, m_next, v_next), _ = jax.lax.scan(body, (params_local, m_local, v_local), (lr_values, step_values))
+        return params_next, m_next, v_next
+
+    full_batch_train = jax.jit(full_batch_train_impl, donate_argnums=(0, 1, 2))
+
+    def epoch_train_impl(
+        params_local: Mapping[str, jax.Array],
+        m_local: Mapping[str, jax.Array],
+        v_local: Mapping[str, jax.Array],
+        step_count_local: jax.Array,
+        batch_indices: jax.Array,
+        active: jax.Array,
+        has_weight: jax.Array,
+        lr: jax.Array,
+    ) -> tuple[dict[str, jax.Array], dict[str, jax.Array], dict[str, jax.Array], jax.Array]:
+        one = jnp.asarray(1.0, dtype=lr.dtype)
+
+        def body(
+            carry: tuple[Mapping[str, jax.Array], Mapping[str, jax.Array], Mapping[str, jax.Array], jax.Array],
+            xs: tuple[jax.Array, jax.Array, jax.Array],
+        ) -> tuple[
+            tuple[dict[str, jax.Array], dict[str, jax.Array], dict[str, jax.Array], jax.Array],
+            None,
+        ]:
+            params_i, m_i, v_i, step_i = carry
+            batch_idx_i, active_i, has_weight_i = xs
+            X_batch = jnp.take(X_jax, batch_idx_i, axis=1)
+            Y_batch = jnp.take(Y_jax, batch_idx_i, axis=1)
+            w_batch = jnp.take(weights_jax, batch_idx_i, axis=0) * active_i
+
+            def update(
+                update_carry: tuple[Mapping[str, jax.Array], Mapping[str, jax.Array], Mapping[str, jax.Array], jax.Array],
+            ) -> tuple[dict[str, jax.Array], dict[str, jax.Array], dict[str, jax.Array], jax.Array]:
+                params_u, m_u, v_u, step_u = update_carry
+                step_next = step_u + one
+                params_next, m_next, v_next = train_step_impl(
+                    params_u,
+                    m_u,
+                    v_u,
+                    X_batch,
+                    Y_batch,
+                    w_batch,
+                    lr,
+                    step_next,
+                )
+                return params_next, m_next, v_next, step_next
+
+            next_carry = jax.lax.cond(has_weight_i, update, lambda skip_carry: skip_carry, carry)
+            return next_carry, None
+
+        (params_next, m_next, v_next, step_next), _ = jax.lax.scan(
+            body,
+            (params_local, m_local, v_local, step_count_local),
+            (batch_indices, active, has_weight),
+        )
+        return params_next, m_next, v_next, step_next
+
+    epoch_train = jax.jit(epoch_train_impl, donate_argnums=(0, 1, 2))
+
     rng = np.random.default_rng(int(seed))
-    step_count = 0
-    for epoch in range(1, epochs + 1):
-        lr_value = _cosine_schedule_with_warmup(epoch, epochs, float(eta_init))
-        if batch < n_samples:
+    if batch >= n_samples:
+        lr_values = _device_put(
+            jnp.asarray(
+                [_cosine_schedule_with_warmup(epoch, epochs, float(eta_init)) for epoch in range(1, epochs + 1)],
+                dtype=training_dtype,
+            ),
+            target_device,
+        )
+        step_values = _device_put(jnp.arange(1, epochs + 1, dtype=training_dtype), target_device)
+        params, opt_m, opt_v = full_batch_train(params, opt_m, opt_v, lr_values, step_values)
+    else:
+        step_count = _device_put(jnp.asarray(0.0, dtype=training_dtype), target_device)
+        for epoch in range(1, epochs + 1):
+            lr_value = _cosine_schedule_with_warmup(epoch, epochs, float(eta_init))
             indices = rng.permutation(n_samples)
-        else:
-            indices = np.arange(n_samples)
-        for start in range(0, n_samples, batch):
-            batch_idx = indices[start : start + batch]
-            if not np.sum(weights_np[batch_idx]) > 0.0:
+            batch_idx, active, has_weight = _epoch_minibatch_schedule(indices, batch, weights_np)
+            if not np.any(has_weight):
                 continue
-            batch_idx_jax = _device_put(jnp.asarray(batch_idx, dtype=jnp.int64), target_device)
-            X_batch = jnp.take(X_jax, batch_idx_jax, axis=1)
-            Y_batch = jnp.take(Y_jax, batch_idx_jax, axis=1)
-            w_batch = jnp.take(weights_jax, batch_idx_jax, axis=0)
-            _, grads = value_and_grad(params, X_batch, Y_batch, w_batch)
-            step_count += 1
-            params, opt_m, opt_v = update_step(
+            params, opt_m, opt_v, step_count = epoch_train(
                 params,
                 opt_m,
                 opt_v,
-                grads,
-                _device_put(jnp.asarray(lr_value, dtype=jnp.float64), target_device),
-                _device_put(jnp.asarray(step_count, dtype=jnp.float64), target_device),
+                step_count,
+                _device_put(jnp.asarray(batch_idx, dtype=jnp.int64), target_device),
+                _device_put(jnp.asarray(active, dtype=training_dtype), target_device),
+                _device_put(jnp.asarray(has_weight, dtype=bool), target_device),
+                _device_put(jnp.asarray(lr_value, dtype=training_dtype), target_device),
             )
 
     W3 = params.get("W3")
@@ -833,6 +990,7 @@ def train_resnet(
     clip_norm: float = 5.0,
     sample_weights: Optional[ArrayLike] = None,
     device: Optional[Any] = None,
+    train_dtype: Any = np.float64,
 ) -> FrozenResNet:
     """Train the Julia-style FiLM residual surrogate with JAX AdamW.
 
@@ -859,6 +1017,7 @@ def train_resnet(
         raise ValueError(f"weight_decay must be nonnegative, got {weight_decay}.")
     if clip_norm < 0.0:
         raise ValueError(f"clip_norm must be nonnegative, got {clip_norm}.")
+    training_dtype = normalize_training_dtype(train_dtype)
 
     X_std, Y_std, norm = standardize_xy(X, Y, copy=True, sample_weights=sample_weights)
     d_in, n_samples = X_std.shape
@@ -884,105 +1043,195 @@ def train_resnet(
     key = _device_put(jax.random.PRNGKey(int(seed)), target_device)
     key_iter = iter(jax.random.split(key, 4 + 2 * block_count))
     params: dict[str, Any] = {
-        "W_embed": _he_init(next(key_iter), (hidden, d_state_shock), math.sqrt(2.0 / max(1, d_state_shock))),
-        "b_embed": jnp.zeros((hidden,), dtype=jnp.float64),
-        "W_gamma": 0.02 * jax.random.normal(next(key_iter), (hidden, theta_dim), dtype=jnp.float64),
-        "b_gamma": jnp.ones((hidden,), dtype=jnp.float64),
-        "W_beta": 0.02 * jax.random.normal(next(key_iter), (hidden, theta_dim), dtype=jnp.float64),
-        "b_beta": jnp.zeros((hidden,), dtype=jnp.float64),
+        "W_embed": _he_init(
+            next(key_iter),
+            (hidden, d_state_shock),
+            math.sqrt(2.0 / max(1, d_state_shock)),
+            dtype=training_dtype,
+        ),
+        "b_embed": jnp.zeros((hidden,), dtype=training_dtype),
+        "W_gamma": 0.02 * jax.random.normal(next(key_iter), (hidden, theta_dim), dtype=training_dtype),
+        "b_gamma": jnp.ones((hidden,), dtype=training_dtype),
+        "W_beta": 0.02 * jax.random.normal(next(key_iter), (hidden, theta_dim), dtype=training_dtype),
+        "b_beta": jnp.zeros((hidden,), dtype=training_dtype),
     }
     blocks: list[dict[str, jax.Array]] = []
     hidden_scale = math.sqrt(2.0 / max(1, hidden))
     for _ in range(block_count):
         blocks.append(
             {
-                "W1": _he_init(next(key_iter), (hidden, hidden), hidden_scale),
-                "b1": jnp.zeros((hidden,), dtype=jnp.float64),
-                "W2": 0.01 * jax.random.normal(next(key_iter), (hidden, hidden), dtype=jnp.float64),
-                "b2": jnp.zeros((hidden,), dtype=jnp.float64),
+                "W1": _he_init(next(key_iter), (hidden, hidden), hidden_scale, dtype=training_dtype),
+                "b1": jnp.zeros((hidden,), dtype=training_dtype),
+                "W2": 0.01 * jax.random.normal(next(key_iter), (hidden, hidden), dtype=training_dtype),
+                "b2": jnp.zeros((hidden,), dtype=training_dtype),
             }
         )
     params["blocks"] = tuple(blocks)
-    params["W_out"] = 0.01 * jax.random.normal(next(key_iter), (d_out, hidden), dtype=jnp.float64)
-    params["b_out"] = jnp.zeros((d_out,), dtype=jnp.float64)
+    params["W_out"] = 0.01 * jax.random.normal(next(key_iter), (d_out, hidden), dtype=training_dtype)
+    params["b_out"] = jnp.zeros((d_out,), dtype=training_dtype)
 
     params = _device_put(params, target_device)
     opt_m = jax.tree_util.tree_map(jnp.zeros_like, params)
     opt_v = jax.tree_util.tree_map(jnp.zeros_like, params)
-    X_jax = _device_put(jnp.asarray(X_std, dtype=jnp.float64), target_device)
-    Y_jax = _device_put(jnp.asarray(Y_std, dtype=jnp.float64), target_device)
-    weights_jax = _device_put(jnp.asarray(weights_np, dtype=jnp.float64), target_device)
+    X_jax = _device_put(jnp.asarray(X_std, dtype=training_dtype), target_device)
+    Y_jax = _device_put(jnp.asarray(Y_std, dtype=training_dtype), target_device)
+    weights_jax = _device_put(jnp.asarray(weights_np, dtype=training_dtype), target_device)
 
     def forward(params_local: Mapping[str, Any], X_batch: jax.Array) -> jax.Array:
         x_state_shock = X_batch[:d_state_shock, :]
         x_theta = X_batch[d_state_shock:, :]
-        z = silu(_linear(params_local["W_embed"], params_local["b_embed"], x_state_shock))
+        z = jax.nn.silu(_linear(params_local["W_embed"], params_local["b_embed"], x_state_shock))
         gamma = _linear(params_local["W_gamma"], params_local["b_gamma"], x_theta)
         beta = _linear(params_local["W_beta"], params_local["b_beta"], x_theta)
         z = gamma * z + beta
         for block in params_local["blocks"]:
-            z = z + _linear(block["W2"], block["b2"], silu(_linear(block["W1"], block["b1"], z)))
+            z = z + _linear(block["W2"], block["b2"], jax.nn.silu(_linear(block["W1"], block["b1"], z)))
         return _linear(params_local["W_out"], params_local["b_out"], z)
 
     def loss_fn(params_local: Mapping[str, Any], X_batch: jax.Array, Y_batch: jax.Array, w_batch: jax.Array) -> jax.Array:
         pred = forward(params_local, X_batch)
         diff_sq = jnp.sum((pred - Y_batch) ** 2, axis=0)
         weight_sum = jnp.sum(w_batch)
-        return jnp.sum(diff_sq * w_batch) / jnp.maximum(weight_sum, 1.0)
+        return jnp.sum(diff_sq * w_batch) / jnp.maximum(weight_sum, jnp.asarray(1.0, dtype=weight_sum.dtype))
 
-    value_and_grad = jax.jit(jax.value_and_grad(loss_fn))
-
-    @jax.jit
-    def update_step(
+    def train_step_impl(
         params_local: Mapping[str, Any],
         m_local: Mapping[str, Any],
         v_local: Mapping[str, Any],
-        grads: Mapping[str, Any],
+        X_batch: jax.Array,
+        Y_batch: jax.Array,
+        w_batch: jax.Array,
         lr: jax.Array,
         step: jax.Array,
     ) -> tuple[Any, Any, Any]:
+        _, grads = jax.value_and_grad(loss_fn)(params_local, X_batch, Y_batch, w_batch)
         leaves = [g for g in jax.tree_util.tree_leaves(grads) if g is not None]
         global_norm = jnp.sqrt(sum(jnp.sum(g * g) for g in leaves))
-        scale = jnp.where((clip_norm > 0.0) & (global_norm > clip_norm), clip_norm / (global_norm + 1e-12), 1.0)
+        clip_value = jnp.asarray(float(clip_norm), dtype=global_norm.dtype)
+        scale = jnp.where(
+            (clip_value > 0.0) & (global_norm > clip_value),
+            clip_value / (global_norm + jnp.asarray(1e-12, dtype=global_norm.dtype)),
+            jnp.asarray(1.0, dtype=global_norm.dtype),
+        )
         grads_scaled = jax.tree_util.tree_map(lambda g: g * scale, grads)
-        beta1, beta2, eps = 0.9, 0.999, 1e-8
+        beta1 = jnp.asarray(0.9, dtype=lr.dtype)
+        beta2 = jnp.asarray(0.999, dtype=lr.dtype)
+        eps = jnp.asarray(1e-8, dtype=lr.dtype)
+        decay = jnp.asarray(float(weight_decay), dtype=lr.dtype)
         m_next = jax.tree_util.tree_map(lambda m, g: beta1 * m + (1.0 - beta1) * g, m_local, grads_scaled)
         v_next = jax.tree_util.tree_map(lambda v, g: beta2 * v + (1.0 - beta2) * (g * g), v_local, grads_scaled)
         m_hat = jax.tree_util.tree_map(lambda m: m / (1.0 - beta1**step), m_next)
         v_hat = jax.tree_util.tree_map(lambda v: v / (1.0 - beta2**step), v_next)
         params_next = jax.tree_util.tree_map(
-            lambda p, m, v: p - lr * (m / (jnp.sqrt(v) + eps) + weight_decay * p),
+            lambda p, m, v: p - lr * (m / (jnp.sqrt(v) + eps) + decay * p),
             params_local,
             m_hat,
             v_hat,
         )
         return params_next, m_next, v_next
 
+    def full_batch_train_impl(
+        params_local: Mapping[str, Any],
+        m_local: Mapping[str, Any],
+        v_local: Mapping[str, Any],
+        lr_values: jax.Array,
+        step_values: jax.Array,
+    ) -> tuple[Any, Any, Any]:
+        def body(
+            carry: tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]],
+            xs: tuple[jax.Array, jax.Array],
+        ) -> tuple[tuple[Any, Any, Any], None]:
+            params_i, m_i, v_i = carry
+            lr_i, step_i = xs
+            return train_step_impl(params_i, m_i, v_i, X_jax, Y_jax, weights_jax, lr_i, step_i), None
+
+        (params_next, m_next, v_next), _ = jax.lax.scan(body, (params_local, m_local, v_local), (lr_values, step_values))
+        return params_next, m_next, v_next
+
+    full_batch_train = jax.jit(full_batch_train_impl, donate_argnums=(0, 1, 2))
+
+    def epoch_train_impl(
+        params_local: Mapping[str, Any],
+        m_local: Mapping[str, Any],
+        v_local: Mapping[str, Any],
+        step_count_local: jax.Array,
+        batch_indices: jax.Array,
+        active: jax.Array,
+        has_weight: jax.Array,
+        lr: jax.Array,
+    ) -> tuple[Any, Any, Any, jax.Array]:
+        one = jnp.asarray(1.0, dtype=lr.dtype)
+
+        def body(
+            carry: tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any], jax.Array],
+            xs: tuple[jax.Array, jax.Array, jax.Array],
+        ) -> tuple[tuple[Any, Any, Any, jax.Array], None]:
+            params_i, m_i, v_i, step_i = carry
+            batch_idx_i, active_i, has_weight_i = xs
+            X_batch = jnp.take(X_jax, batch_idx_i, axis=1)
+            Y_batch = jnp.take(Y_jax, batch_idx_i, axis=1)
+            w_batch = jnp.take(weights_jax, batch_idx_i, axis=0) * active_i
+
+            def update(update_carry: tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any], jax.Array]) -> tuple[
+                Any,
+                Any,
+                Any,
+                jax.Array,
+            ]:
+                params_u, m_u, v_u, step_u = update_carry
+                step_next = step_u + one
+                params_next, m_next, v_next = train_step_impl(
+                    params_u,
+                    m_u,
+                    v_u,
+                    X_batch,
+                    Y_batch,
+                    w_batch,
+                    lr,
+                    step_next,
+                )
+                return params_next, m_next, v_next, step_next
+
+            next_carry = jax.lax.cond(has_weight_i, update, lambda skip_carry: skip_carry, carry)
+            return next_carry, None
+
+        (params_next, m_next, v_next, step_next), _ = jax.lax.scan(
+            body,
+            (params_local, m_local, v_local, step_count_local),
+            (batch_indices, active, has_weight),
+        )
+        return params_next, m_next, v_next, step_next
+
+    epoch_train = jax.jit(epoch_train_impl, donate_argnums=(0, 1, 2))
+
     rng = np.random.default_rng(int(seed))
-    step_count = 0
-    for epoch in range(1, epochs + 1):
-        lr_value = _cosine_schedule_with_warmup(epoch, epochs, float(eta_init))
-        if batch < n_samples:
+    if batch >= n_samples:
+        lr_values = _device_put(
+            jnp.asarray(
+                [_cosine_schedule_with_warmup(epoch, epochs, float(eta_init)) for epoch in range(1, epochs + 1)],
+                dtype=training_dtype,
+            ),
+            target_device,
+        )
+        step_values = _device_put(jnp.arange(1, epochs + 1, dtype=training_dtype), target_device)
+        params, opt_m, opt_v = full_batch_train(params, opt_m, opt_v, lr_values, step_values)
+    else:
+        step_count = _device_put(jnp.asarray(0.0, dtype=training_dtype), target_device)
+        for epoch in range(1, epochs + 1):
+            lr_value = _cosine_schedule_with_warmup(epoch, epochs, float(eta_init))
             indices = rng.permutation(n_samples)
-        else:
-            indices = np.arange(n_samples)
-        for start in range(0, n_samples, batch):
-            batch_idx = indices[start : start + batch]
-            if not np.sum(weights_np[batch_idx]) > 0.0:
+            batch_idx, active, has_weight = _epoch_minibatch_schedule(indices, batch, weights_np)
+            if not np.any(has_weight):
                 continue
-            batch_idx_jax = _device_put(jnp.asarray(batch_idx, dtype=jnp.int64), target_device)
-            X_batch = jnp.take(X_jax, batch_idx_jax, axis=1)
-            Y_batch = jnp.take(Y_jax, batch_idx_jax, axis=1)
-            w_batch = jnp.take(weights_jax, batch_idx_jax, axis=0)
-            _, grads = value_and_grad(params, X_batch, Y_batch, w_batch)
-            step_count += 1
-            params, opt_m, opt_v = update_step(
+            params, opt_m, opt_v, step_count = epoch_train(
                 params,
                 opt_m,
                 opt_v,
-                grads,
-                _device_put(jnp.asarray(lr_value, dtype=jnp.float64), target_device),
-                _device_put(jnp.asarray(step_count, dtype=jnp.float64), target_device),
+                step_count,
+                _device_put(jnp.asarray(batch_idx, dtype=jnp.int64), target_device),
+                _device_put(jnp.asarray(active, dtype=training_dtype), target_device),
+                _device_put(jnp.asarray(has_weight, dtype=bool), target_device),
+                _device_put(jnp.asarray(lr_value, dtype=training_dtype), target_device),
             )
 
     trained_blocks = tuple(

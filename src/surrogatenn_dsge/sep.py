@@ -1113,20 +1113,21 @@ def solve_batched_stochastic_extended_path_residual_expectation(
             values.append(jnp.reshape(stacked_batch[:, start:end], (batch_size, counts[t], state_dim)))
         return tuple(values)
 
+    terminal_guess = jnp.concatenate(
+        [
+            jnp.reshape(
+                jnp.broadcast_to(
+                    terminal_state_arr[:, None, :],
+                    (batch_size, counts[t], state_dim),
+                ),
+                (batch_size, counts[t] * state_dim),
+            )
+            for t in range(1, config.periods + 1)
+        ],
+        axis=1,
+    )
     if initial_guess is None:
-        guess = jnp.concatenate(
-            [
-                jnp.reshape(
-                    jnp.broadcast_to(
-                        terminal_state_arr[:, None, :],
-                        (batch_size, counts[t], state_dim),
-                    ),
-                    (batch_size, counts[t] * state_dim),
-                )
-                for t in range(1, config.periods + 1)
-            ],
-            axis=1,
-        )
+        guess = terminal_guess
     else:
         guess_arr = jnp.asarray(initial_guess, dtype=jnp.float64)
         if guess_arr.shape[0] != batch_size:
@@ -1255,6 +1256,14 @@ def solve_batched_stochastic_extended_path_residual_expectation(
             return jacobian_batch(stacked_batch, deterministic, initial_state_arr, terminal_state_arr)
         return jacobian_batch(stacked_batch, deterministic, initial_state_arr, terminal_state_arr, params_batch)
 
+    if initial_guess is not None:
+        guess_residual_norm = jnp.max(jnp.abs(eval_residual(guess)), axis=1)
+        terminal_residual_norm = jnp.max(jnp.abs(eval_residual(terminal_guess)), axis=1)
+        use_initial_guess = jnp.isfinite(guess_residual_norm) & (
+            guess_residual_norm <= terminal_residual_norm
+        )
+        guess = jnp.where(use_initial_guess[:, None], guess, terminal_guess)
+
     def solve_direction_batch(jacobian: jax.Array, residual: jax.Array, lambda_values: jax.Array) -> jax.Array:
         return jax.vmap(
             lambda jac, res, lam: _solve_sep_newton_direction(
@@ -1271,51 +1280,80 @@ def solve_batched_stochastic_extended_path_residual_expectation(
     current_lambda = jnp.full((batch_size,), float(config.newton_regularization), dtype=jnp.float64)
     iterations = jnp.zeros((batch_size,), dtype=jnp.int32)
     accept_threshold = config.tol if config.accept_tol is None else float(config.accept_tol)
+    lambda_retry_count = max(
+        1,
+        int(
+            np.ceil(
+                np.log(
+                    float(config.lm_lambda_max)
+                    / max(float(config.newton_regularization), float(config.lm_lambda_min))
+                )
+                / np.log(float(config.lm_lambda_scale))
+            )
+        )
+        + 1,
+    )
 
     for _ in range(1, config.max_iter + 1):
         residual = eval_residual(current)
         residual_norm = jnp.max(jnp.abs(residual), axis=1)
         active = residual_norm >= float(config.tol)
         jacobian = eval_jacobian(current)
-        step = solve_direction_batch_jit(jacobian, residual, current_lambda)
-        finite_step = jnp.all(jnp.isfinite(step), axis=1)
 
         candidate = current
         candidate_norm = residual_norm
         accepted_step = jnp.zeros((batch_size,), dtype=bool)
-        if config.line_search:
-            for alpha in tuple(float(value) for value in np.asarray(line_search_alphas)):
-                trial = current + float(alpha) * step
+        accepted_lambda = current_lambda
+        trial_lambda = current_lambda
+        for _lambda_attempt in range(lambda_retry_count):
+            pending = active & (~accepted_step)
+            step = solve_direction_batch_jit(jacobian, residual, trial_lambda)
+            finite_step = jnp.all(jnp.isfinite(step), axis=1)
+            if config.line_search:
+                for alpha in tuple(float(value) for value in np.asarray(line_search_alphas)):
+                    trial = current + float(alpha) * step
+                    trial_residual = eval_residual(trial)
+                    trial_norm = jnp.max(jnp.abs(trial_residual), axis=1)
+                    improving = (
+                        pending
+                        & finite_step
+                        & (~accepted_step)
+                        & jnp.isfinite(trial_norm)
+                        & (trial_norm < residual_norm)
+                    )
+                    candidate = jnp.where(improving[:, None], trial, candidate)
+                    candidate_norm = jnp.where(improving, trial_norm, candidate_norm)
+                    accepted_lambda = jnp.where(improving, trial_lambda, accepted_lambda)
+                    accepted_step = accepted_step | improving
+            else:
+                trial = current + step
                 trial_residual = eval_residual(trial)
                 trial_norm = jnp.max(jnp.abs(trial_residual), axis=1)
-                improving = (
-                    active
+                accepted_now = (
+                    pending
                     & finite_step
-                    & (~accepted_step)
                     & jnp.isfinite(trial_norm)
-                    & (trial_norm < residual_norm)
                 )
-                candidate = jnp.where(improving[:, None], trial, candidate)
-                candidate_norm = jnp.where(improving, trial_norm, candidate_norm)
-                accepted_step = accepted_step | improving
-        else:
-            trial = current + step
-            trial_residual = eval_residual(trial)
-            trial_norm = jnp.max(jnp.abs(trial_residual), axis=1)
-            accepted_step = active & finite_step & jnp.isfinite(trial_norm)
-            candidate = jnp.where(accepted_step[:, None], trial, candidate)
-            candidate_norm = jnp.where(accepted_step, trial_norm, candidate_norm)
+                candidate = jnp.where(accepted_now[:, None], trial, candidate)
+                candidate_norm = jnp.where(accepted_now, trial_norm, candidate_norm)
+                accepted_lambda = jnp.where(accepted_now, trial_lambda, accepted_lambda)
+                accepted_step = accepted_step | accepted_now
+            trial_lambda = jnp.where(
+                pending & (~accepted_step),
+                jnp.minimum(trial_lambda * float(config.lm_lambda_scale), float(config.lm_lambda_max)),
+                trial_lambda,
+            )
 
         current = jnp.where(active[:, None], candidate, current)
         iterations = iterations + (active & accepted_step).astype(jnp.int32)
         current_lambda = jnp.where(
             active & accepted_step & (candidate_norm < residual_norm),
-            jnp.maximum(current_lambda / float(config.lm_lambda_scale), float(config.lm_lambda_min)),
+            jnp.maximum(accepted_lambda / float(config.lm_lambda_scale), float(config.lm_lambda_min)),
             current_lambda,
         )
         current_lambda = jnp.where(
             active & (~accepted_step),
-            jnp.minimum(current_lambda * float(config.lm_lambda_scale), float(config.lm_lambda_max)),
+            trial_lambda,
             current_lambda,
         )
 

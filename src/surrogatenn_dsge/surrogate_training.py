@@ -15,6 +15,7 @@ from .surrogate import (
     NormStats,
     ResBlock,
     SurrogateValidationResult,
+    normalize_training_dtype,
     predict_frozen_batch,
     resolve_jax_device,
     scale_frozen_output,
@@ -623,6 +624,7 @@ def train_surrogate_from_dataset(
     clip_norm: float = 5.0,
     activation: str = "silu",
     device: Optional[Any] = None,
+    train_dtype: Any = np.float64,
 ) -> SurrogateTrainingResult:
     """Train an MLP or ResNet surrogate from a `SurrogateDataset`.
 
@@ -657,9 +659,15 @@ def train_surrogate_from_dataset(
     train_weights = None if weights is None else weights[split.train_idx]
     epochs = int(nepoch) if nepoch is not None else (600 if arch == "resnet" else 400)
     target_device = resolve_jax_device(device)
+    training_dtype = normalize_training_dtype(train_dtype)
 
     X_train = dataset.X[:, split.train_idx]
     Y_train = Y_target[:, split.train_idx]
+    effective_batch_size = min(
+        int(batch_size) if batch_size is not None else min(512, max(32, split.train_size // 20)),
+        split.train_size,
+    )
+    training_loop = "full_batch_scan" if effective_batch_size >= split.train_size else "epoch_scan"
     if arch == "resnet":
         d_theta = int(dataset.theta.shape[0])
         if d_theta <= 0:
@@ -678,6 +686,7 @@ def train_surrogate_from_dataset(
             clip_norm=clip_norm,
             sample_weights=train_weights,
             device=target_device,
+            train_dtype=training_dtype,
         )
     else:
         frozen = train_mlp(
@@ -694,6 +703,7 @@ def train_surrogate_from_dataset(
             activation=activation,
             sample_weights=train_weights,
             device=target_device,
+            train_dtype=training_dtype,
         )
 
     validation: Optional[SurrogateValidationResult] = None
@@ -740,6 +750,9 @@ def train_surrogate_from_dataset(
         "jax_backend": jax.default_backend(),
         "jax_device": None if target_device is None else str(target_device),
         "jax_device_platform": None if target_device is None else str(target_device.platform),
+        "train_dtype": str(np.dtype(training_dtype)),
+        "training_loop": training_loop,
+        "training_batch_size": int(effective_batch_size),
         "theta_names": dataset.theta_names,
         "output_indices": None if out_idx is None else out_idx.copy(),
         "residual_shrinkage_calibrated": bool(rom_residual and residual_shrinkage is not None),
@@ -782,6 +795,7 @@ def train_surrogate_from_batched_arrays_jax(
     clip_norm: float = 5.0,
     activation: str = "silu",
     device: Optional[Any] = None,
+    train_dtype: Any = np.float64,
 ) -> SurrogateTrainingResult:
     """Train directly from fixed-shape JAX rollout arrays.
 
@@ -824,6 +838,12 @@ def train_surrogate_from_batched_arrays_jax(
 
     epochs = int(nepoch) if nepoch is not None else (600 if arch == "resnet" else 400)
     target_device = resolve_jax_device(device)
+    training_dtype = normalize_training_dtype(train_dtype)
+    effective_batch_size = min(
+        int(batch_size) if batch_size is not None else min(512, max(32, n_samples_total // 20)),
+        n_samples_total,
+    )
+    training_loop = "full_batch_scan" if effective_batch_size >= n_samples_total else "epoch_scan"
     if arch == "resnet":
         d_theta = int(arrays.theta.shape[0])
         if d_theta <= 0:
@@ -842,6 +862,7 @@ def train_surrogate_from_batched_arrays_jax(
             clip_norm=clip_norm,
             sample_weights=weights,
             device=target_device,
+            train_dtype=training_dtype,
         )
     else:
         frozen = train_mlp(
@@ -858,6 +879,7 @@ def train_surrogate_from_batched_arrays_jax(
             activation=activation,
             sample_weights=weights,
             device=target_device,
+            train_dtype=training_dtype,
         )
 
     train_idx = np.flatnonzero(weights > 0.0).astype(np.int64)
@@ -882,6 +904,9 @@ def train_surrogate_from_batched_arrays_jax(
         "jax_backend": jax.default_backend(),
         "jax_device": None if target_device is None else str(target_device),
         "jax_device_platform": None if target_device is None else str(target_device.platform),
+        "train_dtype": str(np.dtype(training_dtype)),
+        "training_loop": training_loop,
+        "training_batch_size": int(effective_batch_size),
         "output_indices": None if out_idx is None else out_idx.copy(),
     }
     if arch == "resnet":
@@ -922,6 +947,7 @@ def fit_surrogate_pipeline_from_batched_arrays_jax(
     clip_norm: float = 5.0,
     activation: str = "silu",
     device: Optional[Any] = None,
+    train_dtype: Any = np.float64,
     bundle_path: Optional[str | Path] = None,
     bundle_metadata: Optional[dict[str, object]] = None,
 ) -> BatchedSurrogatePipelineResult:
@@ -946,6 +972,7 @@ def fit_surrogate_pipeline_from_batched_arrays_jax(
         clip_norm=clip_norm,
         activation=activation,
         device=device,
+        train_dtype=train_dtype,
     )
     saved_path: Optional[Path] = None
     if bundle_path is not None:
@@ -992,6 +1019,7 @@ def fit_surrogate_pipeline_from_batched_sep_jax(
     clip_norm: float = 5.0,
     activation: str = "silu",
     device: Optional[Any] = None,
+    train_dtype: Any = np.float64,
     bundle_path: Optional[str | Path] = None,
     bundle_metadata: Optional[dict[str, object]] = None,
 ) -> BatchedSurrogatePipelineResult:
@@ -1032,6 +1060,7 @@ def fit_surrogate_pipeline_from_batched_sep_jax(
         clip_norm=clip_norm,
         activation=activation,
         device=device,
+        train_dtype=train_dtype,
         bundle_path=bundle_path,
         bundle_metadata=bundle_metadata,
     )
@@ -1069,6 +1098,7 @@ def fit_surrogate_pipeline(
     clip_norm: float = 5.0,
     activation: str = "silu",
     device: Optional[Any] = None,
+    train_dtype: Any = np.float64,
     bundle_path: Optional[str | Path] = None,
     bundle_metadata: Optional[dict[str, object]] = None,
 ) -> SurrogatePipelineResult:
@@ -1115,6 +1145,7 @@ def fit_surrogate_pipeline(
         clip_norm=clip_norm,
         activation=activation,
         device=device,
+        train_dtype=train_dtype,
     )
     saved_path: Optional[Path] = None
     if bundle_path is not None:

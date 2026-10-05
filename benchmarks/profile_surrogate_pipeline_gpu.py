@@ -26,7 +26,9 @@ import statistics
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 from typing import Any, Sequence
+import warnings
 
 import numpy as np
 
@@ -47,9 +49,11 @@ from surrogatenn_dsge import (
     bounded_to_unconstrained,
     fit_surrogate_pipeline_from_batched_sep_jax,
     fit_surrogate_pipeline,
+    load_surrogate_bundle,
     parse_macro_model,
     predict_frozen_batch,
     resolve_jax_device,
+    save_surrogate_bundle,
     get_parameter_names,
     sample_parameter_design,
     solve_batched_stochastic_extended_path_model,
@@ -155,6 +159,20 @@ def _finite_float_or_none(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _finite_quantile_summary(values: Sequence[float]) -> dict[str, float | None]:
+    array = np.asarray(values, dtype=np.float64).reshape(-1)
+    array = array[np.isfinite(array)]
+    if array.size == 0:
+        return {"count": 0, "min": None, "p50": None, "p90": None, "max": None}
+    return {
+        "count": int(array.size),
+        "min": float(np.min(array)),
+        "p50": float(np.quantile(array, 0.50)),
+        "p90": float(np.quantile(array, 0.90)),
+        "max": float(np.max(array)),
+    }
+
+
 def _parity_metrics(
     *,
     value: float,
@@ -197,8 +215,74 @@ def _parity_metrics(
     }
 
 
+def _bundle_path_from_args(args: argparse.Namespace) -> Path | None:
+    configured = getattr(args, "hlt_surrogate_bundle_path", None)
+    if configured is not None:
+        return Path(configured)
+    output = getattr(args, "output", None)
+    if output is None:
+        return None
+    output_path = Path(output)
+    return output_path.with_name(f"{output_path.stem}_surrogate_bundle.snn.npz")
+
+
+def _training_namespace_from_bundle(bundle: Any) -> SimpleNamespace:
+    """Adapt a loaded portable bundle to the fields used by the HLT profile."""
+
+    metadata = dict(bundle.metadata)
+    train_size = int(metadata.get("train_size") or (0 if bundle.train_idx is None else bundle.train_idx.size))
+    val_size = int(metadata.get("val_size") or (0 if bundle.val_idx is None else bundle.val_idx.size))
+    split = SimpleNamespace(train_size=train_size, val_size=val_size)
+    return SimpleNamespace(
+        frozen=bundle.frozen,
+        split=split,
+        train_size=train_size,
+        val_size=val_size,
+        validation_rmse=bundle.validation_rmse,
+        validation_rmse_residual=bundle.validation_rmse_residual,
+        validation_rmse_rom=bundle.validation_rmse_rom,
+        validation_improvement=bundle.validation_improvement,
+        metadata=metadata,
+    )
+
+
+def _validate_loaded_hlt_surrogate(
+    *,
+    frozen: Any,
+    input_names: Sequence[str],
+    output_names: Sequence[str],
+    parameter_subset: Sequence[str],
+    metadata: dict[str, Any],
+) -> None:
+    d_in = int(getattr(frozen, "d_in"))
+    d_out = int(getattr(frozen, "d_out"))
+    if d_in != len(input_names):
+        raise ValueError(
+            "Loaded HLT surrogate input dimension does not match this run: "
+            f"{d_in} vs {len(input_names)}."
+        )
+    if d_out != len(output_names):
+        raise ValueError(
+            "Loaded HLT surrogate output dimension does not match this run: "
+            f"{d_out} vs {len(output_names)}."
+        )
+    saved_subset = metadata.get("parameter_subset")
+    if saved_subset is not None and tuple(saved_subset) != tuple(parameter_subset):
+        raise ValueError(
+            "Loaded HLT surrogate parameter subset does not match this run: "
+            f"{tuple(saved_subset)!r} vs {tuple(parameter_subset)!r}."
+        )
+
+
 def _progress(message: str) -> None:
     print(f"[profile] {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {message}", flush=True)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return bool(default)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _sep_group_counts_for_estimate(
@@ -868,6 +952,7 @@ def run_training_profile(args: argparse.Namespace, shape: SyntheticHLTShape) -> 
         eta_init=args.learning_rate,
         batch_size=args.batch_size,
         device=target_device,
+        train_dtype=args.train_dtype,
     )
     _block_until_ready_tree(result.frozen)
     train_s = time.perf_counter() - train_started
@@ -884,6 +969,8 @@ def run_training_profile(args: argparse.Namespace, shape: SyntheticHLTShape) -> 
         "hidden": int(args.hidden),
         "blocks": int(args.blocks),
         "batch_size": int(args.batch_size),
+        "train_dtype": str(args.train_dtype),
+        "training_loop": result.metadata.get("training_loop"),
         "dataset_build_s": dataset_s,
         "train_s": train_s,
         "train_size": int(result.train_size),
@@ -902,7 +989,7 @@ def run_training_profile(args: argparse.Namespace, shape: SyntheticHLTShape) -> 
         "memory_estimate_bytes": estimate_dataset_memory_bytes(
             shape=shape,
             samples=args.samples,
-            dtype=np.float64,
+            dtype=np.float32 if str(args.train_dtype) == "float32" else np.float64,
         ),
     }
 
@@ -934,6 +1021,7 @@ def run_batched_training_profile(args: argparse.Namespace, shape: SyntheticHLTSh
         eta_init=args.learning_rate,
         batch_size=args.batch_size,
         device=target_device,
+        train_dtype=args.train_dtype,
     )
     _block_until_ready_tree(result.frozen)
     train_s = time.perf_counter() - train_started
@@ -965,6 +1053,8 @@ def run_batched_training_profile(args: argparse.Namespace, shape: SyntheticHLTSh
         "hidden": int(args.hidden),
         "blocks": int(args.blocks),
         "batch_size": int(args.batch_size),
+        "train_dtype": str(args.train_dtype),
+        "training_loop": result.metadata.get("training_loop"),
         "mask_fraction_requested": float(args.batched_mask_fraction),
         "sample_mask_true_count": int(np.count_nonzero(mask)),
         "sample_mask_false_count": int(mask.size - np.count_nonzero(mask)),
@@ -979,7 +1069,7 @@ def run_batched_training_profile(args: argparse.Namespace, shape: SyntheticHLTSh
         "memory_estimate_bytes": estimate_dataset_memory_bytes(
             shape=shape,
             samples=int(arrays.X.shape[1]),
-            dtype=np.float64,
+            dtype=np.float32 if str(args.train_dtype) == "float32" else np.float64,
         ),
         "caveat": (
             "Synthetic fixed-shape rollout tensors profile the GPU-compatible training path. "
@@ -1008,6 +1098,7 @@ def run_prediction_profile(args: argparse.Namespace, shape: SyntheticHLTShape) -
         eta_init=args.learning_rate,
         batch_size=args.batch_size,
         device=target_device,
+        train_dtype=args.train_dtype,
     )
     probe = dataset.X[:, : args.batch_size]
     X_probe = jnp.asarray(probe, dtype=jnp.float64)
@@ -1036,6 +1127,8 @@ def run_prediction_profile(args: argparse.Namespace, shape: SyntheticHLTShape) -
         "backend": jax.default_backend(),
         "target_device": None if target_device is None else str(target_device),
         "batch_size": int(args.batch_size),
+        "train_dtype": str(args.train_dtype),
+        "training_loop": result.metadata.get("training_loop"),
         "first_call_s": first_s,
         "steady_median_s": median_s,
         "steady_samples_per_s": args.batch_size / median_s if median_s > 0 else math.inf,
@@ -1116,6 +1209,7 @@ def run_sep_micro_profile(args: argparse.Namespace) -> dict[str, Any]:
         periods=int(args.sep_periods),
         branching_order=int(args.sep_order),
         nnodes=int(args.sep_nnodes),
+        shock_scale=float(args.sep_shock_scale),
         sparse_tree=bool(args.sep_sparse_tree),
         max_iter=int(args.sep_max_iter),
         tol=float(args.sep_tol),
@@ -1205,6 +1299,7 @@ def run_batched_sep_micro_profile(args: argparse.Namespace) -> dict[str, Any]:
         periods=int(args.sep_periods),
         branching_order=int(args.sep_order),
         nnodes=int(args.sep_nnodes),
+        shock_scale=float(args.sep_shock_scale),
         sparse_tree=bool(args.sep_sparse_tree),
         max_iter=int(args.sep_max_iter),
         tol=float(args.sep_tol),
@@ -1347,6 +1442,7 @@ def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticH
         periods=int(args.sep_periods),
         branching_order=int(args.sep_order),
         nnodes=int(args.sep_nnodes),
+        shock_scale=float(args.sep_shock_scale),
         sparse_tree=bool(args.sep_sparse_tree),
         max_iter=int(args.sep_max_iter),
         tol=float(args.sep_tol),
@@ -1406,6 +1502,7 @@ def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticH
         eta_init=args.learning_rate,
         batch_size=args.batch_size,
         device=target_device,
+        train_dtype=args.train_dtype,
     )
     _block_until_ready_tree(result.frozen)
     train_s = time.perf_counter() - train_started
@@ -1485,6 +1582,8 @@ def run_batched_sep_training_profile(args: argparse.Namespace, shape: SyntheticH
         "hidden": int(args.hidden),
         "blocks": int(args.blocks),
         "training_batch_size": int(args.batch_size),
+        "train_dtype": str(args.train_dtype),
+        "training_loop": result.metadata.get("training_loop"),
         "sep_solve_s": solve_s,
         "target_assemble_s": assemble_s,
         "train_s": train_s,
@@ -1562,6 +1661,7 @@ def run_parsed_batched_sep_training_profile(args: argparse.Namespace) -> dict[st
         periods=int(args.sep_periods),
         branching_order=int(args.sep_order),
         nnodes=int(args.sep_nnodes),
+        shock_scale=float(args.sep_shock_scale),
         sparse_tree=bool(args.sep_sparse_tree),
         max_iter=int(args.sep_max_iter),
         tol=float(args.sep_tol),
@@ -1614,6 +1714,7 @@ def run_parsed_batched_sep_training_profile(args: argparse.Namespace) -> dict[st
         batch_size=int(args.batch_size),
         train_seed=int(args.seed),
         device=target_device,
+        train_dtype=args.train_dtype,
     )
     _block_until_ready_tree(pipeline.training.frozen)
     assemble_train_s = time.perf_counter() - assemble_train_started
@@ -1644,6 +1745,8 @@ def run_parsed_batched_sep_training_profile(args: argparse.Namespace) -> dict[st
         "branching_order": int(config.branching_order),
         "nnodes": int(config.nnodes),
         "sparse_tree": bool(config.sparse_tree),
+        "train_dtype": str(args.train_dtype),
+        "training_loop": pipeline.training.metadata.get("training_loop"),
         "sep_solve_s": solve_s,
         "assemble_train_s": assemble_train_s,
         "predict_first_s": predict_first_s,
@@ -1833,6 +1936,7 @@ def _hlt_sep_attempt_specs(args: argparse.Namespace) -> tuple[HLTSEPAttemptSpec,
                                 periods=int(periods),
                                 branching_order=int(order),
                                 nnodes=int(args.sep_nnodes),
+                                shock_scale=float(args.sep_shock_scale),
                                 sparse_tree=bool(args.sep_sparse_tree),
                                 max_iter=int(max_iter),
                                 tol=float(args.sep_tol),
@@ -2107,6 +2211,8 @@ def _build_batched_hlt_sep_dataset(
     target_device: Any,
     max_logged_failures: int,
     batch_chunk_size: int | None = None,
+    verbose_progress: bool = False,
+    progress_chunk_interval: int = 1,
 ) -> tuple[SurrogateDataset, dict[str, Any]]:
     """Build HLT targets with parsed-model batched SEP solves.
 
@@ -2199,7 +2305,10 @@ def _build_batched_hlt_sep_dataset(
     ]
     failure_log: list[dict[str, Any]] = []
     residual_values: list[float] = []
+    attempted_residual_values: list[float] = []
     batched_calls = 0
+    total_chunks = int(math.ceil(n_theta / effective_chunk_size))
+    progress_interval = max(1, int(progress_chunk_interval))
 
     def log_failure(row: dict[str, Any]) -> None:
         if len(failure_log) < int(max_logged_failures):
@@ -2216,6 +2325,18 @@ def _build_batched_hlt_sep_dataset(
             chunk = slice(start, end)
             if not bool(np.any(active[chunk])):
                 continue
+            chunk_number = start // effective_chunk_size + 1
+            should_log_chunk = bool(verbose_progress) and (
+                chunk_number == 1
+                or chunk_number == total_chunks
+                or ((chunk_number - 1) % progress_interval == 0)
+            )
+            if should_log_chunk:
+                _progress(
+                    f"batched HLT SEP period {period}/{periods - 1} "
+                    f"chunk {chunk_number}/{total_chunks} starting "
+                    f"theta={start}:{end} active={int(np.count_nonzero(active[chunk]))}"
+                )
             deterministic = np.zeros((end - start, int(config.periods), model.timings.nExo), dtype=np.float64)
             if config.periods > 0:
                 deterministic[:, 0, :] = shock_array[chunk, :, period]
@@ -2240,8 +2361,25 @@ def _build_batched_hlt_sep_dataset(
             accepted[chunk] = np.asarray(batched_sep.solution.accepted, dtype=bool)
             residual_norm[chunk] = np.asarray(batched_sep.solution.residual_norm, dtype=np.float64)
             next_states[chunk] = np.asarray(batched_sep.solution.mean_path[:, :, 1], dtype=np.float64)
+            if should_log_chunk:
+                chunk_residuals = residual_norm[chunk]
+                chunk_summary = _finite_quantile_summary(chunk_residuals)
+                active_count = int(np.count_nonzero(active[chunk]))
+                accepted_count = int(np.count_nonzero(accepted[chunk] & active[chunk]))
+                _progress(
+                    f"batched HLT SEP period {period}/{periods - 1} "
+                    f"chunk {chunk_number}/{total_chunks} finished "
+                    f"accepted={accepted_count}/{active_count} "
+                    f"elapsed={time.perf_counter() - solve_started:.3f}s "
+                    f"residual_p50={chunk_summary['p50']} "
+                    f"residual_p90={chunk_summary['p90']} "
+                    f"residual_max={chunk_summary['max']}"
+                )
         finite_next = np.isfinite(next_states).all(axis=1)
         accepted_this = active & accepted & finite_next
+        period_attempted_residuals = residual_norm[active & np.isfinite(residual_norm)]
+        if period_attempted_residuals.size:
+            attempted_residual_values.extend(float(value) for value in period_attempted_residuals)
 
         shocks_t = shock_array[:, :, period]
         state_dev = current_states[:, state_index] - steady_matrix[:, state_index]
@@ -2324,10 +2462,12 @@ def _build_batched_hlt_sep_dataset(
             "batch_chunk_size": int(effective_chunk_size),
             "memory_estimate": memory_estimate,
             "failure_log": failure_log,
+            "attempted_residual_summary": _finite_quantile_summary(attempted_residual_values),
             "sep_config": {
                 "periods": int(config.periods),
                 "branching_order": int(config.branching_order),
                 "nnodes": int(config.nnodes),
+                "shock_scale": float(config.shock_scale),
                 "sparse_tree": bool(config.sparse_tree),
                 "max_iter": int(config.max_iter),
                 "tol": float(config.tol),
@@ -2371,11 +2511,13 @@ def _build_batched_hlt_sep_dataset(
         "accepted_by_branching_order": {str(int(config.branching_order)): int(dataset.n_samples)},
         "residual_norm_mean": _finite_float_or_none(np.nanmean(residual_array)) if residual_array.size else None,
         "residual_norm_max": _finite_float_or_none(np.nanmax(residual_array)) if residual_array.size else None,
+        "attempted_residual_summary": _finite_quantile_summary(attempted_residual_values),
         "failure_log": failure_log,
         "sep_config": {
             "periods": int(config.periods),
             "branching_order": int(config.branching_order),
             "nnodes": int(config.nnodes),
+            "shock_scale": float(config.shock_scale),
             "sparse_tree": bool(config.sparse_tree),
             "max_iter": int(config.max_iter),
             "tol": float(config.tol),
@@ -2445,6 +2587,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         periods=int(args.sep_periods),
         branching_order=int(args.sep_order),
         nnodes=int(args.sep_nnodes),
+        shock_scale=float(args.sep_shock_scale),
         sparse_tree=bool(args.sep_sparse_tree),
         max_iter=int(args.sep_max_iter),
         tol=float(args.sep_tol),
@@ -2495,12 +2638,14 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         if steady_state_mode != "fixed-reference":
             ss_started = time.perf_counter()
             try:
-                steady_state_result = model.solve_steady_state(
-                    parameter_values=parameter_values,
-                    initial_guess=reference_steady_state,
-                    tol=float(args.hlt_steady_state_tol),
-                    max_iter=int(args.hlt_steady_state_max_iter),
-                )
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", category=RuntimeWarning)
+                    steady_state_result = model.solve_steady_state(
+                        parameter_values=parameter_values,
+                        initial_guess=reference_steady_state,
+                        tol=float(args.hlt_steady_state_tol),
+                        max_iter=int(args.hlt_steady_state_max_iter),
+                    )
                 ss_elapsed = time.perf_counter() - ss_started
                 ss_converged = bool(steady_state_result.converged)
                 ss_iterations = int(steady_state_result.iterations)
@@ -2605,19 +2750,116 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         initial_state_columns.append(np.asarray(runtime["steady_state"], dtype=np.float64))
         kept_theta_indices.append(int(theta_idx))
     if not initial_state_columns:
-        raise RuntimeError("No HLT theta draw survived steady-state/first-order runtime preparation.")
+        if not bool(args.hlt_runtime_preflight_only):
+            raise RuntimeError("No HLT theta draw survived steady-state/first-order runtime preparation.")
     if len(initial_state_columns) < int(args.hlt_min_runtime_successful_theta):
-        raise RuntimeError(
-            "Too few HLT theta draws survived runtime preparation: "
-            f"{len(initial_state_columns)} < {args.hlt_min_runtime_successful_theta}."
-        )
+        if not bool(args.hlt_runtime_preflight_only):
+            raise RuntimeError(
+                "Too few HLT theta draws survived runtime preparation: "
+                f"{len(initial_state_columns)} < {args.hlt_min_runtime_successful_theta}."
+            )
     if runtime_failures:
         kept = np.asarray(kept_theta_indices, dtype=np.int64)
         theta = theta[:, kept]
         shocks = shocks[kept, :, :]
         theta_design_diagnostics["runtime_kept_original_indices"] = kept_theta_indices
-    initial_states = np.column_stack(initial_state_columns)
     runtime_prepare_s = time.perf_counter() - runtime_prepare_started
+    preflight_minimum = int(args.hlt_min_runtime_successful_theta)
+    preflight_ok = bool(initial_state_columns) and len(initial_state_columns) >= preflight_minimum
+    if bool(args.hlt_runtime_preflight_only):
+        steady_statuses = [str(row["steady_state_status"]) for row in steady_state_diagnostics]
+        attempted_fallback_count = sum(status.startswith("fallback") for status in steady_statuses)
+        attempted_solved_count = sum(status == "solved" for status in steady_statuses)
+        kept_theta_index_set = {int(idx) for idx in kept_theta_indices}
+        steady_state_diagnostics_for_gate = [
+            row
+            for row in steady_state_diagnostics
+            if row.get("theta_index") is None or int(row["theta_index"]) in kept_theta_index_set
+        ]
+        steady_statuses_for_gate = [
+            str(row["steady_state_status"]) for row in steady_state_diagnostics_for_gate
+        ]
+        steady_fallback_count_for_gate = sum(status.startswith("fallback") for status in steady_statuses_for_gate)
+        steady_solved_count_for_gate = sum(status == "solved" for status in steady_statuses_for_gate)
+        preflight_issues = []
+        if not initial_state_columns:
+            preflight_issues.append("No HLT theta draw survived steady-state/first-order runtime preparation.")
+        elif len(initial_state_columns) < preflight_minimum:
+            preflight_issues.append(
+                "Too few HLT theta draws survived runtime preparation: "
+                f"{len(initial_state_columns)} < {preflight_minimum}."
+            )
+        _progress(
+            "runtime preflight only: "
+            f"prepared {len(initial_state_columns)}/{original_theta_draws} theta runtimes "
+            f"in {runtime_prepare_s:.3f}s"
+        )
+        return {
+            "status": "ok" if preflight_ok else "runtime_preflight_failed",
+            "kind": "actual_hlt_runtime_preflight",
+            "backend": jax.default_backend(),
+            "target_device": None if target_device is None else str(target_device),
+            "model_source": str(model_source),
+            "payload_case": str(case["name"]),
+            "parse_s": parse_s,
+            "runtime_prepare_s": runtime_prepare_s,
+            "steady_state_s": steady_state_s,
+            "first_order_s": first_order_s,
+            "pipeline_s": runtime_prepare_s,
+            "strict_solved_steady_state_preflight": strict_solved_steady_state,
+            "n_vars": int(model.timings.nVars),
+            "n_exo": int(model.timings.nExo),
+            "parameter_subset": parameter_subset,
+            "hlt_parameter_set": str(args.hlt_parameter_set),
+            "theta_draws": int(len(initial_state_columns)),
+            "original_theta_draws": int(original_theta_draws),
+            "steady_state_mode": steady_state_mode,
+            "first_order_qme_algorithm": str(args.hlt_first_order_qme_algorithm),
+            "steady_state_solved_count": int(steady_solved_count_for_gate),
+            "steady_state_fallback_count": int(steady_fallback_count_for_gate),
+            "steady_state_attempted_solved_count": int(attempted_solved_count),
+            "steady_state_attempted_fallback_count": int(attempted_fallback_count),
+            "steady_state_diagnostics": steady_state_diagnostics,
+            "runtime_successful_theta_count": int(len(initial_state_columns)),
+            "runtime_dropped_theta_count": int(len(runtime_failures)),
+            "runtime_failures": runtime_failures,
+            "runtime_kept_original_indices": kept_theta_indices,
+            "target_diagnostics": {
+                "status": "ok" if preflight_ok else "runtime_preflight_failed",
+                "builder": "runtime_preflight_only",
+                "accepted_samples": 0,
+                "runtime_prepared_theta_draws": int(len(initial_state_columns)),
+                "runtime_dropped_theta_count": int(len(runtime_failures)),
+                "theta_full_success_count": 0,
+                "fallback_share": None,
+                "theta_design": theta_design_diagnostics,
+                "original_theta_draws": int(original_theta_draws),
+                "runtime_failures": runtime_failures,
+            },
+            "dataset_summary": None,
+            "train_size": 0,
+            "val_size": 0,
+            "train_dtype": str(args.train_dtype),
+            "training_metadata": {"status": "skipped", "reason": "hlt_runtime_preflight_only"},
+            "validation_rmse_mean": None,
+            "validation_improvement_mean": None,
+            "quality_gate": {
+                "status": "ok" if preflight_ok else "failed",
+                "issues": preflight_issues,
+                "min_runtime_successful_theta": preflight_minimum,
+                "runtime_successful_theta_count": int(len(initial_state_columns)),
+                "runtime_dropped_theta_count": int(len(runtime_failures)),
+                "require_solved_steady_state": bool(args.hlt_require_solved_steady_state),
+                "steady_state_solved_count": int(steady_solved_count_for_gate),
+                "steady_state_fallback_count": int(steady_fallback_count_for_gate),
+                "steady_state_attempted_solved_count": int(attempted_solved_count),
+                "steady_state_attempted_fallback_count": int(attempted_fallback_count),
+            },
+            "surrogate_inversion_likelihood": {"status": "skipped", "reason": "hlt_runtime_preflight_only"},
+            "jax_surrogate_log_density": {"status": "skipped", "reason": "hlt_runtime_preflight_only"},
+            "surrogate_hmc": {"status": "skipped", "reason": "hlt_runtime_preflight_only"},
+        }
+    initial_states = np.column_stack(initial_state_columns)
     _progress(
         f"prepared {theta.shape[1]}/{original_theta_draws} theta runtimes in {runtime_prepare_s:.3f}s; "
         f"starting ROM/FOM surrogate target generation and training"
@@ -2696,7 +2938,53 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
     input_names = tuple(list(model.timings.var) + list(model.timings.exo) + parameter_subset)
     output_names = tuple(observables + [f"{name}[1]" for name in model.timings.var])
     target_builder = str(args.hlt_target_builder).strip().lower()
-    if target_builder == "callback":
+    surrogate_bundle_path = _bundle_path_from_args(args)
+    surrogate_bundle_saved_path: Path | None = None
+    surrogate_bundle_reused = bool(args.hlt_reuse_surrogate_bundle)
+    if surrogate_bundle_reused:
+        if surrogate_bundle_path is None:
+            raise ValueError("--hlt-reuse-surrogate-bundle requires --hlt-surrogate-bundle-path or --output.")
+        _progress(f"loading reusable HLT surrogate bundle {surrogate_bundle_path}")
+        loaded_bundle = load_surrogate_bundle(surrogate_bundle_path, device=target_device)
+        training = _training_namespace_from_bundle(loaded_bundle)
+        _validate_loaded_hlt_surrogate(
+            frozen=training.frozen,
+            input_names=input_names,
+            output_names=output_names,
+            parameter_subset=parameter_subset,
+            metadata=training.metadata,
+        )
+        saved_theta_draws = training.metadata.get("theta_draws")
+        if saved_theta_draws is not None and int(saved_theta_draws) != int(theta.shape[1]):
+            raise ValueError(
+                "Loaded HLT surrogate theta_draws does not match this run after runtime preflight: "
+                f"{int(saved_theta_draws)} vs {int(theta.shape[1])}."
+            )
+        reused_target_diagnostics = training.metadata.get("target_diagnostics")
+        reused_target_diagnostics = (
+            dict(reused_target_diagnostics)
+            if isinstance(reused_target_diagnostics, dict)
+            else {}
+        )
+        target_diagnostics = {
+            **reused_target_diagnostics,
+            "builder": "reused_bundle",
+            "status": "reused",
+            "source_bundle_path": str(surrogate_bundle_path),
+            "source_target_builder": reused_target_diagnostics.get("builder"),
+            "target_min_stable_periods": int(target_min_stable_periods),
+            "accepted_samples": int(
+                reused_target_diagnostics.get("accepted_samples")
+                or (training.train_size + training.val_size)
+            ),
+            "reused_target_diagnostics": reused_target_diagnostics,
+        }
+        result = SimpleNamespace(
+            training=training,
+            dataset_summary=training.metadata.get("dataset_summary", {}),
+            bundle_path=Path(loaded_bundle.path) if loaded_bundle.path is not None else surrogate_bundle_path,
+        )
+    elif target_builder == "callback":
         result = fit_surrogate_pipeline(
             rom_predict,
             fom_predict,
@@ -2718,6 +3006,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             eta_init=float(args.learning_rate),
             batch_size=int(args.batch_size),
             device=target_device,
+            train_dtype=args.train_dtype,
         )
         target_diagnostics = {
             "builder": "callback",
@@ -2727,6 +3016,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 "periods": int(sep_config.periods),
                 "branching_order": int(sep_config.branching_order),
                 "nnodes": int(sep_config.nnodes),
+                "shock_scale": float(sep_config.shock_scale),
                 "sparse_tree": bool(sep_config.sparse_tree),
                 "max_iter": int(sep_config.max_iter),
                 "tol": float(sep_config.tol),
@@ -2776,6 +3066,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             eta_init=float(args.learning_rate),
             batch_size=int(args.batch_size),
             device=target_device,
+            train_dtype=args.train_dtype,
         )
         result = SurrogatePipelineResult(
             dataset=dataset,
@@ -2808,6 +3099,8 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             target_device=target_device,
             max_logged_failures=int(args.hlt_target_max_logged_failures),
             batch_chunk_size=int(args.hlt_sep_batch_chunk_size),
+            verbose_progress=bool(args.verbose_progress),
+            progress_chunk_interval=int(args.progress_chunk_interval),
         )
         dataset_summary = summarize_surrogate_dataset(dataset)
         successful_groups = np.unique(dataset.theta_ids).size
@@ -2832,6 +3125,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             eta_init=float(args.learning_rate),
             batch_size=int(args.batch_size),
             device=target_device,
+            train_dtype=args.train_dtype,
         )
         result = SurrogatePipelineResult(
             dataset=dataset,
@@ -2842,6 +3136,28 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         target_diagnostics["effective_validation_fraction"] = float(validation_fraction)
     else:
         raise ValueError("hlt_target_builder must be 'adaptive-sep', 'batched-sep', or 'callback'.")
+    if not surrogate_bundle_reused and surrogate_bundle_path is not None:
+        bundle_metadata = {
+            "pipeline": "run_hlt_fixed_steady_state_profile",
+            "payload_case": str(case["name"]),
+            "parameter_subset": list(parameter_subset),
+            "input_names": list(input_names),
+            "output_names": list(output_names),
+            "target_builder": target_builder,
+            "target_diagnostics": target_diagnostics,
+            "dataset_summary": result.dataset_summary,
+            "hlt_parameter_set": str(args.hlt_parameter_set),
+            "theta_draws": int(theta.shape[1]),
+            "original_theta_draws": int(original_theta_draws),
+            "steady_state_mode": steady_state_mode,
+            "first_order_qme_algorithm": str(args.hlt_first_order_qme_algorithm),
+        }
+        surrogate_bundle_saved_path = save_surrogate_bundle(
+            surrogate_bundle_path,
+            result.training,
+            metadata=bundle_metadata,
+        )
+        _progress(f"saved HLT surrogate bundle {surrogate_bundle_saved_path}")
     pipeline_s = time.perf_counter() - pipeline_started
     target_diagnostics["theta_design"] = theta_design_diagnostics
     target_diagnostics["original_theta_draws"] = int(original_theta_draws)
@@ -3537,6 +3853,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             "periods": int(sep_config.periods),
             "branching_order": int(sep_config.branching_order),
             "nnodes": int(sep_config.nnodes),
+            "shock_scale": float(sep_config.shock_scale),
             "sparse_tree": bool(sep_config.sparse_tree),
             "max_iter": int(sep_config.max_iter),
             "tol": float(sep_config.tol),
@@ -3544,8 +3861,14 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         },
         "target_diagnostics": target_diagnostics,
         "dataset_summary": result.dataset_summary,
+        "surrogate_bundle_path": str(result.bundle_path)
+        if surrogate_bundle_reused
+        else (None if surrogate_bundle_saved_path is None else str(surrogate_bundle_saved_path)),
+        "surrogate_bundle_reused": bool(surrogate_bundle_reused),
         "train_size": int(result.training.train_size),
         "val_size": int(result.training.val_size),
+        "train_dtype": str(result.training.metadata.get("train_dtype", args.train_dtype)),
+        "training_metadata": result.training.metadata,
         "validation_rmse_mean": validation_rmse_mean,
         "validation_improvement_mean": validation_improvement_mean,
         "quality_gate": quality_gate,
@@ -3622,6 +3945,7 @@ def build_plan(args: argparse.Namespace, shape: SyntheticHLTShape) -> dict[str, 
         "batch_size": int(args.batch_size),
         "hidden": int(args.hidden),
         "blocks": int(args.blocks),
+        "train_dtype": str(args.train_dtype),
         "memory_estimate_bytes_float64": estimate_dataset_memory_bytes(
             shape=shape,
             samples=args.samples,
@@ -3633,7 +3957,7 @@ def build_plan(args: argparse.Namespace, shape: SyntheticHLTShape) -> dict[str, 
             dtype=np.float32,
         ),
         "caveats": [
-            "The current surrogate training implementation stores and trains in float64.",
+            "Surrogate training dtype is configurable with --train-dtype; frozen deployed surrogates are still materialized in float64.",
             "Synthetic fixed-shape batched rollout training can be profiled with --mode batched-training.",
             "Synthetic batched SEP target generation plus training can be profiled with --mode batched-sep-training.",
             "Actual parsed HLT target generation can use --hlt-target-builder batched-sep for fixed-config batched SEP across theta draws per period.",
@@ -3670,9 +3994,33 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hidden", type=int)
     parser.add_argument("--blocks", type=int)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument(
+        "--train-dtype",
+        choices=("float64", "float32"),
+        default="float64",
+        help=(
+            "Dtype for NN training kernels. Use float32 on GPUs for throughput; "
+            "the SEP solve, likelihood, and frozen surrogate serialization remain float64-oriented."
+        ),
+    )
     parser.add_argument("--validation-fraction", type=float, default=0.10)
     parser.add_argument("--split-by-theta", action="store_true")
     parser.add_argument("--seed", type=int, default=20260918)
+    parser.add_argument(
+        "--verbose-progress",
+        action=argparse.BooleanOptionalAction,
+        default=_env_flag("VERBOSE_PROGRESS", False),
+        help=(
+            "Print detailed progress inside long batched target-generation loops. "
+            "Can also be enabled with VERBOSE_PROGRESS=1."
+        ),
+    )
+    parser.add_argument(
+        "--progress-chunk-interval",
+        type=int,
+        default=int(os.environ.get("PROGRESS_CHUNK_INTERVAL", "1")),
+        help="When verbose progress is enabled, log every Nth active SEP chunk.",
+    )
     parser.add_argument("--predict-reps", type=int)
     parser.add_argument("--batched-mask-fraction", type=float, default=0.0)
     parser.add_argument("--only-full-success", action="store_true")
@@ -3687,6 +4035,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sep-periods", type=int, default=4)
     parser.add_argument("--sep-order", type=int, default=1)
     parser.add_argument("--sep-nnodes", type=int, default=3)
+    parser.add_argument(
+        "--sep-shock-scale",
+        type=float,
+        default=1.0,
+        help="Gauss-Hermite stochastic branch scale used by SEP expectations.",
+    )
     parser.add_argument("--sep-sparse-tree", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--sep-max-iter", type=int, default=8)
     parser.add_argument("--sep-tol", type=float, default=1e-8)
@@ -3759,6 +4113,33 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=1,
         help="Minimum theta draws that must survive runtime preparation.",
+    )
+    parser.add_argument(
+        "--hlt-runtime-preflight-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Run only the HLT theta steady-state/first-order runtime preflight "
+            "and skip SEP target generation, surrogate training, likelihood, and HMC."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-surrogate-bundle-path",
+        type=Path,
+        default=None,
+        help=(
+            "Portable surrogate bundle path. If omitted and --output is set, the "
+            "HLT profile writes beside the JSON as '<stem>_surrogate_bundle.snn.npz'."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-reuse-surrogate-bundle",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Load --hlt-surrogate-bundle-path and skip HLT SEP target generation/training. "
+            "The runtime preflight and likelihood/HMC diagnostics still run."
+        ),
     )
     parser.add_argument(
         "--hlt-target-builder",

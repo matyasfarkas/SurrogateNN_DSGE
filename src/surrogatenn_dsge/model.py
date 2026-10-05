@@ -1995,25 +1995,10 @@ class MacroModel:
             shock_matrix = shock_matrix.T
         if shock_matrix.shape != (self.timings.nExo, config.periods):
             return None
-        try:
-            linear_path = np.asarray(
-                rollout_first_order_solution(
-                    first_order_solution.solution_matrix,
-                    self.timings,
-                    shock_matrix,
-                    initial_reduced_state=initial_reduced_state,
-                ),
-                dtype=np.float64,
-            )
-        except Exception:
-            return None
-        if linear_path.shape != (self.timings.nVars, config.periods):
-            return None
-        if not np.isfinite(linear_path).all():
-            return None
-
         if config.expectation_method == "hmc":
             group_counts = tuple(1 for _ in range(config.periods + 1))
+            rule = None
+            num_nodes = 1
         else:
             rule = (
                 _gauss_hermite_sparse_rule(
@@ -2034,13 +2019,94 @@ class MacroModel:
                 int(rule.weights.shape[0]),
                 sparse_tree=config.sparse_tree,
             )
+            num_nodes = int(rule.weights.shape[0])
 
-        level_path = linear_path + np.asarray(steady_state, dtype=np.float64)[:, None]
-        guess_blocks = [
-            np.tile(level_path[:, period_idx], (group_counts[period_idx + 1], 1))
-            for period_idx in range(config.periods)
-        ]
-        return np.vstack(guess_blocks)
+        solution_matrix = np.asarray(
+            first_order_solution.solution_matrix,
+            dtype=np.float64,
+        )
+        expected_solution_shape = (
+            self.timings.nVars,
+            self.timings.nPast_not_future_and_mixed + self.timings.nExo,
+        )
+        if solution_matrix.shape != expected_solution_shape:
+            return None
+        if not np.isfinite(solution_matrix).all():
+            return None
+
+        steady_state_arr = np.asarray(steady_state, dtype=np.float64)
+        state_indices_np = np.asarray(
+            self.timings.past_not_future_and_mixed_idx,
+            dtype=np.int64,
+        )
+        zero_shock = np.zeros((self.timings.nExo,), dtype=np.float64)
+        stochastic_time_limit = (
+            config.branching_order + 1 if config.sparse_tree else config.branching_order
+        )
+        if config.expectation_method == "hmc":
+            stochastic_time_limit = config.branching_order
+
+        previous_reduced_states: Optional[np.ndarray] = None
+        guess_blocks: list[np.ndarray] = []
+        for period_idx in range(config.periods):
+            time_idx = period_idx + 1
+            current_count = int(group_counts[time_idx])
+            current_block = np.empty(
+                (current_count, self.timings.nVars),
+                dtype=np.float64,
+            )
+            current_reduced_states = np.empty(
+                (current_count, self.timings.nPast_not_future_and_mixed),
+                dtype=np.float64,
+            )
+            for group in range(current_count):
+                if time_idx == 1:
+                    parent_reduced = initial_reduced_state
+                else:
+                    if previous_reduced_states is None:
+                        return None
+                    parent_idx = _parent_group(
+                        group,
+                        time_idx,
+                        config.branching_order,
+                        num_nodes,
+                        sparse_tree=config.sparse_tree,
+                    )
+                    parent_reduced = previous_reduced_states[int(parent_idx)]
+                stochastic_shock = zero_shock
+                if (
+                    rule is not None
+                    and time_idx <= stochastic_time_limit
+                    and self.timings.nExo > 0
+                ):
+                    stochastic_shock = np.asarray(
+                        _group_shock_at_time(
+                            rule,
+                            group,
+                            time_idx,
+                            config.branching_order,
+                            num_nodes,
+                            sparse_tree=config.sparse_tree,
+                        ),
+                        dtype=np.float64,
+                    )
+                shock_t = shock_matrix[:, period_idx] + stochastic_shock
+                with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+                    next_deviation = solution_matrix @ np.concatenate(
+                        [parent_reduced, shock_t],
+                        axis=0,
+                    )
+                if not np.isfinite(next_deviation).all():
+                    return None
+                current_block[group] = steady_state_arr + next_deviation
+                current_reduced_states[group] = next_deviation[state_indices_np]
+            guess_blocks.append(current_block)
+            previous_reduced_states = current_reduced_states
+
+        guess = np.vstack(guess_blocks)
+        if not np.isfinite(guess).all():
+            return None
+        return guess
 
     def _sep_obc_maxiter(self) -> int:
         for key in ("zlb_obc_maxiter", "sep_obc_maxiter"):
@@ -6458,6 +6524,51 @@ class MacroModel:
             np.vstack([self._steady_reference_values(row) for row in steady_matrix]),
             dtype=jnp.float64,
         )
+        batched_initial_guess = initial_guess
+        if batched_initial_guess is None:
+            rule = (
+                _gauss_hermite_sparse_rule(
+                    config.nnodes,
+                    self.timings.nExo,
+                    config.shock_scale,
+                )
+                if config.sparse_tree
+                else gauss_hermite_rule(
+                    config.nnodes,
+                    self.timings.nExo,
+                    config.shock_scale,
+                )
+            )
+            group_counts = _group_counts(
+                config.periods,
+                config.branching_order,
+                int(rule.weights.shape[0]),
+                sparse_tree=config.sparse_tree,
+            )
+            initial_matrix = np.asarray(initial_state_values, dtype=np.float64)
+            terminal_matrix = np.asarray(terminal_state_values, dtype=np.float64)
+            deterministic_matrix = np.asarray(deterministic_shock_values, dtype=np.float64)
+            guess_blocks = []
+            for draw in range(batch):
+                linear_guess = self._build_sep_linear_initial_guess(
+                    parameter_values=parameter_matrix[draw],
+                    steady_state=steady_matrix[draw],
+                    initial_state=initial_matrix[draw],
+                    deterministic_shocks=deterministic_matrix[draw],
+                    config=config,
+                )
+                if linear_guess is None:
+                    linear_guess = np.vstack(
+                        [
+                            np.tile(
+                                terminal_matrix[draw],
+                                (group_counts[period_idx + 1], 1),
+                            )
+                            for period_idx in range(config.periods)
+                        ]
+                    )
+                guess_blocks.append(np.asarray(linear_guess, dtype=np.float64))
+            batched_initial_guess = np.stack(guess_blocks, axis=0)
 
         def conditional_residual(
             lag_state: jax.Array,
@@ -6484,7 +6595,7 @@ class MacroModel:
             config=config,
             deterministic_shocks=deterministic_shock_values,
             params=(parameter_batch_array, steady_reference_batch),
-            initial_guess=initial_guess,
+            initial_guess=batched_initial_guess,
         )
         return ParsedModelBatchedSEPResult(
             steady_state=jnp.asarray(steady_matrix, dtype=jnp.float64),
