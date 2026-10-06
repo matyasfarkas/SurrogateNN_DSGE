@@ -215,6 +215,12 @@ from .pipeline_artifacts import (
     load_hlt_pipeline_artifact_payload,
     save_hlt_pipeline_artifact_payload,
 )
+from .posterior_draws import (
+    compare_posterior_draws,
+    load_posterior_draws_npz,
+    save_posterior_draws_npz,
+    summarize_posterior_draws,
+)
 from .sep import (
     BatchedSEPSolution,
     SEPConfig,
@@ -447,6 +453,7 @@ __all__ = [
     "conditional_loglik_per_period",
     "compute_gate_stats",
     "compute_gate_stat_series_jax",
+    "compare_posterior_draws",
     "compute_first_order_obc_violation_path",
     "compute_ood_flag",
     "compute_linear_gate_stats_from_filter_model_jax",
@@ -521,6 +528,7 @@ __all__ = [
     "linear_state_space_from_first_order_solution",
     "load_surrogate_bundle",
     "load_hlt_pipeline_artifact_payload",
+    "load_posterior_draws_npz",
     "latin_hypercube_unit",
     "lhs_to_bounds",
     "make_batched_surrogate_residual_predictor",
@@ -556,6 +564,7 @@ __all__ = [
     "sample_prior_parameters",
     "save_surrogate_bundle",
     "save_hlt_pipeline_artifact_payload",
+    "save_posterior_draws_npz",
     "second_order_state_update",
     "sep_inversion_loglikelihood",
     "sep_inversion_loglikelihood_per_period",
@@ -569,6 +578,7 @@ __all__ = [
     "summarize_batched_surrogate_arrays",
     "summarize_surrogate_dataset",
     "summarize_adaptive_grid",
+    "summarize_posterior_draws",
     "summarize_parameter_design",
     "surrogate_sample_weights_from_residuals",
     "surrogate_additive_residual_loglik_per_period",

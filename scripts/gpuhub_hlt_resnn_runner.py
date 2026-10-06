@@ -144,6 +144,21 @@ def summarize_hlt_result(output: Path) -> dict[str, Any]:
     hmc = result.get("surrogate_hmc", {}) or {}
     likelihood = result.get("surrogate_inversion_likelihood", {}) or {}
     quality = result.get("quality_gate", {}) or {}
+    mode_name = output.name
+    posterior_comparison_path = None
+    posterior_comparison = None
+    if mode_name.startswith("hlt_") and mode_name.endswith("_surrogate_estimation.json"):
+        stage_name = mode_name[len("hlt_") : -len("_surrogate_estimation.json")]
+        candidate = output.with_name(f"hlt_{stage_name}_posterior_comparison.json")
+        posterior_comparison_path = str(candidate)
+        if candidate.exists():
+            comparison_payload = json.loads(candidate.read_text(encoding="utf-8"))
+            posterior_comparison = {
+                "max_abs_mean_diff": comparison_payload.get("max_abs_mean_diff"),
+                "max_ks_distance": comparison_payload.get("max_ks_distance"),
+                "mean_quantile_wasserstein": comparison_payload.get("mean_quantile_wasserstein"),
+                "common_parameters": comparison_payload.get("common_parameters"),
+            }
     return {
         "status": result.get("status"),
         "output": str(output),
@@ -179,6 +194,9 @@ def summarize_hlt_result(output: Path) -> dict[str, Any]:
         "hmc_draws_per_second": hmc.get("draws_per_second"),
         "hmc_accepted_share": hmc.get("accepted_share"),
         "hmc_retry_count": hmc.get("retry_count"),
+        "surrogate_hmc_draws": hmc.get("posterior_draws"),
+        "posterior_comparison_path": posterior_comparison_path,
+        "posterior_comparison": posterior_comparison,
         "quality_gate_status": quality.get("status"),
         "quality_gate_issues": quality.get("issues"),
         "validation_improvement_mean": result.get("validation_improvement_mean"),
@@ -230,7 +248,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--allow-cpu", action="store_true")
     parser.add_argument("--no-force-reinstall-jax", action="store_true")
     parser.add_argument("--preserve-ld-library-path", action="store_true")
-    parser.add_argument("--hlt-target-builder", choices=("adaptive-sep", "batched-sep", "callback"), default=None)
+    parser.add_argument(
+        "--hlt-target-builder",
+        choices=("adaptive-sep", "batched-sep", "grid-batched-sep", "callback"),
+        default=None,
+    )
     parser.add_argument("--hlt-parameter-set", default=None)
     parser.add_argument(
         "--steady-state-mode",
@@ -255,6 +277,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-jax-log-density-gradient", action="store_true")
     parser.add_argument("--differentiate-shocks", action="store_true")
     parser.add_argument(
+        "--run-rom1-comparison",
+        action="store_true",
+        help="Run a matching linear ROM1 static-HMC posterior and compare saved draws after each HLT stage.",
+    )
+    parser.add_argument(
         "--env",
         action="append",
         default=[],
@@ -278,6 +305,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     stages = stage_sequence(args.mode)
     extra_env = _parse_env_overrides(args.env)
+    if args.run_rom1_comparison:
+        extra_env.setdefault("RUN_ROM1_COMPARISON", "1")
 
     try:
         smi = run(["nvidia-smi"], check=False)
@@ -397,10 +426,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                         "LIKELIHOOD_RUNTIME_MODE",
                         "LIKELIHOOD_QME_ALGORITHM",
                         "LIKELIHOOD_STATIC_ROWS_MODE",
+                        "RUN_ROM1_COMPARISON",
                         "VERBOSE_PROGRESS",
                         "PROGRESS_CHUNK_INTERVAL",
                     }
-                    or key.startswith(("HLT_", "SEP_", "HMC_"))
+                    or key.startswith(("HLT_", "SEP_", "HMC_", "ROM1_"))
                 },
             },
         )

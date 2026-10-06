@@ -323,6 +323,27 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             constrained_samples=constrained_first,
             log_fn=log,
         )
+        if args.posterior_draws_output is not None and step_index == 0:
+            first_diagnostics["posterior_draws"] = sdsge.save_posterior_draws_npz(
+                args.posterior_draws_output,
+                constrained_first,
+                context["parameter_names"],
+                metadata={
+                    "source": "static_hmc_sampling_speed.py",
+                    "run": "cold",
+                    "benchmark_output": str(args.output),
+                    "preset": str(args.preset),
+                    "case": args.case if args.preset == "sw07_hlt" else None,
+                    "parameters": str(args.parameters),
+                    "qme_algorithm": str(args.qme_algorithm),
+                    "dtype": str(args.dtype),
+                    "chains": int(args.chains),
+                    "warmup": int(args.warmup),
+                    "samples": int(args.samples),
+                    "leapfrog_steps": int(args.leapfrog_steps),
+                    "initial_step_size": float(step_size_value),
+                },
+            )
         steady_times: list[float] = []
         steady_diagnostics = None
         for rep, key in enumerate(steady_keys, start=1):
@@ -477,6 +498,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1.0e-8,
         help="Tolerance used by the Schur/QZ determinacy support audit.",
+    )
+    parser.add_argument(
+        "--posterior-draws-output",
+        type=Path,
+        default=None,
+        help="Optional .npz path for post-warmup draws from the first static-HMC run.",
     )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)

@@ -62,6 +62,35 @@ def test_sw07_safe_presets_reference_known_parameter_names() -> None:
     assert set(selected_15).issubset(selected_27)
 
 
+def test_package_parameter_sets_are_accepted_by_sw07_selector() -> None:
+    module = _load_module()
+    phase1 = (
+        "crhoa",
+        "crhob",
+        "crhog",
+        "crhoqs",
+        "crhopinf",
+        "crhow",
+        "crhoms",
+        "z_ea",
+        "z_eb",
+        "z_eg",
+        "z_eqs",
+        "z_epinf",
+        "z_ew",
+        "z_em",
+        "cprobp",
+        "cindp",
+        "curvp",
+        "cprobw",
+    )
+    model = SimpleNamespace(parameter_names=phase1)
+
+    selected = module._select_parameter_names(model, "phase1_18params_narrow")
+
+    assert selected == phase1
+
+
 def test_gali3_presets_reference_known_parameter_names() -> None:
     module = _load_module()
     model = SimpleNamespace(parameter_names=module.GALI3_ALL_STABLE_PARAMETERS)

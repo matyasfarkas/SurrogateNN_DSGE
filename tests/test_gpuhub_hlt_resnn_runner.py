@@ -80,6 +80,7 @@ def test_hlt_estimation_pilot_dry_run_resolves_parallel_defaults(tmp_path: Path)
     assert lines["HLT_PERIODS"] == "4"
     assert lines["SEP_PERIODS"] == "4"
     assert lines["HLT_SEP_BATCH_CHUNK_SIZE"] == "8"
+    assert lines["HLT_SURROGATE_HMC_DRAWS_PATH"] == str(tmp_path / "hlt_estimation_pilot_surrogate_hmc_draws.npz")
     assert lines["EPOCHS"] == "200"
     assert lines["HIDDEN"] == "192"
     assert lines["BLOCKS"] == "4"
@@ -88,6 +89,34 @@ def test_hlt_estimation_pilot_dry_run_resolves_parallel_defaults(tmp_path: Path)
     assert lines["JAX_LOG_DENSITY_BATCH_SIZE"] == "2048"
     assert lines["HMC_CHAINS"] == "64"
     assert lines["HMC_SAMPLES"] == "512"
+    assert lines["RUN_ROM1_COMPARISON"] == "0"
+
+
+def test_hlt_dry_run_grid_batched_targets_can_enable_rom1_comparison(tmp_path: Path) -> None:
+    script = _ROOT / "benchmarks" / "run_hlt_gpu_estimation.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=_ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "MODE": "estimation_pilot",
+            "DRY_RUN": "1",
+            "RESULT_ROOT": str(tmp_path),
+            "HLT_TARGET_BUILDER": "grid-batched-sep",
+            "RUN_ROM1_COMPARISON": "1",
+        },
+    )
+
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+    assert lines["HLT_TARGET_BUILDER"] == "grid-batched-sep"
+    assert lines["HLT_SEP_BATCH_CHUNK_SIZE"] == "8"
+    assert lines["RUN_ROM1_COMPARISON"] == "1"
+    assert lines["ROM1_HMC_DRAWS_PATH"] == str(tmp_path / "hlt_estimation_pilot_rom1_hmc_draws.npz")
+    assert lines["POSTERIOR_COMPARISON_PATH"] == str(tmp_path / "hlt_estimation_pilot_posterior_comparison.json")
 
 
 def test_hlt_final_nonlinear_dry_run_enables_correctness_gates(tmp_path: Path) -> None:
@@ -214,7 +243,7 @@ def test_build_hlt_stage_environment_sets_gpu_and_runtime_modes(tmp_path: Path) 
         python="/opt/venv/bin/python",
         result_root=tmp_path,
         allow_cpu=False,
-        hlt_target_builder="batched-sep",
+        hlt_target_builder="grid-batched-sep",
         hlt_parameter_set="all",
         steady_state_mode="solve-or-reference",
         likelihood_runtime_mode="full-jax",
@@ -222,14 +251,14 @@ def test_build_hlt_stage_environment_sets_gpu_and_runtime_modes(tmp_path: Path) 
         likelihood_static_rows_mode="reference",
         jax_log_density_gradient=False,
         differentiate_shocks=True,
-        extra_env={"HMC_CHAINS": "64"},
+        extra_env={"HMC_CHAINS": "64", "RUN_ROM1_COMPARISON": "1"},
     )
 
     assert env["MODE"] == "full"
     assert env["PYTHON"] == "/opt/venv/bin/python"
     assert env["DEVICE"] == "gpu"
     assert env["REQUIRE_GPU"] == "1"
-    assert env["HLT_TARGET_BUILDER"] == "batched-sep"
+    assert env["HLT_TARGET_BUILDER"] == "grid-batched-sep"
     assert env["HLT_PARAMETER_SET"] == "all"
     assert env["HLT_STEADY_STATE_MODE"] == "solve-or-reference"
     assert env["LIKELIHOOD_RUNTIME_MODE"] == "full-jax"
@@ -237,6 +266,7 @@ def test_build_hlt_stage_environment_sets_gpu_and_runtime_modes(tmp_path: Path) 
     assert env["JAX_LOG_DENSITY_GRADIENT"] == "0"
     assert env["DIFFERENTIATE_SHOCKS"] == "1"
     assert env["HMC_CHAINS"] == "64"
+    assert env["RUN_ROM1_COMPARISON"] == "1"
 
 
 def test_build_hlt_stage_environment_can_preserve_stage_defaults(tmp_path: Path) -> None:
@@ -313,9 +343,24 @@ def test_summarize_hlt_result_extracts_release_metrics(tmp_path: Path) -> None:
                             "draws_per_second": 34.13,
                             "accepted_share": 0.92,
                             "retry_count": 0,
+                            "posterior_draws": {
+                                "path": "/tmp/surrogate_draws.npz",
+                                "post_warmup_draws": 1024,
+                            },
                         },
                     }
                 }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "hlt_full_posterior_comparison.json").write_text(
+        json.dumps(
+            {
+                "max_abs_mean_diff": 0.01,
+                "max_ks_distance": 0.25,
+                "mean_quantile_wasserstein": 0.005,
+                "common_parameters": ["a", "b"],
             }
         ),
         encoding="utf-8",
@@ -338,3 +383,6 @@ def test_summarize_hlt_result_extracts_release_metrics(tmp_path: Path) -> None:
     assert summary["strict_solved_steady_state_preflight"] is True
     assert summary["jax_log_density_parity_ok"] is True
     assert summary["hmc_draws_per_second"] == 34.13
+    assert summary["surrogate_hmc_draws"]["path"] == "/tmp/surrogate_draws.npz"
+    assert summary["posterior_comparison_path"] == str(tmp_path / "hlt_full_posterior_comparison.json")
+    assert summary["posterior_comparison"]["max_ks_distance"] == 0.25

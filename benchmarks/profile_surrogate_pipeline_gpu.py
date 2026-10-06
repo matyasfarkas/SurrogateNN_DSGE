@@ -27,7 +27,7 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 import warnings
 
 import numpy as np
@@ -55,6 +55,7 @@ from surrogatenn_dsge import (
     parse_macro_model,
     predict_frozen_batch,
     resolve_jax_device,
+    save_posterior_draws_npz,
     save_surrogate_bundle,
     get_parameter_names,
     sample_parameter_design,
@@ -558,6 +559,8 @@ def run_static_hmc_on_bounded_surrogate_log_density(
     min_accepted_share: float = 0.0,
     max_retries: int = 0,
     retry_step_size_factor: float = 0.25,
+    draws_output: str | Path | None = None,
+    draws_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run vectorized static HMC over a bounded surrogate log likelihood."""
 
@@ -654,6 +657,7 @@ def run_static_hmc_on_bounded_surrogate_log_density(
             break
 
     assert selected_summary is not None
+    selected_constrained_samples = selected_summary.get("_constrained_samples")
     summary = dict(selected_summary)
     summary.pop("_raw_result", None)
     summary.pop("_constrained_samples", None)
@@ -700,6 +704,26 @@ def run_static_hmc_on_bounded_surrogate_log_density(
             ),
         }
     )
+    if draws_output is not None:
+        if selected_constrained_samples is None:
+            raise RuntimeError("selected HMC attempt did not retain constrained samples for export.")
+        draw_metadata = {
+            "source": "profile_surrogate_pipeline_gpu.py",
+            "kind": "fixed_rom_surrogate_static_hmc",
+            "chains": int(chains),
+            "warmup": int(warmup),
+            "samples": int(samples),
+            "leapfrog_steps": int(leapfrog_steps),
+            "step_size": selected_step_size,
+            "retry_attempt": int(selected_attempt),
+            **dict(draws_metadata or {}),
+        }
+        summary["posterior_draws"] = save_posterior_draws_npz(
+            draws_output,
+            selected_constrained_samples,
+            parameter_names,
+            metadata=draw_metadata,
+        )
     return summary
 
 
@@ -3910,6 +3934,19 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         min_accepted_share=float(args.hlt_surrogate_hmc_min_accepted_share),
                         max_retries=int(args.hlt_surrogate_hmc_max_retries),
                         retry_step_size_factor=float(args.hlt_surrogate_hmc_retry_step_size_factor),
+                        draws_output=args.hlt_surrogate_hmc_draws_output,
+                        draws_metadata={
+                            "profile_output": None if args.output is None else str(args.output),
+                            "payload_case": str(case["name"]),
+                            "model_source": str(model_source),
+                            "parameter_set": str(args.hlt_parameter_set),
+                            "parameter_subset": list(parameter_subset),
+                            "theta_draws": int(theta.shape[1]),
+                            "target_builder": target_builder,
+                            "likelihood_runtime_mode": likelihood_runtime_mode,
+                            "likelihood_qme_algorithm": likelihood_qme_algorithm,
+                            "likelihood_static_rows_mode": likelihood_static_rows_mode,
+                        },
                     )
                     surrogate_hmc_result["runtime_mode"] = likelihood_runtime_mode
                     surrogate_hmc_result["qme_algorithm"] = likelihood_qme_algorithm
@@ -4629,6 +4666,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=0.25,
         help="Multiplicative initial-step-size shrinkage applied on each HMC retry.",
+    )
+    parser.add_argument(
+        "--hlt-surrogate-hmc-draws-output",
+        type=Path,
+        default=None,
+        help="Optional .npz path for selected post-warmup surrogate HMC draws.",
     )
     parser.add_argument("--hlt-surrogate-hmc-seed", type=int, default=20260923)
     parser.add_argument("--output", type=Path)

@@ -588,9 +588,28 @@ def test_hlt_parameter_set_selector_supports_payload_safe_and_all() -> None:
     assert mod._select_hlt_parameter_subset(DummyModel, case, "calfa, crhob") == ("calfa", "crhob")
 
 
-def test_static_hmc_on_bounded_surrogate_log_density_tiny_cpu_smoke() -> None:
+def test_parse_args_accepts_surrogate_hmc_draw_export_path() -> None:
+    mod = _load_profile_module()
+
+    args = mod.parse_args(
+        [
+            "--mode",
+            "hlt-fixed-ss-smoke",
+            "--hlt-surrogate-hmc-samples",
+            "2",
+            "--hlt-surrogate-hmc-draws-output",
+            "surrogate_draws.npz",
+        ]
+    )
+
+    assert args.hlt_surrogate_hmc_samples == 2
+    assert args.hlt_surrogate_hmc_draws_output == Path("surrogate_draws.npz")
+
+
+def test_static_hmc_on_bounded_surrogate_log_density_tiny_cpu_smoke(tmp_path: Path) -> None:
     mod = _load_profile_module()
     center = mod.jnp.asarray([0.25, 0.75], dtype=mod.jnp.float64)
+    draws_output = tmp_path / "surrogate_draws.npz"
 
     def log_density(theta):
         return -0.5 * mod.jnp.sum((theta - center) ** 2)
@@ -610,6 +629,8 @@ def test_static_hmc_on_bounded_surrogate_log_density_tiny_cpu_smoke() -> None:
         adapt_step_size=True,
         initial_jitter=0.01,
         seed=123,
+        draws_output=draws_output,
+        draws_metadata={"test_case": "tiny_cpu_smoke"},
     )
 
     assert result["status"] == "ok"
@@ -619,6 +640,8 @@ def test_static_hmc_on_bounded_surrogate_log_density_tiny_cpu_smoke() -> None:
     assert result["post_warmup_draws"] == 4
     assert result["accepted_share"] is not None
     assert set(result["parameter_summary"]) == {"calfa", "crhob"}
+    assert result["posterior_draws"]["path"] == str(draws_output)
+    assert draws_output.exists()
 
 
 def test_scale_aware_parity_metrics_allow_large_loglikelihood_tiny_relative_error() -> None:

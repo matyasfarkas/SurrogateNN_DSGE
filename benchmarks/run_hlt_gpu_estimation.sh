@@ -11,9 +11,9 @@ set -euo pipefail
 #   MODE=full_hlt bash benchmarks/run_hlt_gpu_estimation.sh
 #   MODE=full bash benchmarks/run_hlt_gpu_estimation.sh
 #
-# The current posterior stage samples the trained-surrogate inversion likelihood
-# with fixed reference steady state and fixed first-order ROM matrices. It does
-# not yet recompute parameter-specific steady states/ROMs inside HMC.
+# The posterior stage can run either a fixed-reference smoke likelihood or the
+# full-JAX likelihood that recomputes parameter-specific steady states and ROMs
+# inside HMC. Use LIKELIHOOD_RUNTIME_MODE=full-jax for posterior comparisons.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -304,7 +304,7 @@ esac
 
 HLT_TARGET_BUILDER_EFFECTIVE="${HLT_TARGET_BUILDER:-$DEFAULT_HLT_TARGET_BUILDER}"
 if [[ -z "${HLT_SEP_BATCH_CHUNK_SIZE:-}" ]]; then
-  if [[ "$HLT_TARGET_BUILDER_EFFECTIVE" == "batched-sep" ]]; then
+  if [[ "$HLT_TARGET_BUILDER_EFFECTIVE" == "batched-sep" || "$HLT_TARGET_BUILDER_EFFECTIVE" == "grid-batched-sep" ]]; then
     # HLT sparse-tree SEP still forms dense Newton Jacobians. Chunking theta
     # draws preserves the batched GPU path while bounding QR workspace.
     HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE="$DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE"
@@ -315,6 +315,11 @@ else
   HLT_SEP_BATCH_CHUNK_SIZE_EFFECTIVE="$HLT_SEP_BATCH_CHUNK_SIZE"
 fi
 HLT_SURROGATE_BUNDLE_PATH="${HLT_SURROGATE_BUNDLE_PATH:-$RESULT_ROOT/hlt_${MODE}_surrogate_bundle.snn.npz}"
+HLT_SURROGATE_HMC_DRAWS_PATH="${HLT_SURROGATE_HMC_DRAWS_PATH:-$RESULT_ROOT/hlt_${MODE}_surrogate_hmc_draws.npz}"
+ROM1_HMC_DRAWS_PATH="${ROM1_HMC_DRAWS_PATH:-$RESULT_ROOT/hlt_${MODE}_rom1_hmc_draws.npz}"
+ROM1_HMC_OUTPUT_PATH="${ROM1_HMC_OUTPUT_PATH:-$RESULT_ROOT/hlt_${MODE}_rom1_static_hmc.json}"
+POSTERIOR_COMPARISON_PATH="${POSTERIOR_COMPARISON_PATH:-$RESULT_ROOT/hlt_${MODE}_posterior_comparison.json}"
+POSTERIOR_COMPARISON_CSV_PATH="${POSTERIOR_COMPARISON_CSV_PATH:-$RESULT_ROOT/hlt_${MODE}_posterior_comparison.csv}"
 
 OPTIONAL_FLAGS=()
 if [[ "${ONLY_FULL_SUCCESS:-0}" == "1" ]]; then
@@ -394,6 +399,7 @@ HLT_SHOCK_SCALE=${HLT_SHOCK_SCALE:-0.02}
 HLT_PARAMETER_PERTURBATION=${HLT_PARAMETER_PERTURBATION:-1e-6}
 HLT_TARGET_MIN_STABLE_PERIODS=${HLT_TARGET_MIN_STABLE_PERIODS:--1}
 HLT_SURROGATE_BUNDLE_PATH=$HLT_SURROGATE_BUNDLE_PATH
+HLT_SURROGATE_HMC_DRAWS_PATH=$HLT_SURROGATE_HMC_DRAWS_PATH
 HLT_REUSE_SURROGATE_BUNDLE=${HLT_REUSE_SURROGATE_BUNDLE:-0}
 HLT_REQUIRE_FULL_TARGET_SUCCESS=${HLT_REQUIRE_FULL_TARGET_SUCCESS:-0}
 HLT_MIN_FULL_SUCCESS_SHARE=${HLT_MIN_FULL_SUCCESS_SHARE:-0.0}
@@ -431,6 +437,10 @@ HMC_CHAINS=$HMC_CHAINS
 HMC_LEAPFROG_STEPS=$HMC_LEAPFROG_STEPS
 HMC_STEP_SIZE=$HMC_STEP_SIZE
 HMC_MAX_RETRIES=${HMC_MAX_RETRIES:-3}
+RUN_ROM1_COMPARISON=${RUN_ROM1_COMPARISON:-0}
+ROM1_HMC_DRAWS_PATH=$ROM1_HMC_DRAWS_PATH
+ROM1_HMC_OUTPUT_PATH=$ROM1_HMC_OUTPUT_PATH
+POSTERIOR_COMPARISON_PATH=$POSTERIOR_COMPARISON_PATH
 FAIL_ON_QUALITY_GATE=${FAIL_ON_QUALITY_GATE:-0}
 EOF
   exit 0
@@ -534,16 +544,61 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --hlt-surrogate-hmc-min-accepted-share "${HMC_MIN_ACCEPTED_SHARE:-0.01}" \
   --hlt-surrogate-hmc-max-retries "${HMC_MAX_RETRIES:-3}" \
   --hlt-surrogate-hmc-retry-step-size-factor "${HMC_RETRY_STEP_SIZE_FACTOR:-0.25}" \
+  --hlt-surrogate-hmc-draws-output "$HLT_SURROGATE_HMC_DRAWS_PATH" \
   --hlt-surrogate-hmc-seed "${HMC_SEED:-20260923}" \
   "${OPTIONAL_FLAGS[@]}" \
   --output "$RESULT_ROOT/hlt_${MODE}_surrogate_estimation.json" \
   2>&1 | tee "$RESULT_ROOT/hlt_${MODE}_surrogate_estimation.log"
 
+if [[ "${RUN_ROM1_COMPARISON:-0}" == "1" ]]; then
+  ROM1_REQUIRE_GPU_FLAG=""
+  if [[ "$REQUIRE_GPU" == "1" ]]; then
+    ROM1_REQUIRE_GPU_FLAG="--force-gpu"
+  fi
+  echo "Running comparable ROM1 static-HMC posterior into $ROM1_HMC_OUTPUT_PATH"
+  "$PYTHON" benchmarks/static_hmc_sampling_speed.py \
+    --preset sw07_hlt \
+    --case medium_sw07_hlt \
+    --parameters "$HLT_PARAMETER_SET" \
+    --periods "$LIKELIHOOD_PERIODS" \
+    --chains "${ROM1_HMC_CHAINS:-$HMC_CHAINS}" \
+    --warmup "${ROM1_HMC_WARMUP:-$HMC_WARMUP}" \
+    --samples "${ROM1_HMC_SAMPLES:-$HMC_SAMPLES}" \
+    --leapfrog-steps "${ROM1_HMC_LEAPFROG_STEPS:-$HMC_LEAPFROG_STEPS}" \
+    --step-size "${ROM1_HMC_STEP_SIZE:-$HMC_STEP_SIZE}" \
+    --target-accept-prob "${ROM1_HMC_TARGET_ACCEPT:-${HMC_TARGET_ACCEPT:-0.8}}" \
+    --initial-jitter "${ROM1_HMC_INITIAL_JITTER:-${HMC_INITIAL_JITTER:-0.02}}" \
+    --prior-width-scale "${ROM1_HMC_PRIOR_WIDTH_SCALE:-${HMC_PRIOR_WIDTH_SCALE:-0.01}}" \
+    --prior-width-floor "${ROM1_HMC_PRIOR_WIDTH_FLOOR:-${HMC_PRIOR_WIDTH_FLOOR:-1e-4}}" \
+    --dtype "${ROM1_DTYPE:-float64}" \
+    --platform "$DEVICE" $ROM1_REQUIRE_GPU_FLAG \
+    --qme-algorithm "${ROM1_QME_ALGORITHM:-${LIKELIHOOD_QME_ALGORITHM:-schur_gpu}}" \
+    --posterior-draws-output "$ROM1_HMC_DRAWS_PATH" \
+    --verbose \
+    --output "$ROM1_HMC_OUTPUT_PATH" \
+    2>&1 | tee "$RESULT_ROOT/hlt_${MODE}_rom1_static_hmc.log"
+
+  echo "Comparing ROM1 and surrogate posterior draws into $POSTERIOR_COMPARISON_PATH"
+  "$PYTHON" benchmarks/compare_posterior_draws.py \
+    --left "$ROM1_HMC_DRAWS_PATH" \
+    --right "$HLT_SURROGATE_HMC_DRAWS_PATH" \
+    --left-label "linear_rom1" \
+    --right-label "sep_resnn_surrogate" \
+    --output "$POSTERIOR_COMPARISON_PATH" \
+    --csv-output "$POSTERIOR_COMPARISON_CSV_PATH" \
+    2>&1 | tee "$RESULT_ROOT/hlt_${MODE}_posterior_comparison.log"
+fi
+
 nvidia-smi > "$RESULT_ROOT/nvidia_smi_end.txt" 2>&1 || true
 
-"$PYTHON" - "$RESULT_ROOT/hlt_${MODE}_surrogate_estimation.json" <<'PY' | tee "$RESULT_ROOT/summary.txt"
+"$PYTHON" - \
+  "$RESULT_ROOT/hlt_${MODE}_surrogate_estimation.json" \
+  "$ROM1_HMC_DRAWS_PATH" \
+  "$POSTERIOR_COMPARISON_PATH" <<'PY' | tee "$RESULT_ROOT/summary.txt"
 import json, sys
 path = sys.argv[1]
+rom1_draws_path = sys.argv[2]
+posterior_comparison_path = sys.argv[3]
 payload = json.load(open(path))
 result = payload["results"]["hlt_fixed_ss_smoke"]
 hmc = result["surrogate_hmc"]
@@ -579,6 +634,9 @@ print("hmc_draws", hmc.get("post_warmup_draws"), "hmc_elapsed_s", hmc.get("elaps
 print("hmc_draws_per_second", hmc.get("draws_per_second"))
 print("hmc_accepted_share", hmc.get("accepted_share"))
 print("hmc_retry_count", hmc.get("retry_count"), "hmc_initial_step_size", hmc.get("initial_step_size"))
+print("surrogate_hmc_draws", hmc.get("posterior_draws"))
+print("rom1_hmc_draws", rom1_draws_path)
+print("posterior_comparison", posterior_comparison_path)
 quality = result.get("quality_gate", {})
 print("quality_gate_status", quality.get("status"))
 print("quality_gate_issues", quality.get("issues"))

@@ -286,6 +286,13 @@ def _select_parameter_names(model: Any, spec: str) -> tuple[str, ...]:
         raise ValueError("The 'payload' parameter selector must be expanded by the caller.")
     elif spec == "all":
         names = tuple(model.parameter_names)
+    elif "," not in spec:
+        try:
+            import surrogatenn_dsge as sdsge
+
+            names = tuple(sdsge.get_parameter_names(spec))
+        except Exception:
+            names = (spec,)
     else:
         names = tuple(name.strip() for name in spec.split(",") if name.strip())
     unknown = tuple(name for name in names if name not in model.parameter_names)
@@ -1074,7 +1081,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="sw07_safe_15",
         help=(
             "Parameter subset. Supports comma-separated names, all, sw07_safe_15, "
-            "sw07_safe_27, gali3_policy_4, gali3_policy_7, and gali3_all_stable. "
+            "sw07_safe_27, gali3_policy_4, gali3_policy_7, gali3_all_stable, "
+            "and named package parameter sets such as phase1_18params_narrow. "
             "For --preset gali3_nk, the default sw07_safe_15 is interpreted as "
             "gali3_policy_4 for convenience."
         ),
