@@ -7,6 +7,7 @@ import pytest
 
 from surrogatenn_dsge import (
     SEPConfig,
+    BatchedSurrogateRolloutArrays,
     BatchedSurrogatePipelineResult,
     FrozenResNet,
     SurrogateDataset,
@@ -122,6 +123,43 @@ def test_residual_shrinkage_factors_clip_bad_corrections_to_rom_baseline() -> No
     scaled_error = shrinkage[:, None] * np.vstack([overfit_prediction, wrong_direction_prediction]) - target
     baseline_error = -target
     assert float(np.mean(scaled_error**2)) <= float(np.mean(baseline_error**2))
+
+
+def test_train_surrogate_from_batched_arrays_accepts_read_only_sample_mask() -> None:
+    sample_mask = np.broadcast_to(np.asarray([True], dtype=bool), (4,))
+    assert not sample_mask.flags.writeable
+    arrays = BatchedSurrogateRolloutArrays(
+        X=jnp.asarray(
+            [
+                [0.0, 0.2, 0.4, 0.6],
+                [1.0, 1.1, 1.2, 1.3],
+            ],
+            dtype=jnp.float64,
+        ),
+        Y=jnp.asarray([[0.10, 0.20, 0.30, 0.40]], dtype=jnp.float64),
+        Y_rom=jnp.asarray([[0.05, 0.10, 0.15, 0.20]], dtype=jnp.float64),
+        theta=jnp.asarray([[0.2, 0.8]], dtype=jnp.float64),
+        theta_ids=jnp.asarray([0, 0, 1, 1], dtype=jnp.int64),
+        period_ids=jnp.asarray([0, 1, 0, 1], dtype=jnp.int64),
+        sample_mask=sample_mask,
+        theta_success=jnp.asarray([True, False]),
+        theta_stable_periods=jnp.asarray([2, 1], dtype=jnp.int64),
+    )
+
+    result = train_surrogate_from_batched_arrays_jax(
+        arrays,
+        architecture="mlp",
+        only_full_success=True,
+        d_hidden=4,
+        d_hidden2=None,
+        nepoch=1,
+        batch_size=2,
+        seed=13,
+        device="cpu",
+    )
+
+    assert result.train_size == 2
+    assert result.metadata["masked_sample_count"] == 2
 
 
 def test_train_surrogate_from_dataset_mlp_rom_residual_is_device_placed() -> None:

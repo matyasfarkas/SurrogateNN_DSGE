@@ -823,7 +823,7 @@ def train_surrogate_from_batched_arrays_jax(
     y_rom = arrays.Y_rom if out_idx is None else jnp.take(arrays.Y_rom, jnp.asarray(out_idx, dtype=jnp.int32), axis=0)
     y_target = y_full - y_rom if rom_residual else y_full
 
-    mask = np.asarray(arrays.sample_mask, dtype=bool).reshape(-1)
+    mask = np.array(arrays.sample_mask, dtype=bool, copy=True).reshape(-1)
     theta_ids = np.asarray(arrays.theta_ids, dtype=np.int64).reshape(-1)
     if only_full_success:
         theta_success = np.asarray(arrays.theta_success, dtype=bool).reshape(-1)
