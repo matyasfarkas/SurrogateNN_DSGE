@@ -51,10 +51,12 @@ from surrogatenn_dsge import (
     fit_surrogate_pipeline_from_batched_arrays_jax,
     fit_surrogate_pipeline_from_batched_sep_jax,
     fit_surrogate_pipeline,
+    load_batched_surrogate_arrays_checkpoint,
     load_surrogate_bundle,
     parse_macro_model,
     predict_frozen_batch,
     resolve_jax_device,
+    save_batched_surrogate_arrays_checkpoint,
     save_posterior_draws_npz,
     save_surrogate_bundle,
     get_parameter_names,
@@ -254,6 +256,17 @@ def _bundle_path_from_args(args: argparse.Namespace) -> Path | None:
     return output_path.with_name(f"{output_path.stem}_surrogate_bundle.snn.npz")
 
 
+def _target_arrays_checkpoint_path_from_args(args: argparse.Namespace) -> Path | None:
+    configured = getattr(args, "hlt_target_arrays_checkpoint_path", None)
+    if configured is not None:
+        return Path(configured)
+    output = getattr(args, "output", None)
+    if output is None:
+        return None
+    output_path = Path(output)
+    return output_path.with_name(f"{output_path.stem}_target_arrays.npz")
+
+
 def _training_namespace_from_bundle(bundle: Any) -> SimpleNamespace:
     """Adapt a loaded portable bundle to the fields used by the HLT profile."""
 
@@ -298,6 +311,47 @@ def _validate_loaded_hlt_surrogate(
     if saved_subset is not None and tuple(saved_subset) != tuple(parameter_subset):
         raise ValueError(
             "Loaded HLT surrogate parameter subset does not match this run: "
+            f"{tuple(saved_subset)!r} vs {tuple(parameter_subset)!r}."
+        )
+
+
+def _validate_loaded_target_arrays(
+    arrays: Any,
+    *,
+    input_names: Sequence[str],
+    output_names: Sequence[str],
+    theta: Any,
+    parameter_subset: Sequence[str],
+    metadata: dict[str, Any],
+) -> None:
+    x_shape = tuple(int(dim) for dim in arrays.X.shape)
+    y_shape = tuple(int(dim) for dim in arrays.Y.shape)
+    if len(x_shape) != 2 or x_shape[0] != len(input_names):
+        raise ValueError(
+            "Loaded HLT target-array checkpoint input dimension does not match this run: "
+            f"{x_shape} vs {len(input_names)} features."
+        )
+    if len(y_shape) != 2 or y_shape[0] != len(output_names):
+        raise ValueError(
+            "Loaded HLT target-array checkpoint output dimension does not match this run: "
+            f"{y_shape} vs {len(output_names)} targets."
+        )
+    if tuple(arrays.Y_rom.shape) != y_shape:
+        raise ValueError(
+            "Loaded HLT target-array checkpoint has inconsistent Y/Y_rom shapes: "
+            f"{tuple(arrays.Y.shape)} vs {tuple(arrays.Y_rom.shape)}."
+        )
+    current_theta = np.asarray(theta, dtype=np.float64)
+    saved_theta = np.asarray(arrays.theta, dtype=np.float64)
+    if saved_theta.shape != current_theta.shape or not np.allclose(saved_theta, current_theta, rtol=1e-10, atol=1e-10):
+        raise ValueError(
+            "Loaded HLT target-array checkpoint theta design does not match this run after runtime preflight: "
+            f"{saved_theta.shape} vs {current_theta.shape}."
+        )
+    saved_subset = metadata.get("parameter_subset")
+    if saved_subset is not None and tuple(saved_subset) != tuple(parameter_subset):
+        raise ValueError(
+            "Loaded HLT target-array checkpoint parameter subset does not match this run: "
             f"{tuple(saved_subset)!r} vs {tuple(parameter_subset)!r}."
         )
 
@@ -3192,6 +3246,9 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
     surrogate_bundle_path = _bundle_path_from_args(args)
     surrogate_bundle_saved_path: Path | None = None
     surrogate_bundle_reused = bool(args.hlt_reuse_surrogate_bundle)
+    target_arrays_checkpoint_path = _target_arrays_checkpoint_path_from_args(args)
+    target_arrays_checkpoint_saved_path: Path | None = None
+    target_arrays_checkpoint_reused = False
     if surrogate_bundle_reused:
         if surrogate_bundle_path is None:
             raise ValueError("--hlt-reuse-surrogate-bundle requires --hlt-surrogate-bundle-path or --output.")
@@ -3386,28 +3443,94 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         target_diagnostics["target_min_stable_periods"] = int(target_min_stable_periods)
         target_diagnostics["effective_validation_fraction"] = float(validation_fraction)
     elif target_builder in {"grid-batched-sep", "grid_batched_sep", "feature-grid-batched-sep"}:
-        _progress(
-            "grid-batched HLT target generation "
-            f"theta_draws={theta.shape[1]} periods={periods} sep_periods={sep_config.periods}"
-        )
-        arrays, target_diagnostics = _build_grid_batched_hlt_sep_arrays(
-            model=model,
-            parameter_values_by_theta=full_parameter_values_by_theta,
-            theta_features_by_theta=theta.T,
-            steady_states_by_theta=steady_states_by_theta,
-            state_transition_by_theta=state_transition_by_theta,
-            shock_impact_by_theta=shock_impact_by_theta,
-            initial_states=initial_states,
-            shocks=shocks,
-            config=sep_config,
-            target_mode="fom_full",
-            min_stable_periods=1,
-            observable_idx=observable_idx,
-            state_idx=state_idx,
-            target_device=target_device,
-            batch_chunk_size=int(args.hlt_sep_batch_chunk_size),
-        )
+        if bool(args.hlt_reuse_target_arrays_checkpoint):
+            if target_arrays_checkpoint_path is None:
+                raise ValueError(
+                    "--hlt-reuse-target-arrays-checkpoint requires "
+                    "--hlt-target-arrays-checkpoint-path or --output."
+                )
+            _progress(f"loading HLT target-array checkpoint {target_arrays_checkpoint_path}")
+            checkpoint = load_batched_surrogate_arrays_checkpoint(
+                target_arrays_checkpoint_path,
+                device=target_device,
+            )
+            arrays = checkpoint.arrays
+            _validate_loaded_target_arrays(
+                arrays,
+                input_names=input_names,
+                output_names=output_names,
+                theta=theta,
+                parameter_subset=parameter_subset,
+                metadata=checkpoint.metadata,
+            )
+            checkpoint_target_diagnostics = checkpoint.metadata.get("target_diagnostics")
+            checkpoint_target_diagnostics = (
+                dict(checkpoint_target_diagnostics)
+                if isinstance(checkpoint_target_diagnostics, dict)
+                else {}
+            )
+            target_diagnostics = {
+                **checkpoint_target_diagnostics,
+                "builder": "grid-batched-sep",
+                "status": "reused_checkpoint",
+                "source_checkpoint_path": str(target_arrays_checkpoint_path),
+                "source_target_builder": checkpoint_target_diagnostics.get("builder"),
+                "checkpoint_array_summary": checkpoint.array_summary,
+            }
+            target_arrays_checkpoint_reused = True
+        else:
+            _progress(
+                "grid-batched HLT target generation "
+                f"theta_draws={theta.shape[1]} periods={periods} sep_periods={sep_config.periods}"
+            )
+            arrays, target_diagnostics = _build_grid_batched_hlt_sep_arrays(
+                model=model,
+                parameter_values_by_theta=full_parameter_values_by_theta,
+                theta_features_by_theta=theta.T,
+                steady_states_by_theta=steady_states_by_theta,
+                state_transition_by_theta=state_transition_by_theta,
+                shock_impact_by_theta=shock_impact_by_theta,
+                initial_states=initial_states,
+                shocks=shocks,
+                config=sep_config,
+                target_mode="fom_full",
+                min_stable_periods=1,
+                observable_idx=observable_idx,
+                state_idx=state_idx,
+                target_device=target_device,
+                batch_chunk_size=int(args.hlt_sep_batch_chunk_size),
+            )
+            target_diagnostics["target_min_stable_periods"] = 1
+            target_diagnostics["effective_validation_fraction"] = 0.0
+            target_diagnostics["training_input"] = "BatchedSurrogateRolloutArrays"
         array_summary = summarize_batched_surrogate_arrays(arrays)
+        if (
+            not target_arrays_checkpoint_reused
+            and bool(args.hlt_save_target_arrays_checkpoint)
+            and target_arrays_checkpoint_path is not None
+        ):
+            checkpoint_metadata = {
+                "pipeline": "run_hlt_fixed_steady_state_profile",
+                "payload_case": str(case["name"]),
+                "parameter_subset": list(parameter_subset),
+                "input_names": list(input_names),
+                "output_names": list(output_names),
+                "target_builder": target_builder,
+                "target_diagnostics": target_diagnostics,
+                "array_summary": array_summary,
+                "hlt_parameter_set": str(args.hlt_parameter_set),
+                "theta_draws": int(theta.shape[1]),
+                "original_theta_draws": int(original_theta_draws),
+                "theta_design": theta_design_diagnostics,
+                "steady_state_mode": steady_state_mode,
+                "first_order_qme_algorithm": str(args.hlt_first_order_qme_algorithm),
+            }
+            target_arrays_checkpoint_saved_path = save_batched_surrogate_arrays_checkpoint(
+                target_arrays_checkpoint_path,
+                arrays,
+                metadata=checkpoint_metadata,
+            )
+            _progress(f"saved HLT target-array checkpoint {target_arrays_checkpoint_saved_path}")
         batched_result = fit_surrogate_pipeline_from_batched_arrays_jax(
             arrays,
             architecture="resnet",
@@ -3426,9 +3549,9 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             dataset_summary=array_summary,
             bundle_path=batched_result.bundle_path,
         )
-        target_diagnostics["target_min_stable_periods"] = 1
-        target_diagnostics["effective_validation_fraction"] = 0.0
-        target_diagnostics["training_input"] = "BatchedSurrogateRolloutArrays"
+        target_diagnostics.setdefault("target_min_stable_periods", 1)
+        target_diagnostics.setdefault("effective_validation_fraction", 0.0)
+        target_diagnostics.setdefault("training_input", "BatchedSurrogateRolloutArrays")
     else:
         raise ValueError(
             "hlt_target_builder must be 'adaptive-sep', 'batched-sep', "
@@ -4185,6 +4308,17 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         if surrogate_bundle_reused
         else (None if surrogate_bundle_saved_path is None else str(surrogate_bundle_saved_path)),
         "surrogate_bundle_reused": bool(surrogate_bundle_reused),
+        "target_arrays_checkpoint_path": (
+            str(target_arrays_checkpoint_path)
+            if target_arrays_checkpoint_reused
+            else (
+                None
+                if target_arrays_checkpoint_saved_path is None
+                else str(target_arrays_checkpoint_saved_path)
+            )
+        ),
+        "target_arrays_checkpoint_saved": target_arrays_checkpoint_saved_path is not None,
+        "target_arrays_checkpoint_reused": bool(target_arrays_checkpoint_reused),
         "train_size": int(result.training.train_size),
         "val_size": int(result.training.val_size),
         "train_dtype": str(result.training.metadata.get("train_dtype", args.train_dtype)),
@@ -4460,6 +4594,34 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help=(
             "Load --hlt-surrogate-bundle-path and skip HLT SEP target generation/training. "
             "The runtime preflight and likelihood/HMC diagnostics still run."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-target-arrays-checkpoint-path",
+        type=Path,
+        default=None,
+        help=(
+            "Portable fixed-shape target-array checkpoint path for grid-batched HLT SEP targets. "
+            "If omitted and --output is set, the profile writes beside the JSON as "
+            "'<stem>_target_arrays.npz'."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-save-target-arrays-checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "For --hlt-target-builder grid-batched-sep, save SEP target arrays immediately "
+            "after target generation and before NN training."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-reuse-target-arrays-checkpoint",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "For --hlt-target-builder grid-batched-sep, load --hlt-target-arrays-checkpoint-path "
+            "and skip SEP target generation while still training a fresh surrogate."
         ),
     )
     parser.add_argument(

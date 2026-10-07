@@ -24,6 +24,8 @@ from surrogatenn_dsge import (
     solve_batched_stochastic_extended_path_residual_expectation,
     split_surrogate_dataset,
     residual_shrinkage_factors,
+    load_batched_surrogate_arrays_checkpoint,
+    save_batched_surrogate_arrays_checkpoint,
     surrogate_inversion_loglikelihood_jax,
     surrogate_sample_weights_from_residuals,
     train_surrogate_from_batched_arrays_jax,
@@ -305,6 +307,48 @@ def test_fit_surrogate_pipeline_from_batched_arrays_jax_runs_without_compaction(
     assert result.training.metadata["jax_device_platform"] == "cpu"
     assert result.training.metadata["training_loop"] == "epoch_scan"
     assert _array_platform(result.training.frozen.W_embed) == "cpu"
+
+
+def test_batched_surrogate_arrays_checkpoint_round_trips_to_device(tmp_path) -> None:
+    theta = np.asarray([[0.1, 0.2], [1.0, 1.2]], dtype=np.float64)
+    states = np.asarray(
+        [
+            [[0.0, 0.1], [0.2, 0.0], [0.3, -0.1]],
+            [[-0.1, 0.0], [0.1, 0.2], [0.2, 0.3]],
+        ],
+        dtype=np.float64,
+    )
+    shocks = np.asarray([[[0.05], [0.10], [-0.02]], [[0.02], [-0.01], [0.04]]], dtype=np.float64)
+    rom_obs = 0.4 * states[:, :, :1] + shocks
+    rom_state_next = states + np.concatenate([shocks, -shocks], axis=2)
+    fom_obs = rom_obs + 0.1 * states[:, :, :1] ** 2 + theta.T[:, None, :1]
+    fom_state_next = rom_state_next + 0.05 * np.concatenate([shocks**2, shocks**2], axis=2)
+    arrays = build_surrogate_residual_arrays_jax(
+        states,
+        shocks,
+        theta,
+        rom_obs,
+        rom_state_next,
+        fom_obs,
+        fom_state_next,
+        target_mode="fom_full",
+    )
+    path = tmp_path / "target_arrays.npz"
+
+    saved = save_batched_surrogate_arrays_checkpoint(
+        path,
+        arrays,
+        metadata={"experiment": "checkpoint-unit", "parameter_subset": ["rho", "scale"]},
+    )
+    loaded = load_batched_surrogate_arrays_checkpoint(saved, device="cpu")
+
+    assert loaded.path == str(path)
+    assert loaded.metadata["experiment"] == "checkpoint-unit"
+    assert loaded.array_summary["n_samples_total"] == 6
+    assert _array_platform(loaded.arrays.X) == "cpu"
+    np.testing.assert_allclose(np.asarray(loaded.arrays.X), np.asarray(arrays.X), rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(loaded.arrays.Y), np.asarray(arrays.Y), rtol=0, atol=0)
+    np.testing.assert_array_equal(np.asarray(loaded.arrays.sample_mask), np.asarray(arrays.sample_mask))
 
 
 def test_fit_surrogate_pipeline_from_batched_sep_jax_supports_jitted_likelihood_smoke() -> None:

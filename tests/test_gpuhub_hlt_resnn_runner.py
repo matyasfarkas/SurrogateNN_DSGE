@@ -80,6 +80,11 @@ def test_hlt_estimation_pilot_dry_run_resolves_parallel_defaults(tmp_path: Path)
     assert lines["HLT_PERIODS"] == "4"
     assert lines["SEP_PERIODS"] == "4"
     assert lines["HLT_SEP_BATCH_CHUNK_SIZE"] == "8"
+    assert lines["HLT_TARGET_ARRAYS_CHECKPOINT_PATH"] == str(
+        tmp_path / "hlt_estimation_pilot_target_arrays.npz"
+    )
+    assert lines["HLT_SAVE_TARGET_ARRAYS_CHECKPOINT"] == "1"
+    assert lines["HLT_REUSE_TARGET_ARRAYS_CHECKPOINT"] == "0"
     assert lines["HLT_SURROGATE_HMC_DRAWS_PATH"] == str(tmp_path / "hlt_estimation_pilot_surrogate_hmc_draws.npz")
     assert lines["EPOCHS"] == "200"
     assert lines["HIDDEN"] == "192"
@@ -106,6 +111,7 @@ def test_hlt_dry_run_grid_batched_targets_can_enable_rom1_comparison(tmp_path: P
             "DRY_RUN": "1",
             "RESULT_ROOT": str(tmp_path),
             "HLT_TARGET_BUILDER": "grid-batched-sep",
+            "HLT_REUSE_TARGET_ARRAYS_CHECKPOINT": "1",
             "RUN_ROM1_COMPARISON": "1",
         },
     )
@@ -113,6 +119,7 @@ def test_hlt_dry_run_grid_batched_targets_can_enable_rom1_comparison(tmp_path: P
     lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
 
     assert lines["HLT_TARGET_BUILDER"] == "grid-batched-sep"
+    assert lines["HLT_REUSE_TARGET_ARRAYS_CHECKPOINT"] == "1"
     assert lines["HLT_SEP_BATCH_CHUNK_SIZE"] == "8"
     assert lines["RUN_ROM1_COMPARISON"] == "1"
     assert lines["ROM1_HMC_DRAWS_PATH"] == str(tmp_path / "hlt_estimation_pilot_rom1_hmc_draws.npz")
@@ -150,6 +157,7 @@ def test_hlt_final_nonlinear_dry_run_enables_correctness_gates(tmp_path: Path) -
     assert lines["HLT_THETA_DRAWS"] == "192"
     assert lines["HLT_MIN_ACCEPTED_SAMPLES"] == "256"
     assert lines["HLT_SURROGATE_BUNDLE_PATH"] == str(tmp_path / "hlt_final_nonlinear_surrogate_bundle.snn.npz")
+    assert lines["HLT_TARGET_ARRAYS_CHECKPOINT_PATH"] == str(tmp_path / "hlt_final_nonlinear_target_arrays.npz")
     assert lines["HLT_REUSE_SURROGATE_BUNDLE"] == "0"
     assert lines["HLT_REQUIRE_FULL_TARGET_SUCCESS"] == "1"
     assert lines["HLT_REQUIRE_JAX_PARITY"] == "1"

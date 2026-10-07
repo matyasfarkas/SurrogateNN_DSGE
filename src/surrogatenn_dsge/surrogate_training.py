@@ -36,6 +36,7 @@ from .sep import BatchedSEPSolution
 
 
 SURROGATE_BUNDLE_VERSION = 1
+SURROGATE_ARRAY_CHECKPOINT_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -166,6 +167,18 @@ class BatchedSurrogatePipelineResult:
         object.__setattr__(self, "array_summary", dict(self.array_summary))
         if self.bundle_path is not None:
             object.__setattr__(self, "bundle_path", Path(self.bundle_path))
+
+
+@dataclass(frozen=True)
+class BatchedSurrogateArraysCheckpoint:
+    path: Optional[str]
+    arrays: BatchedSurrogateRolloutArrays
+    metadata: dict[str, object]
+    array_summary: dict[str, object]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", dict(self.metadata))
+        object.__setattr__(self, "array_summary", dict(self.array_summary))
 
 
 def split_surrogate_dataset(
@@ -524,6 +537,118 @@ def load_surrogate_bundle(path: str | Path, *, device: Optional[Any] = None) -> 
             train_theta_ids=optional_array("train_theta_ids", np.int64),
             val_theta_ids=optional_array("val_theta_ids", np.int64),
         )
+
+
+def _checkpoint_array(value: Any, *, dtype: Optional[Any] = None) -> np.ndarray:
+    array = np.asarray(value if dtype is None else np.asarray(value, dtype=dtype))
+    return np.array(array, copy=True)
+
+
+def save_batched_surrogate_arrays_checkpoint(
+    path: str | Path,
+    arrays: BatchedSurrogateRolloutArrays,
+    *,
+    metadata: Optional[dict[str, object]] = None,
+) -> Path:
+    """Save fixed-shape SEP/ROM surrogate targets before expensive NN training.
+
+    The checkpoint is intentionally independent of the trained surrogate bundle:
+    if training, likelihood evaluation, or HMC fails, the costly SEP targets can be
+    loaded and reused without rebuilding the sparse-tree target grid.
+    """
+
+    array_summary = summarize_batched_surrogate_arrays(arrays)
+    payload = {
+        "X": _checkpoint_array(arrays.X),
+        "Y": _checkpoint_array(arrays.Y),
+        "Y_rom": _checkpoint_array(arrays.Y_rom),
+        "theta": _checkpoint_array(arrays.theta),
+        "theta_ids": _checkpoint_array(arrays.theta_ids, dtype=np.int64),
+        "period_ids": _checkpoint_array(arrays.period_ids, dtype=np.int64),
+        "sample_mask": _checkpoint_array(arrays.sample_mask, dtype=bool),
+        "theta_success": _checkpoint_array(arrays.theta_success, dtype=bool),
+        "theta_stable_periods": _checkpoint_array(arrays.theta_stable_periods, dtype=np.int64),
+    }
+    metadata_payload = {
+        "checkpoint_version": SURROGATE_ARRAY_CHECKPOINT_VERSION,
+        "format": "surrogatenn_dsge_batched_surrogate_arrays_npz",
+        "metadata": _json_safe({} if metadata is None else metadata),
+        "array_summary": _json_safe(array_summary),
+    }
+    payload["metadata_json"] = np.asarray(json.dumps(metadata_payload, sort_keys=True))
+
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = out_path.with_name(out_path.name + ".tmp")
+    with tmp_path.open("wb") as handle:
+        np.savez_compressed(handle, **payload)
+    tmp_path.replace(out_path)
+    return out_path
+
+
+def load_batched_surrogate_arrays_checkpoint(
+    path: str | Path,
+    *,
+    device: Optional[Any] = None,
+) -> BatchedSurrogateArraysCheckpoint:
+    """Load fixed-shape surrogate target arrays saved by
+    :func:`save_batched_surrogate_arrays_checkpoint`.
+    """
+
+    checkpoint_path = Path(path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Batched surrogate arrays checkpoint not found: {checkpoint_path}")
+    target_device = resolve_jax_device(device)
+
+    def put(array: np.ndarray) -> jax.Array:
+        value = jnp.asarray(array)
+        return value if target_device is None else jax.device_put(value, target_device)
+
+    required = (
+        "X",
+        "Y",
+        "Y_rom",
+        "theta",
+        "theta_ids",
+        "period_ids",
+        "sample_mask",
+        "theta_success",
+        "theta_stable_periods",
+    )
+    with np.load(checkpoint_path, allow_pickle=False) as npz:
+        missing = [name for name in required if name not in npz]
+        if missing:
+            raise ValueError(
+                "Batched surrogate arrays checkpoint is missing required arrays: "
+                + ", ".join(missing)
+            )
+        if "metadata_json" not in npz:
+            raise ValueError("Batched surrogate arrays checkpoint is missing metadata_json.")
+        metadata_payload = json.loads(str(np.asarray(npz["metadata_json"]).item()))
+        if int(metadata_payload.get("checkpoint_version", 0)) > SURROGATE_ARRAY_CHECKPOINT_VERSION:
+            raise ValueError(
+                "Batched surrogate arrays checkpoint was saved by a newer format version "
+                f"{metadata_payload.get('checkpoint_version')}."
+            )
+        arrays = BatchedSurrogateRolloutArrays(
+            X=put(np.asarray(npz["X"])),
+            Y=put(np.asarray(npz["Y"])),
+            Y_rom=put(np.asarray(npz["Y_rom"])),
+            theta=put(np.asarray(npz["theta"])),
+            theta_ids=put(np.asarray(npz["theta_ids"], dtype=np.int64)),
+            period_ids=put(np.asarray(npz["period_ids"], dtype=np.int64)),
+            sample_mask=put(np.asarray(npz["sample_mask"], dtype=bool)),
+            theta_success=put(np.asarray(npz["theta_success"], dtype=bool)),
+            theta_stable_periods=put(np.asarray(npz["theta_stable_periods"], dtype=np.int64)),
+        )
+    summary_payload = metadata_payload.get("array_summary")
+    array_summary = dict(summary_payload) if isinstance(summary_payload, dict) else summarize_batched_surrogate_arrays(arrays)
+    return BatchedSurrogateArraysCheckpoint(
+        path=str(checkpoint_path),
+        arrays=arrays,
+        metadata=dict(metadata_payload.get("metadata", {})),
+        array_summary=array_summary,
+    )
 
 
 def _output_index_array(output_indices: Optional[Sequence[int] | np.ndarray], d_out: int) -> Optional[np.ndarray]:

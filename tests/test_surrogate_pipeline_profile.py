@@ -174,6 +174,7 @@ def test_hlt_surrogate_bundle_path_defaults_to_output_stem(tmp_path) -> None:
     mod = _load_profile_module()
     output = tmp_path / "hlt_debug.json"
     explicit = tmp_path / "explicit_bundle.snn.npz"
+    explicit_checkpoint = tmp_path / "explicit_target_arrays.npz"
 
     default_args = mod.parse_args(
         [
@@ -191,11 +192,15 @@ def test_hlt_surrogate_bundle_path_defaults_to_output_stem(tmp_path) -> None:
             str(output),
             "--hlt-surrogate-bundle-path",
             str(explicit),
+            "--hlt-target-arrays-checkpoint-path",
+            str(explicit_checkpoint),
         ]
     )
 
     assert mod._bundle_path_from_args(default_args) == tmp_path / "hlt_debug_surrogate_bundle.snn.npz"
     assert mod._bundle_path_from_args(explicit_args) == explicit
+    assert mod._target_arrays_checkpoint_path_from_args(default_args) == tmp_path / "hlt_debug_target_arrays.npz"
+    assert mod._target_arrays_checkpoint_path_from_args(explicit_args) == explicit_checkpoint
 
 
 def test_loaded_hlt_surrogate_bundle_adapter_and_validation(tmp_path) -> None:
