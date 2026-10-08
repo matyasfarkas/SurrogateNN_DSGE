@@ -35,6 +35,12 @@ else
   JAX_LOG_DENSITY_GRADIENT_FLAG="--no-hlt-jax-log-density-gradient"
 fi
 
+if [[ "${JAX_LOG_DENSITY_SMOKE:-1}" == "1" ]]; then
+  JAX_LOG_DENSITY_SMOKE_FLAG="--hlt-jax-log-density-smoke"
+else
+  JAX_LOG_DENSITY_SMOKE_FLAG="--no-hlt-jax-log-density-smoke"
+fi
+
 if [[ "${DIFFERENTIATE_SHOCKS:-0}" == "1" ]]; then
   DIFFERENTIATE_SHOCKS_FLAG="--hlt-jax-differentiate-shocks"
 else
@@ -537,7 +543,7 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --hlt-surrogate-inversion-maxit "${INVERSION_MAXIT:-4}" \
   --hlt-surrogate-inversion-tol "${INVERSION_TOL:-1e-5}" \
   --hlt-surrogate-inversion-lambda "${INVERSION_LAMBDA:-1e-4}" \
-  --hlt-jax-log-density-smoke \
+  "$JAX_LOG_DENSITY_SMOKE_FLAG" \
   "$JAX_LOG_DENSITY_GRADIENT_FLAG" \
   --hlt-jax-log-density-repeat-evals "${JAX_LOG_DENSITY_REPEAT_EVALS:-0}" \
   --hlt-jax-log-density-repeat-perturbation "${JAX_LOG_DENSITY_REPEAT_PERTURBATION:-0.0}" \
