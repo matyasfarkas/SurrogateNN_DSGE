@@ -290,7 +290,7 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             max_step_size=float(args.max_step_size),
         )
 
-    compiled_sampler = jax.jit(sample_once)
+    compiled_sampler = sample_once if bool(args.no_jit) else jax.jit(sample_once)
     step_size_runs: list[dict[str, Any]] = []
     for step_index, step_size_value in enumerate(step_size_values):
         step_run_key = jax.random.fold_in(run_key, step_index)
@@ -337,6 +337,7 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                     "parameters": str(args.parameters),
                     "qme_algorithm": str(args.qme_algorithm),
                     "dtype": str(args.dtype),
+                    "jit": not bool(args.no_jit),
                     "chains": int(args.chains),
                     "warmup": int(args.warmup),
                     "samples": int(args.samples),
@@ -389,6 +390,7 @@ def run_static_hmc_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "parameter_names": list(context["parameter_names"]),
             "qme_algorithm": args.qme_algorithm,
             "dtype": args.dtype,
+            "jit": not bool(args.no_jit),
             "chains": int(args.chains),
             "warmup": int(args.warmup),
             "samples": int(args.samples),
@@ -460,6 +462,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-step-size", type=float, default=1.0)
     parser.add_argument("--initial-jitter", type=float, default=0.05)
     parser.add_argument("--steady-reps", type=int, default=0)
+    parser.add_argument(
+        "--no-jit",
+        action="store_true",
+        help=(
+            "Run the full static-HMC sampler without jax.jit. This avoids huge "
+            "compile graphs for local CPU reference runs, but is not a GPU throughput mode."
+        ),
+    )
     parser.add_argument("--no-adapt-step-size", action="store_true")
     parser.add_argument("--dtype", choices=("float64", "float32"), default="float64")
     parser.add_argument("--platform", choices=("cpu", "gpu", "cuda"), default=None)

@@ -81,6 +81,7 @@ def test_parse_args_accepts_static_hmc_gpu_shape() -> None:
             "--force-gpu",
             "--posterior-draws-output",
             "draws.npz",
+            "--no-jit",
         ]
     )
 
@@ -94,6 +95,7 @@ def test_parse_args_accepts_static_hmc_gpu_shape() -> None:
     assert args.platform == "gpu"
     assert args.force_gpu is True
     assert args.posterior_draws_output == Path("draws.npz")
+    assert args.no_jit is True
 
 
 def test_parse_args_accepts_schur_support_audit_options() -> None:
