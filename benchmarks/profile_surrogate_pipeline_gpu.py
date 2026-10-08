@@ -594,6 +594,50 @@ def _summarize_static_hmc_result(
     }
 
 
+def _summarize_constrained_hmc_samples(
+    *,
+    constrained_samples: Any,
+    parameter_names: Sequence[str],
+    elapsed_s: float,
+    accepted_share: float | None,
+    accept_prob_mean: float | None,
+    accept_prob_min: float | None,
+    accept_prob_max: float | None,
+    final_step_size: float | None,
+    final_log_prob_mean: float | None,
+) -> dict[str, Any]:
+    samples = np.asarray(constrained_samples, dtype=np.float64)
+    if samples.ndim != 3:
+        raise ValueError("constrained_samples must have shape (samples, chains, parameters).")
+    if samples.shape[-1] != len(parameter_names):
+        raise ValueError("parameter_names length must match the HMC sample parameter dimension.")
+    flat = samples.reshape((-1, samples.shape[-1]))
+    parameter_summary = {
+        str(name): {
+            "mean": float(np.mean(flat[:, idx])),
+            "std": float(np.std(flat[:, idx])),
+            "min": float(np.min(flat[:, idx])),
+            "max": float(np.max(flat[:, idx])),
+        }
+        for idx, name in enumerate(parameter_names)
+    }
+    draws = int(np.prod(samples.shape[:2]))
+    return {
+        "elapsed_s": float(elapsed_s),
+        "samples_shape": list(samples.shape),
+        "post_warmup_draws": draws,
+        "draws_per_second": float(draws / elapsed_s) if elapsed_s > 0 else math.inf,
+        "accepted_share": accepted_share,
+        "accept_prob_mean": accept_prob_mean,
+        "accept_prob_min": accept_prob_min,
+        "accept_prob_max": accept_prob_max,
+        "final_step_size": final_step_size,
+        "final_log_prob_mean": final_log_prob_mean,
+        "samples_finite": bool(np.isfinite(samples).all()),
+        "parameter_summary": parameter_summary,
+    }
+
+
 def run_static_hmc_on_bounded_surrogate_log_density(
     *,
     log_density_fn: Any,
@@ -615,6 +659,7 @@ def run_static_hmc_on_bounded_surrogate_log_density(
     retry_step_size_factor: float = 0.25,
     draws_output: str | Path | None = None,
     draws_metadata: Mapping[str, Any] | None = None,
+    return_constrained_samples: bool = False,
 ) -> dict[str, Any]:
     """Run vectorized static HMC over a bounded surrogate log likelihood."""
 
@@ -775,6 +820,243 @@ def run_static_hmc_on_bounded_surrogate_log_density(
         summary["posterior_draws"] = save_posterior_draws_npz(
             draws_output,
             selected_constrained_samples,
+            parameter_names,
+            metadata=draw_metadata,
+        )
+    if return_constrained_samples:
+        if selected_constrained_samples is None:
+            raise RuntimeError("selected HMC attempt did not retain constrained samples.")
+        summary["_constrained_samples"] = selected_constrained_samples
+    return summary
+
+
+def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
+    *,
+    log_density_fn: Any,
+    center: Any,
+    parameter_names: Sequence[str],
+    lower: Any,
+    upper: Any,
+    chains: int,
+    chain_batch_size: int,
+    warmup: int,
+    samples: int,
+    leapfrog_steps: int,
+    step_size: float,
+    target_accept_prob: float,
+    adapt_step_size: bool,
+    initial_jitter: float,
+    seed: int,
+    min_accepted_share: float = 0.0,
+    max_retries: int = 0,
+    retry_step_size_factor: float = 0.25,
+    draws_output: str | Path | None = None,
+    draws_metadata: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run static HMC in smaller chain batches and concatenate post-warmup draws.
+
+    This keeps the JAX compile shape bounded by ``chain_batch_size``. It is
+    intended for GPU runs where a monolithic ``chains`` graph would trigger XLA
+    rematerialization or OOM, while preserving the canonical posterior draw
+    layout ``(samples, chains, parameters)`` for downstream diagnostics.
+    """
+
+    total_chains = int(chains)
+    batch_size = int(chain_batch_size)
+    if total_chains < 1:
+        raise ValueError(f"chains must be positive, got {chains}.")
+    if batch_size < 1:
+        raise ValueError(f"chain_batch_size must be positive, got {chain_batch_size}.")
+    if batch_size >= total_chains:
+        return run_static_hmc_on_bounded_surrogate_log_density(
+            log_density_fn=log_density_fn,
+            center=center,
+            parameter_names=parameter_names,
+            lower=lower,
+            upper=upper,
+            chains=total_chains,
+            warmup=warmup,
+            samples=samples,
+            leapfrog_steps=leapfrog_steps,
+            step_size=step_size,
+            target_accept_prob=target_accept_prob,
+            adapt_step_size=adapt_step_size,
+            initial_jitter=initial_jitter,
+            seed=seed,
+            min_accepted_share=min_accepted_share,
+            max_retries=max_retries,
+            retry_step_size_factor=retry_step_size_factor,
+            draws_output=draws_output,
+            draws_metadata={
+                "chain_batched": False,
+                "requested_chain_batch_size": batch_size,
+                **dict(draws_metadata or {}),
+            },
+        )
+
+    started = time.perf_counter()
+    batch_summaries: list[dict[str, Any]] = []
+    constrained_batches: list[np.ndarray] = []
+    chain_start = 0
+    batch_index = 0
+    while chain_start < total_chains:
+        current_chains = min(batch_size, total_chains - chain_start)
+        batch_seed = int(seed) + 1_000_003 * batch_index
+        batch_result = run_static_hmc_on_bounded_surrogate_log_density(
+            log_density_fn=log_density_fn,
+            center=center,
+            parameter_names=parameter_names,
+            lower=lower,
+            upper=upper,
+            chains=current_chains,
+            warmup=warmup,
+            samples=samples,
+            leapfrog_steps=leapfrog_steps,
+            step_size=step_size,
+            target_accept_prob=target_accept_prob,
+            adapt_step_size=adapt_step_size,
+            initial_jitter=initial_jitter,
+            seed=batch_seed,
+            min_accepted_share=min_accepted_share,
+            max_retries=max_retries,
+            retry_step_size_factor=retry_step_size_factor,
+            draws_output=None,
+            draws_metadata=None,
+            return_constrained_samples=True,
+        )
+        constrained = np.asarray(batch_result.pop("_constrained_samples"), dtype=np.float64)
+        constrained_batches.append(constrained)
+        compact = {
+            key: value
+            for key, value in batch_result.items()
+            if key
+            not in {
+                "parameter_summary",
+                "prior_lower",
+                "prior_upper",
+                "retry_history",
+            }
+        }
+        compact.update(
+            {
+                "batch_index": int(batch_index),
+                "chain_start": int(chain_start),
+                "chains": int(current_chains),
+                "seed": int(batch_seed),
+            }
+        )
+        batch_summaries.append(compact)
+        chain_start += current_chains
+        batch_index += 1
+
+    combined_samples = np.concatenate(constrained_batches, axis=1)
+    total_elapsed = time.perf_counter() - started
+    draw_counts = np.asarray(
+        [int(item.get("post_warmup_draws", 0) or 0) for item in batch_summaries],
+        dtype=np.float64,
+    )
+    total_draw_weight = float(np.sum(draw_counts))
+
+    def weighted_mean(key: str) -> float | None:
+        values = np.asarray(
+            [
+                np.nan if item.get(key) is None else float(item[key])
+                for item in batch_summaries
+            ],
+            dtype=np.float64,
+        )
+        valid = np.isfinite(values) & (draw_counts > 0.0)
+        if not np.any(valid):
+            return None
+        return float(np.sum(values[valid] * draw_counts[valid]) / np.sum(draw_counts[valid]))
+
+    def finite_min(key: str) -> float | None:
+        values = np.asarray(
+            [
+                np.nan if item.get(key) is None else float(item[key])
+                for item in batch_summaries
+            ],
+            dtype=np.float64,
+        )
+        values = values[np.isfinite(values)]
+        return None if values.size == 0 else float(np.min(values))
+
+    def finite_max(key: str) -> float | None:
+        values = np.asarray(
+            [
+                np.nan if item.get(key) is None else float(item[key])
+                for item in batch_summaries
+            ],
+            dtype=np.float64,
+        )
+        values = values[np.isfinite(values)]
+        return None if values.size == 0 else float(np.max(values))
+
+    summary = _summarize_constrained_hmc_samples(
+        constrained_samples=combined_samples,
+        parameter_names=parameter_names,
+        elapsed_s=total_elapsed,
+        accepted_share=weighted_mean("accepted_share"),
+        accept_prob_mean=weighted_mean("accept_prob_mean"),
+        accept_prob_min=finite_min("accept_prob_min"),
+        accept_prob_max=finite_max("accept_prob_max"),
+        final_step_size=weighted_mean("final_step_size"),
+        final_log_prob_mean=weighted_mean("final_log_prob_mean"),
+    )
+    summary.update(
+        {
+            "status": "ok",
+            "kind": "fixed_rom_surrogate_static_hmc_chain_batched",
+            "parameter_names": [str(name) for name in parameter_names],
+            "prior_lower": np.asarray(lower, dtype=np.float64).tolist(),
+            "prior_upper": np.asarray(upper, dtype=np.float64).tolist(),
+            "chains": total_chains,
+            "chain_batch_size": batch_size,
+            "chain_batch_count": len(batch_summaries),
+            "chain_batched": True,
+            "warmup": int(warmup),
+            "samples": int(samples),
+            "leapfrog_steps": int(leapfrog_steps),
+            "initial_step_size": weighted_mean("initial_step_size"),
+            "requested_initial_step_size": float(step_size),
+            "target_accept_prob": float(target_accept_prob),
+            "adapt_step_size": bool(adapt_step_size),
+            "initial_jitter": float(initial_jitter),
+            "seed": int(seed),
+            "retry_attempt": int(max((item.get("retry_attempt", 0) or 0) for item in batch_summaries)),
+            "retry_count": int(sum((item.get("retry_count", 0) or 0) for item in batch_summaries)),
+            "retry_count_max": int(max((item.get("retry_count", 0) or 0) for item in batch_summaries)),
+            "retry_max_retries": int(max_retries),
+            "retry_step_size_factor": float(retry_step_size_factor),
+            "retry_min_accepted_share": float(min_accepted_share),
+            "batch_summaries": batch_summaries,
+            "backend": jax.default_backend(),
+            "caveat": (
+                "Samples the trained-surrogate inversion likelihood in sequential chain batches. "
+                "This avoids compiling all chains into one XLA graph; batches are independent "
+                "HMC chains with distinct PRNG seeds."
+            ),
+        }
+    )
+    if total_draw_weight <= 0.0:
+        raise RuntimeError("chain-batched HMC produced no post-warmup draws.")
+    if draws_output is not None:
+        draw_metadata = {
+            "source": "profile_surrogate_pipeline_gpu.py",
+            "kind": "fixed_rom_surrogate_static_hmc_chain_batched",
+            "chains": total_chains,
+            "chain_batch_size": batch_size,
+            "chain_batch_count": len(batch_summaries),
+            "warmup": int(warmup),
+            "samples": int(samples),
+            "leapfrog_steps": int(leapfrog_steps),
+            "step_size": float(step_size),
+            "chain_batched": True,
+            **dict(draws_metadata or {}),
+        }
+        summary["posterior_draws"] = save_posterior_draws_npz(
+            draws_output,
+            combined_samples,
             parameter_names,
             metadata=draw_metadata,
         )
@@ -4026,10 +4308,17 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     )
 
                 if int(args.hlt_surrogate_hmc_samples) > 0:
+                    chain_batch_size = int(args.hlt_surrogate_hmc_chain_batch_size)
+                    hmc_runner = (
+                        run_chain_batched_static_hmc_on_bounded_surrogate_log_density
+                        if 0 < chain_batch_size < int(args.hlt_surrogate_hmc_chains)
+                        else run_static_hmc_on_bounded_surrogate_log_density
+                    )
                     _progress(
                         "starting surrogate HMC "
                         f"runtime_mode={likelihood_runtime_mode} "
                         f"chains={args.hlt_surrogate_hmc_chains} "
+                        f"chain_batch_size={chain_batch_size if chain_batch_size > 0 else 'monolithic'} "
                         f"warmup={args.hlt_surrogate_hmc_warmup} "
                         f"samples={args.hlt_surrogate_hmc_samples}"
                     )
@@ -4039,26 +4328,26 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         width_scale=float(args.hlt_surrogate_hmc_prior_width_scale),
                         width_floor=float(args.hlt_surrogate_hmc_prior_width_floor),
                     )
-                    surrogate_hmc_result = run_static_hmc_on_bounded_surrogate_log_density(
-                        log_density_fn=log_density,
-                        center=theta0_jax,
-                        parameter_names=parameter_subset,
-                        lower=device_array(lower),
-                        upper=device_array(upper),
-                        chains=int(args.hlt_surrogate_hmc_chains),
-                        warmup=int(args.hlt_surrogate_hmc_warmup),
-                        samples=int(args.hlt_surrogate_hmc_samples),
-                        leapfrog_steps=int(args.hlt_surrogate_hmc_leapfrog_steps),
-                        step_size=float(args.hlt_surrogate_hmc_step_size),
-                        target_accept_prob=float(args.hlt_surrogate_hmc_target_accept_prob),
-                        adapt_step_size=not bool(args.hlt_surrogate_hmc_no_adapt_step_size),
-                        initial_jitter=float(args.hlt_surrogate_hmc_initial_jitter),
-                        seed=int(args.hlt_surrogate_hmc_seed),
-                        min_accepted_share=float(args.hlt_surrogate_hmc_min_accepted_share),
-                        max_retries=int(args.hlt_surrogate_hmc_max_retries),
-                        retry_step_size_factor=float(args.hlt_surrogate_hmc_retry_step_size_factor),
-                        draws_output=args.hlt_surrogate_hmc_draws_output,
-                        draws_metadata={
+                    hmc_kwargs = {
+                        "log_density_fn": log_density,
+                        "center": theta0_jax,
+                        "parameter_names": parameter_subset,
+                        "lower": device_array(lower),
+                        "upper": device_array(upper),
+                        "chains": int(args.hlt_surrogate_hmc_chains),
+                        "warmup": int(args.hlt_surrogate_hmc_warmup),
+                        "samples": int(args.hlt_surrogate_hmc_samples),
+                        "leapfrog_steps": int(args.hlt_surrogate_hmc_leapfrog_steps),
+                        "step_size": float(args.hlt_surrogate_hmc_step_size),
+                        "target_accept_prob": float(args.hlt_surrogate_hmc_target_accept_prob),
+                        "adapt_step_size": not bool(args.hlt_surrogate_hmc_no_adapt_step_size),
+                        "initial_jitter": float(args.hlt_surrogate_hmc_initial_jitter),
+                        "seed": int(args.hlt_surrogate_hmc_seed),
+                        "min_accepted_share": float(args.hlt_surrogate_hmc_min_accepted_share),
+                        "max_retries": int(args.hlt_surrogate_hmc_max_retries),
+                        "retry_step_size_factor": float(args.hlt_surrogate_hmc_retry_step_size_factor),
+                        "draws_output": args.hlt_surrogate_hmc_draws_output,
+                        "draws_metadata": {
                             "profile_output": None if args.output is None else str(args.output),
                             "payload_case": str(case["name"]),
                             "model_source": str(model_source),
@@ -4070,7 +4359,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                             "likelihood_qme_algorithm": likelihood_qme_algorithm,
                             "likelihood_static_rows_mode": likelihood_static_rows_mode,
                         },
-                    )
+                    }
+                    if hmc_runner is run_chain_batched_static_hmc_on_bounded_surrogate_log_density:
+                        hmc_kwargs["chain_batch_size"] = chain_batch_size
+                    surrogate_hmc_result = hmc_runner(**hmc_kwargs)
                     surrogate_hmc_result["runtime_mode"] = likelihood_runtime_mode
                     surrogate_hmc_result["qme_algorithm"] = likelihood_qme_algorithm
                     surrogate_hmc_result["static_rows_mode"] = likelihood_static_rows_mode
@@ -4804,6 +5096,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-surrogate-hmc-warmup", type=int, default=0)
     parser.add_argument("--hlt-surrogate-hmc-samples", type=int, default=0)
     parser.add_argument("--hlt-surrogate-hmc-chains", type=int, default=1)
+    parser.add_argument(
+        "--hlt-surrogate-hmc-chain-batch-size",
+        type=int,
+        default=0,
+        help=(
+            "Compile and run surrogate HMC in batches of this many chains, then "
+            "concatenate post-warmup draws. Use 0 for the legacy monolithic chain graph."
+        ),
+    )
     parser.add_argument("--hlt-surrogate-hmc-leapfrog-steps", type=int, default=4)
     parser.add_argument("--hlt-surrogate-hmc-step-size", type=float, default=0.05)
     parser.add_argument("--hlt-surrogate-hmc-target-accept-prob", type=float, default=0.8)

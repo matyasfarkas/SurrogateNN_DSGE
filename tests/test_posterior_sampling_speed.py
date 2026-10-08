@@ -114,6 +114,15 @@ def test_prior_interval_keeps_unit_root_like_parameters_inside_unit_bounds() -> 
     assert 0.0 < lower < 0.9977 < upper < 1.0
 
 
+def test_prior_interval_allows_zero_centered_bounded_parameters() -> None:
+    module = _load_module()
+
+    lower, upper = module._prior_interval("crhopinf", 0.0, 0.01, 1.0e-4)
+
+    assert lower < 0.0 < upper
+    assert upper - lower > 0.0
+
+
 def test_prior_interval_keeps_gali3_policy_parameters_in_safe_support() -> None:
     module = _load_module()
 

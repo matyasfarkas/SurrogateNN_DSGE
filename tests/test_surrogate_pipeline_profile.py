@@ -602,12 +602,15 @@ def test_parse_args_accepts_surrogate_hmc_draw_export_path() -> None:
             "hlt-fixed-ss-smoke",
             "--hlt-surrogate-hmc-samples",
             "2",
+            "--hlt-surrogate-hmc-chain-batch-size",
+            "8",
             "--hlt-surrogate-hmc-draws-output",
             "surrogate_draws.npz",
         ]
     )
 
     assert args.hlt_surrogate_hmc_samples == 2
+    assert args.hlt_surrogate_hmc_chain_batch_size == 8
     assert args.hlt_surrogate_hmc_draws_output == Path("surrogate_draws.npz")
 
 
@@ -646,6 +649,47 @@ def test_static_hmc_on_bounded_surrogate_log_density_tiny_cpu_smoke(tmp_path: Pa
     assert result["accepted_share"] is not None
     assert set(result["parameter_summary"]) == {"calfa", "crhob"}
     assert result["posterior_draws"]["path"] == str(draws_output)
+    assert draws_output.exists()
+
+
+def test_chain_batched_static_hmc_concatenates_draws(tmp_path: Path) -> None:
+    mod = _load_profile_module()
+    center = mod.jnp.asarray([0.25, 0.75], dtype=mod.jnp.float64)
+    draws_output = tmp_path / "chain_batched_draws.npz"
+
+    def log_density(theta):
+        return -0.5 * mod.jnp.sum((theta - center) ** 2)
+
+    result = mod.run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
+        log_density_fn=log_density,
+        center=center,
+        parameter_names=("calfa", "crhob"),
+        lower=mod.jnp.asarray([0.1, 0.5], dtype=mod.jnp.float64),
+        upper=mod.jnp.asarray([0.4, 0.95], dtype=mod.jnp.float64),
+        chains=5,
+        chain_batch_size=2,
+        warmup=0,
+        samples=2,
+        leapfrog_steps=2,
+        step_size=0.01,
+        target_accept_prob=0.8,
+        adapt_step_size=True,
+        initial_jitter=0.01,
+        seed=123,
+        draws_output=draws_output,
+        draws_metadata={"test_case": "chain_batched_tiny_cpu"},
+    )
+
+    assert result["status"] == "ok"
+    assert result["kind"] == "fixed_rom_surrogate_static_hmc_chain_batched"
+    assert result["chain_batched"] is True
+    assert result["chains"] == 5
+    assert result["chain_batch_size"] == 2
+    assert result["chain_batch_count"] == 3
+    assert result["samples_shape"] == [2, 5, 2]
+    assert result["post_warmup_draws"] == 10
+    assert result["posterior_draws"]["sample_shape"] == [2, 5, 2]
+    assert len(result["batch_summaries"]) == 3
     assert draws_output.exists()
 
 

@@ -306,7 +306,8 @@ def _prior_interval(name: str, center: float, scale: float, floor: float) -> tup
     lower = center - width
     upper = center + width
     bounded_unit_prefixes = ("crho", "cprob", "cind")
-    if name.startswith(bounded_unit_prefixes) or name in {"rho_i", "rho_rn", "rho_u"}:
+    bounded_unit_parameter = name.startswith(bounded_unit_prefixes) or name in {"rho_i", "rho_rn", "rho_u"}
+    if bounded_unit_parameter and center > 0.0:
         lower = max(1.0e-4, lower)
         upper = min(0.9999, upper)
     if name in {"calfa"}:

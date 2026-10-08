@@ -550,6 +550,7 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --hlt-surrogate-hmc-warmup "$HMC_WARMUP" \
   --hlt-surrogate-hmc-samples "$HMC_SAMPLES" \
   --hlt-surrogate-hmc-chains "$HMC_CHAINS" \
+  --hlt-surrogate-hmc-chain-batch-size "${HMC_CHAIN_BATCH_SIZE:-0}" \
   --hlt-surrogate-hmc-leapfrog-steps "$HMC_LEAPFROG_STEPS" \
   --hlt-surrogate-hmc-step-size "$HMC_STEP_SIZE" \
   --hlt-surrogate-hmc-target-accept-prob "${HMC_TARGET_ACCEPT:-0.8}" \
