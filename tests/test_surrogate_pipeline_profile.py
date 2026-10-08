@@ -686,6 +686,8 @@ def test_chain_batched_static_hmc_concatenates_draws(tmp_path: Path) -> None:
     assert result["chains"] == 5
     assert result["chain_batch_size"] == 2
     assert result["chain_batch_count"] == 3
+    assert result["compiled_chain_batch_sizes"] == [1, 2]
+    assert result["compile_reuse"] is True
     assert result["samples_shape"] == [2, 5, 2]
     assert result["post_warmup_draws"] == 10
     assert result["posterior_draws"]["sample_shape"] == [2, 5, 2]
@@ -741,6 +743,39 @@ def test_static_hmc_retries_low_acceptance_with_smaller_step_size() -> None:
     assert result["retry_history"][0]["accepted_share"] == 0.0
     assert result["initial_step_size"] < result["requested_initial_step_size"]
     assert result["accepted_share"] >= 0.01
+
+
+def test_static_hmc_retries_high_acceptance_with_larger_step_size() -> None:
+    mod = _load_profile_module()
+    center = mod.jnp.asarray([0.25], dtype=mod.jnp.float64)
+
+    def log_density(theta):
+        return -0.5 * mod.jnp.sum((theta - center) ** 2)
+
+    result = mod.run_static_hmc_on_bounded_surrogate_log_density(
+        log_density_fn=log_density,
+        center=center,
+        parameter_names=("x",),
+        lower=mod.jnp.asarray([0.1], dtype=mod.jnp.float64),
+        upper=mod.jnp.asarray([0.4], dtype=mod.jnp.float64),
+        chains=2,
+        warmup=0,
+        samples=2,
+        leapfrog_steps=1,
+        step_size=1.0e-6,
+        target_accept_prob=0.8,
+        adapt_step_size=False,
+        initial_jitter=0.0,
+        seed=3,
+        max_accepted_share=0.5,
+        max_retries=2,
+        retry_step_size_growth_factor=10.0,
+    )
+
+    assert result["status"] == "ok"
+    assert result["retry_count"] == 2
+    assert result["retry_history"][0]["retry_reason"] == "high_acceptance"
+    assert result["initial_step_size"] > result["requested_initial_step_size"]
 
 
 def test_hlt_adaptive_sep_attempt_specs_auto_ladder() -> None:

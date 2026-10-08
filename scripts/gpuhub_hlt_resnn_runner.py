@@ -61,7 +61,16 @@ def _parse_env_overrides(values: Sequence[str]) -> dict[str, str]:
 def stage_sequence(mode: str) -> tuple[str, ...]:
     if mode == "setup":
         return ()
-    if mode in {"smoke", "calibration", "pilot", "estimation_pilot", "final_nonlinear", "full_hlt", "full"}:
+    if mode in {
+        "smoke",
+        "calibration",
+        "pilot",
+        "estimation_pilot",
+        "first_estimation",
+        "final_nonlinear",
+        "full_hlt",
+        "full",
+    }:
         return (mode,)
     if mode == "smoke_then_calibration":
         return ("smoke", "calibration")
@@ -71,6 +80,8 @@ def stage_sequence(mode: str) -> tuple[str, ...]:
         return ("smoke", "estimation_pilot")
     if mode == "smoke_then_final_nonlinear":
         return ("smoke", "final_nonlinear")
+    if mode == "smoke_then_first_estimation":
+        return ("smoke", "first_estimation")
     if mode == "smoke_then_full_hlt":
         return ("smoke", "full_hlt")
     if mode == "smoke_then_full":
@@ -226,12 +237,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "calibration",
             "pilot",
             "estimation_pilot",
+            "first_estimation",
             "final_nonlinear",
             "full_hlt",
             "full",
             "smoke_then_calibration",
             "smoke_then_pilot",
             "smoke_then_estimation_pilot",
+            "smoke_then_first_estimation",
             "smoke_then_final_nonlinear",
             "smoke_then_full_hlt",
             "smoke_then_full",

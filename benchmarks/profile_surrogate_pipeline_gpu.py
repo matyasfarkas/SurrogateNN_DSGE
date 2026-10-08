@@ -655,8 +655,10 @@ def run_static_hmc_on_bounded_surrogate_log_density(
     initial_jitter: float,
     seed: int,
     min_accepted_share: float = 0.0,
+    max_accepted_share: float | None = None,
     max_retries: int = 0,
     retry_step_size_factor: float = 0.25,
+    retry_step_size_growth_factor: float = 2.0,
     draws_output: str | Path | None = None,
     draws_metadata: Mapping[str, Any] | None = None,
     return_constrained_samples: bool = False,
@@ -676,12 +678,23 @@ def run_static_hmc_on_bounded_surrogate_log_density(
     min_accept = float(min_accepted_share)
     if not 0.0 <= min_accept <= 1.0:
         raise ValueError(f"min_accepted_share must be in [0, 1], got {min_accepted_share}.")
+    max_accept = None if max_accepted_share is None else float(max_accepted_share)
+    if max_accept is not None and not 0.0 <= max_accept <= 1.0:
+        raise ValueError(f"max_accepted_share must be in [0, 1], got {max_accepted_share}.")
+    if max_accept is not None and max_accept < min_accept:
+        raise ValueError("max_accepted_share must be greater than or equal to min_accepted_share.")
     retries = int(max_retries)
     if retries < 0:
         raise ValueError(f"max_retries must be nonnegative, got {max_retries}.")
     retry_factor = float(retry_step_size_factor)
     if not 0.0 < retry_factor < 1.0:
         raise ValueError(f"retry_step_size_factor must be in (0, 1), got {retry_step_size_factor}.")
+    growth_factor = float(retry_step_size_growth_factor)
+    if growth_factor <= 1.0:
+        raise ValueError(
+            "retry_step_size_growth_factor must be greater than 1, "
+            f"got {retry_step_size_growth_factor}."
+        )
     center_jax = jnp.asarray(center, dtype=jnp.float64)
     lower_jax = jnp.asarray(lower, dtype=jnp.float64)
     upper_jax = jnp.asarray(upper, dtype=jnp.float64)
@@ -709,22 +722,24 @@ def run_static_hmc_on_bounded_surrogate_log_density(
         shape=(int(chains), int(center_jax.shape[0])),
         dtype=center_jax.dtype,
     )
-    def run_once(attempt_step_size: float) -> dict[str, Any]:
-        compiled_sampler = jax.jit(
-            lambda run_key, position: static_hmc_sample(
-                log_posterior_unconstrained,
-                position,
-                run_key,
-                num_warmup=int(warmup),
-                num_samples=int(samples),
-                step_size=float(attempt_step_size),
-                num_leapfrog_steps=int(leapfrog_steps),
-                target_accept_prob=float(target_accept_prob),
-                adapt_step_size=bool(adapt_step_size),
-            )
+    compiled_sampler = jax.jit(
+        lambda run_key, position, attempt_step_size: static_hmc_sample(
+            log_posterior_unconstrained,
+            position,
+            run_key,
+            num_warmup=int(warmup),
+            num_samples=int(samples),
+            step_size=attempt_step_size,
+            num_leapfrog_steps=int(leapfrog_steps),
+            target_accept_prob=float(target_accept_prob),
+            adapt_step_size=bool(adapt_step_size),
         )
+    )
+
+    def run_once(attempt_step_size: float) -> dict[str, Any]:
+        step_size_array = jnp.asarray(attempt_step_size, dtype=center_jax.dtype)
         started = time.perf_counter()
-        result = compiled_sampler(sample_key, initial_position)
+        result = compiled_sampler(sample_key, initial_position, step_size_array)
         _block_until_ready_tree(result)
         elapsed = time.perf_counter() - started
         constrained_samples = unconstrained_to_bounded(result.samples, lower_jax, upper_jax)
@@ -743,8 +758,8 @@ def run_static_hmc_on_bounded_surrogate_log_density(
     attempt_summaries: list[dict[str, Any]] = []
     selected_attempt = 0
     selected_summary: dict[str, Any] | None = None
+    attempt_step_size = requested_step_size
     for attempt in range(retries + 1):
-        attempt_step_size = requested_step_size * (retry_factor**attempt)
         attempt_summary = run_once(attempt_step_size)
         attempt_summary["attempt"] = int(attempt)
         attempt_summary["attempt_step_size"] = float(attempt_step_size)
@@ -752,8 +767,18 @@ def run_static_hmc_on_bounded_surrogate_log_density(
         selected_attempt = attempt
         selected_summary = attempt_summary
         accepted_share = attempt_summary.get("accepted_share")
-        if accepted_share is None or float(accepted_share) >= min_accept:
+        if accepted_share is None:
             break
+        accepted_float = float(accepted_share)
+        if accepted_float < min_accept and attempt < retries:
+            attempt_summary["retry_reason"] = "low_acceptance"
+            attempt_step_size *= retry_factor
+            continue
+        if max_accept is not None and accepted_float > max_accept and attempt < retries:
+            attempt_summary["retry_reason"] = "high_acceptance"
+            attempt_step_size *= growth_factor
+            continue
+        break
 
     assert selected_summary is not None
     selected_constrained_samples = selected_summary.get("_constrained_samples")
@@ -782,11 +807,14 @@ def run_static_hmc_on_bounded_surrogate_log_density(
             "retry_count": int(selected_attempt),
             "retry_max_retries": retries,
             "retry_step_size_factor": retry_factor,
+            "retry_step_size_growth_factor": growth_factor,
             "retry_min_accepted_share": min_accept,
+            "retry_max_accepted_share": max_accept,
             "retry_history": [
                 {
                     "attempt": int(item["attempt"]),
                     "attempt_step_size": float(item["attempt_step_size"]),
+                    "retry_reason": item.get("retry_reason"),
                     "elapsed_s": float(item["elapsed_s"]),
                     "accepted_share": item.get("accepted_share"),
                     "accept_prob_mean": item.get("accept_prob_mean"),
@@ -848,8 +876,10 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
     initial_jitter: float,
     seed: int,
     min_accepted_share: float = 0.0,
+    max_accepted_share: float | None = None,
     max_retries: int = 0,
     retry_step_size_factor: float = 0.25,
+    retry_step_size_growth_factor: float = 2.0,
     draws_output: str | Path | None = None,
     draws_metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -884,8 +914,10 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
             initial_jitter=initial_jitter,
             seed=seed,
             min_accepted_share=min_accepted_share,
+            max_accepted_share=max_accepted_share,
             max_retries=max_retries,
             retry_step_size_factor=retry_step_size_factor,
+            retry_step_size_growth_factor=retry_step_size_growth_factor,
             draws_output=draws_output,
             draws_metadata={
                 "chain_batched": False,
@@ -893,6 +925,105 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
                 **dict(draws_metadata or {}),
             },
         )
+
+    min_accept = float(min_accepted_share)
+    if not 0.0 <= min_accept <= 1.0:
+        raise ValueError(f"min_accepted_share must be in [0, 1], got {min_accepted_share}.")
+    max_accept = None if max_accepted_share is None else float(max_accepted_share)
+    if max_accept is not None and not 0.0 <= max_accept <= 1.0:
+        raise ValueError(f"max_accepted_share must be in [0, 1], got {max_accepted_share}.")
+    if max_accept is not None and max_accept < min_accept:
+        raise ValueError("max_accepted_share must be greater than or equal to min_accepted_share.")
+    retries = int(max_retries)
+    if retries < 0:
+        raise ValueError(f"max_retries must be nonnegative, got {max_retries}.")
+    retry_factor = float(retry_step_size_factor)
+    if not 0.0 < retry_factor < 1.0:
+        raise ValueError(f"retry_step_size_factor must be in (0, 1), got {retry_step_size_factor}.")
+    growth_factor = float(retry_step_size_growth_factor)
+    if growth_factor <= 1.0:
+        raise ValueError(
+            "retry_step_size_growth_factor must be greater than 1, "
+            f"got {retry_step_size_growth_factor}."
+        )
+    if warmup < 0:
+        raise ValueError(f"warmup must be nonnegative, got {warmup}.")
+    if samples < 1:
+        raise ValueError(f"samples must be positive, got {samples}.")
+    if leapfrog_steps < 1:
+        raise ValueError(f"leapfrog_steps must be positive, got {leapfrog_steps}.")
+    if step_size <= 0.0:
+        raise ValueError(f"step_size must be positive, got {step_size}.")
+
+    center_jax = jnp.asarray(center, dtype=jnp.float64)
+    lower_jax = jnp.asarray(lower, dtype=jnp.float64)
+    upper_jax = jnp.asarray(upper, dtype=jnp.float64)
+    if center_jax.ndim != 1:
+        raise ValueError("center must be a one-dimensional parameter vector.")
+    if lower_jax.shape != center_jax.shape or upper_jax.shape != center_jax.shape:
+        raise ValueError("lower, upper, and center must have the same shape.")
+    if center_jax.shape[0] != len(parameter_names):
+        raise ValueError("parameter_names length must match center length.")
+    prior_log_const = -jnp.sum(jnp.log(upper_jax - lower_jax))
+    initial_center = bounded_to_unconstrained(center_jax, lower_jax, upper_jax)
+
+    def log_posterior_unconstrained(unconstrained: jax.Array) -> jax.Array:
+        theta_local = unconstrained_to_bounded(unconstrained, lower_jax, upper_jax)
+        return (
+            log_density_fn(theta_local)
+            + prior_log_const
+            + bounded_log_abs_det_jacobian(unconstrained, lower_jax, upper_jax)
+        )
+
+    sampler_cache: dict[int, Any] = {}
+
+    def compiled_sampler_for(batch_chains: int) -> Any:
+        batch_chains = int(batch_chains)
+        if batch_chains not in sampler_cache:
+            sampler_cache[batch_chains] = jax.jit(
+                lambda run_key, position, attempt_step_size: static_hmc_sample(
+                    log_posterior_unconstrained,
+                    position,
+                    run_key,
+                    num_warmup=int(warmup),
+                    num_samples=int(samples),
+                    step_size=attempt_step_size,
+                    num_leapfrog_steps=int(leapfrog_steps),
+                    target_accept_prob=float(target_accept_prob),
+                    adapt_step_size=bool(adapt_step_size),
+                )
+            )
+        return sampler_cache[batch_chains]
+
+    def run_batch_attempt(
+        *,
+        batch_seed: int,
+        batch_chains: int,
+        attempt_step_size: float,
+    ) -> dict[str, Any]:
+        key = jax.random.PRNGKey(int(batch_seed))
+        init_key, sample_key = jax.random.split(key)
+        initial_position = initial_center[None, :] + float(initial_jitter) * jax.random.normal(
+            init_key,
+            shape=(int(batch_chains), int(center_jax.shape[0])),
+            dtype=center_jax.dtype,
+        )
+        sampler = compiled_sampler_for(int(batch_chains))
+        step_size_array = jnp.asarray(attempt_step_size, dtype=center_jax.dtype)
+        started = time.perf_counter()
+        result = sampler(sample_key, initial_position, step_size_array)
+        _block_until_ready_tree(result)
+        elapsed = time.perf_counter() - started
+        constrained_samples = unconstrained_to_bounded(result.samples, lower_jax, upper_jax)
+        _block_until_ready_tree(constrained_samples)
+        summary_once = _summarize_static_hmc_result(
+            result=result,
+            constrained_samples=constrained_samples,
+            parameter_names=parameter_names,
+            elapsed_s=elapsed,
+        )
+        summary_once["_constrained_samples"] = constrained_samples
+        return summary_once
 
     started = time.perf_counter()
     batch_summaries: list[dict[str, Any]] = []
@@ -902,33 +1033,75 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
     while chain_start < total_chains:
         current_chains = min(batch_size, total_chains - chain_start)
         batch_seed = int(seed) + 1_000_003 * batch_index
-        batch_result = run_static_hmc_on_bounded_surrogate_log_density(
-            log_density_fn=log_density_fn,
-            center=center,
-            parameter_names=parameter_names,
-            lower=lower,
-            upper=upper,
-            chains=current_chains,
-            warmup=warmup,
-            samples=samples,
-            leapfrog_steps=leapfrog_steps,
-            step_size=step_size,
-            target_accept_prob=target_accept_prob,
-            adapt_step_size=adapt_step_size,
-            initial_jitter=initial_jitter,
-            seed=batch_seed,
-            min_accepted_share=min_accepted_share,
-            max_retries=max_retries,
-            retry_step_size_factor=retry_step_size_factor,
-            draws_output=None,
-            draws_metadata=None,
-            return_constrained_samples=True,
+        attempt_summaries: list[dict[str, Any]] = []
+        selected_attempt = 0
+        selected_batch_result: dict[str, Any] | None = None
+        attempt_step_size = float(step_size)
+        for attempt in range(retries + 1):
+            attempt_summary = run_batch_attempt(
+                batch_seed=batch_seed,
+                batch_chains=current_chains,
+                attempt_step_size=attempt_step_size,
+            )
+            attempt_summary["attempt"] = int(attempt)
+            attempt_summary["attempt_step_size"] = float(attempt_step_size)
+            attempt_summaries.append(attempt_summary)
+            selected_attempt = attempt
+            selected_batch_result = attempt_summary
+            accepted_share = attempt_summary.get("accepted_share")
+            if accepted_share is None:
+                break
+            accepted_float = float(accepted_share)
+            if accepted_float < min_accept and attempt < retries:
+                attempt_summary["retry_reason"] = "low_acceptance"
+                attempt_step_size *= retry_factor
+                continue
+            if max_accept is not None and accepted_float > max_accept and attempt < retries:
+                attempt_summary["retry_reason"] = "high_acceptance"
+                attempt_step_size *= growth_factor
+                continue
+            break
+
+        assert selected_batch_result is not None
+        constrained = np.asarray(
+            selected_batch_result.pop("_constrained_samples"),
+            dtype=np.float64,
         )
-        constrained = np.asarray(batch_result.pop("_constrained_samples"), dtype=np.float64)
         constrained_batches.append(constrained)
+        selected_batch_result.update(
+            {
+                "status": "ok",
+                "kind": "fixed_rom_surrogate_static_hmc",
+                "initial_step_size": float(selected_batch_result["attempt_step_size"]),
+                "requested_initial_step_size": float(step_size),
+                "target_accept_prob": float(target_accept_prob),
+                "adapt_step_size": bool(adapt_step_size),
+                "initial_jitter": float(initial_jitter),
+                "retry_attempt": int(selected_attempt),
+                "retry_count": int(selected_attempt),
+                "retry_max_retries": retries,
+                "retry_step_size_factor": retry_factor,
+                "retry_step_size_growth_factor": growth_factor,
+                "retry_min_accepted_share": min_accept,
+                "retry_max_accepted_share": max_accept,
+                "retry_history": [
+                    {
+                        "attempt": int(item["attempt"]),
+                        "attempt_step_size": float(item["attempt_step_size"]),
+                        "retry_reason": item.get("retry_reason"),
+                        "elapsed_s": float(item["elapsed_s"]),
+                        "accepted_share": item.get("accepted_share"),
+                        "accept_prob_mean": item.get("accept_prob_mean"),
+                        "draws_per_second": item.get("draws_per_second"),
+                        "final_step_size": item.get("final_step_size"),
+                    }
+                    for item in attempt_summaries
+                ],
+            }
+        )
         compact = {
             key: value
-            for key, value in batch_result.items()
+            for key, value in selected_batch_result.items()
             if key
             not in {
                 "parameter_summary",
@@ -1014,6 +1187,8 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
             "chain_batch_size": batch_size,
             "chain_batch_count": len(batch_summaries),
             "chain_batched": True,
+            "compiled_chain_batch_sizes": [int(size) for size in sorted(sampler_cache)],
+            "compile_reuse": True,
             "warmup": int(warmup),
             "samples": int(samples),
             "leapfrog_steps": int(leapfrog_steps),
@@ -1028,7 +1203,9 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
             "retry_count_max": int(max((item.get("retry_count", 0) or 0) for item in batch_summaries)),
             "retry_max_retries": int(max_retries),
             "retry_step_size_factor": float(retry_step_size_factor),
+            "retry_step_size_growth_factor": float(retry_step_size_growth_factor),
             "retry_min_accepted_share": float(min_accepted_share),
+            "retry_max_accepted_share": None if max_accepted_share is None else float(max_accepted_share),
             "batch_summaries": batch_summaries,
             "backend": jax.default_backend(),
             "caveat": (
@@ -4344,8 +4521,12 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                         "initial_jitter": float(args.hlt_surrogate_hmc_initial_jitter),
                         "seed": int(args.hlt_surrogate_hmc_seed),
                         "min_accepted_share": float(args.hlt_surrogate_hmc_min_accepted_share),
+                        "max_accepted_share": args.hlt_surrogate_hmc_max_accepted_share,
                         "max_retries": int(args.hlt_surrogate_hmc_max_retries),
                         "retry_step_size_factor": float(args.hlt_surrogate_hmc_retry_step_size_factor),
+                        "retry_step_size_growth_factor": float(
+                            args.hlt_surrogate_hmc_retry_step_size_growth_factor
+                        ),
                         "draws_output": args.hlt_surrogate_hmc_draws_output,
                         "draws_metadata": {
                             "profile_output": None if args.output is None else str(args.output),
@@ -5119,16 +5300,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Automatically retry with a smaller initial step size if HMC acceptance is below this share.",
     )
     parser.add_argument(
+        "--hlt-surrogate-hmc-max-accepted-share",
+        type=float,
+        default=None,
+        help="Automatically retry with a larger initial step size if HMC acceptance is above this share.",
+    )
+    parser.add_argument(
         "--hlt-surrogate-hmc-max-retries",
         type=int,
         default=3,
-        help="Maximum number of smaller-step HMC retries after a low-acceptance run.",
+        help="Maximum number of HMC retries after low- or high-acceptance pilot runs.",
     )
     parser.add_argument(
         "--hlt-surrogate-hmc-retry-step-size-factor",
         type=float,
         default=0.25,
         help="Multiplicative initial-step-size shrinkage applied on each HMC retry.",
+    )
+    parser.add_argument(
+        "--hlt-surrogate-hmc-retry-step-size-growth-factor",
+        type=float,
+        default=2.0,
+        help="Multiplicative initial-step-size growth applied on high-acceptance HMC retries.",
     )
     parser.add_argument(
         "--hlt-surrogate-hmc-draws-output",

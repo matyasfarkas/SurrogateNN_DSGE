@@ -7,6 +7,7 @@ set -euo pipefail
 #   MODE=smoke bash benchmarks/run_hlt_gpu_estimation.sh
 #   MODE=pilot HLT_THETA_DRAWS=64 HMC_SAMPLES=64 bash benchmarks/run_hlt_gpu_estimation.sh
 #   MODE=estimation_pilot bash benchmarks/run_hlt_gpu_estimation.sh
+#   MODE=first_estimation bash benchmarks/run_hlt_gpu_estimation.sh
 #   MODE=final_nonlinear bash benchmarks/run_hlt_gpu_estimation.sh
 #   MODE=full_hlt bash benchmarks/run_hlt_gpu_estimation.sh
 #   MODE=full bash benchmarks/run_hlt_gpu_estimation.sh
@@ -28,36 +29,6 @@ PYTHON="${PYTHON:-python3}"
 export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export XLA_FLAGS="${XLA_FLAGS:---xla_gpu_enable_command_buffer=''}"
-
-if [[ "${JAX_LOG_DENSITY_GRADIENT:-1}" == "1" ]]; then
-  JAX_LOG_DENSITY_GRADIENT_FLAG="--hlt-jax-log-density-gradient"
-else
-  JAX_LOG_DENSITY_GRADIENT_FLAG="--no-hlt-jax-log-density-gradient"
-fi
-
-if [[ "${JAX_LOG_DENSITY_SMOKE:-1}" == "1" ]]; then
-  JAX_LOG_DENSITY_SMOKE_FLAG="--hlt-jax-log-density-smoke"
-else
-  JAX_LOG_DENSITY_SMOKE_FLAG="--no-hlt-jax-log-density-smoke"
-fi
-
-if [[ "${DIFFERENTIATE_SHOCKS:-0}" == "1" ]]; then
-  DIFFERENTIATE_SHOCKS_FLAG="--hlt-jax-differentiate-shocks"
-else
-  DIFFERENTIATE_SHOCKS_FLAG="--no-hlt-jax-differentiate-shocks"
-fi
-
-if [[ "${SEP_LINE_SEARCH:-1}" == "1" ]]; then
-  SEP_LINE_SEARCH_FLAG="--sep-line-search"
-else
-  SEP_LINE_SEARCH_FLAG="--no-sep-line-search"
-fi
-
-if [[ "${VERBOSE_PROGRESS:-0}" == "1" ]]; then
-  VERBOSE_PROGRESS_FLAG="--verbose-progress"
-else
-  VERBOSE_PROGRESS_FLAG="--no-verbose-progress"
-fi
 
 case "$MODE" in
   smoke)
@@ -158,6 +129,72 @@ case "$MODE" in
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.0005}"
     HMC_MAX_RETRIES="${HMC_MAX_RETRIES:-4}"
     HMC_RETRY_STEP_SIZE_FACTOR="${HMC_RETRY_STEP_SIZE_FACTOR:-0.25}"
+    ;;
+  first_estimation)
+    # First full nonlinear-estimation run that is meant to finish on current
+    # GPUs. It uses the trained SEP/ResNN likelihood with fixed reference ROM1
+    # matrices inside HMC and keeps expensive Schur/SS verification outside the
+    # HMC transition. This is the efficient path until full-JAX Schur/SS
+    # differentiation is replaced by a custom implicit derivative.
+    DEFAULT_HLT_TARGET_BUILDER="${DEFAULT_HLT_TARGET_BUILDER:-batched-sep}"
+    DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE="${DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE:-16}"
+    HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-phase1_18params_narrow}"
+    HLT_THETA_DESIGN="${HLT_THETA_DESIGN:-prior}"
+    HLT_THETA_DESIGN_SET="${HLT_THETA_DESIGN_SET:-phase1_18params_narrow}"
+    HLT_THETA_INCLUDE_REFERENCE="${HLT_THETA_INCLUDE_REFERENCE:-1}"
+    HLT_DROP_RUNTIME_FAILURES="${HLT_DROP_RUNTIME_FAILURES:-1}"
+    HLT_MIN_RUNTIME_SUCCESSFUL_THETA="${HLT_MIN_RUNTIME_SUCCESSFUL_THETA:-64}"
+    HLT_THETA_DRAWS="${HLT_THETA_DRAWS:-192}"
+    HLT_PERIODS="${HLT_PERIODS:-4}"
+    HLT_SHOCK_SCALE="${HLT_SHOCK_SCALE:-0.05}"
+    HLT_PARAMETER_PERTURBATION="${HLT_PARAMETER_PERTURBATION:-0}"
+    HLT_TARGET_MIN_STABLE_PERIODS="${HLT_TARGET_MIN_STABLE_PERIODS:--1}"
+    HLT_REQUIRE_FULL_TARGET_SUCCESS="${HLT_REQUIRE_FULL_TARGET_SUCCESS:-1}"
+    HLT_MIN_FULL_SUCCESS_SHARE="${HLT_MIN_FULL_SUCCESS_SHARE:-1.0}"
+    HLT_MIN_ACCEPTED_SAMPLES="${HLT_MIN_ACCEPTED_SAMPLES:-$((HLT_MIN_RUNTIME_SUCCESSFUL_THETA * HLT_PERIODS))}"
+    HLT_MIN_VALIDATION_IMPROVEMENT_MEAN="${HLT_MIN_VALIDATION_IMPROVEMENT_MEAN:-0.10}"
+    HLT_REQUIRE_JAX_PARITY="${HLT_REQUIRE_JAX_PARITY:-0}"
+    HLT_REQUIRE_HMC="${HLT_REQUIRE_HMC:-1}"
+    HLT_MAX_HMC_ACCEPTED_SHARE="${HLT_MAX_HMC_ACCEPTED_SHARE:-1.0}"
+    HLT_REQUIRE_SOLVED_STEADY_STATE="${HLT_REQUIRE_SOLVED_STEADY_STATE:-1}"
+    FAIL_ON_QUALITY_GATE="${FAIL_ON_QUALITY_GATE:-1}"
+    HLT_STEADY_STATE_MODE="${HLT_STEADY_STATE_MODE:-solve-or-reference}"
+    HLT_STEADY_STATE_MAX_ITER="${HLT_STEADY_STATE_MAX_ITER:-200}"
+    LIKELIHOOD_RUNTIME_MODE="${LIKELIHOOD_RUNTIME_MODE:-fixed-reference}"
+    LIKELIHOOD_QME_ALGORITHM="${LIKELIHOOD_QME_ALGORITHM:-schur_gpu}"
+    LIKELIHOOD_STATIC_ROWS_MODE="${LIKELIHOOD_STATIC_ROWS_MODE:-reference}"
+    JAX_LOG_DENSITY_SMOKE="${JAX_LOG_DENSITY_SMOKE:-0}"
+    JAX_LOG_DENSITY_GRADIENT="${JAX_LOG_DENSITY_GRADIENT:-0}"
+    JAX_LOG_DENSITY_REPEAT_EVALS="${JAX_LOG_DENSITY_REPEAT_EVALS:-0}"
+    JAX_LOG_DENSITY_BATCH_SIZE="${JAX_LOG_DENSITY_BATCH_SIZE:-0}"
+    JAX_LOG_DENSITY_BATCH_REPEAT_EVALS="${JAX_LOG_DENSITY_BATCH_REPEAT_EVALS:-0}"
+    ONLY_FULL_SUCCESS="${ONLY_FULL_SUCCESS:-1}"
+    SEP_PERIODS="${SEP_PERIODS:-4}"
+    SEP_ORDER="${SEP_ORDER:-1}"
+    SEP_NNODES="${SEP_NNODES:-3}"
+    SEP_MAX_ITER="${SEP_MAX_ITER:-20}"
+    SEP_ACCEPT_TOL="${SEP_ACCEPT_TOL:-1e-4}"
+    SEP_LINEAR_SOLVER="${SEP_LINEAR_SOLVER:-qr}"
+    EPOCHS="${EPOCHS:-300}"
+    HIDDEN="${HIDDEN:-192}"
+    BLOCKS="${BLOCKS:-4}"
+    TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-2048}"
+    TRAIN_DTYPE="${TRAIN_DTYPE:-float32}"
+    VALIDATION_FRACTION="${VALIDATION_FRACTION:-0.1}"
+    LIKELIHOOD_PERIODS="${LIKELIHOOD_PERIODS:-80}"
+    HMC_WARMUP="${HMC_WARMUP:-500}"
+    HMC_SAMPLES="${HMC_SAMPLES:-1000}"
+    HMC_CHAINS="${HMC_CHAINS:-64}"
+    HMC_CHAIN_BATCH_SIZE="${HMC_CHAIN_BATCH_SIZE:-8}"
+    HMC_LEAPFROG_STEPS="${HMC_LEAPFROG_STEPS:-6}"
+    HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.01}"
+    # Leave high-acceptance growth retries opt-in for full runs because a retry
+    # repeats the full HMC job. Use HMC_MAX_ACCEPTED_SHARE=0.95 in a short
+    # tuning pilot, then pass the selected HMC_STEP_SIZE into the full run.
+    HMC_MAX_ACCEPTED_SHARE="${HMC_MAX_ACCEPTED_SHARE:-}"
+    HMC_MAX_RETRIES="${HMC_MAX_RETRIES:-4}"
+    HMC_RETRY_STEP_SIZE_FACTOR="${HMC_RETRY_STEP_SIZE_FACTOR:-0.5}"
+    HMC_RETRY_STEP_SIZE_GROWTH_FACTOR="${HMC_RETRY_STEP_SIZE_GROWTH_FACTOR:-2.0}"
     ;;
   final_nonlinear)
     # Correctness-first HLT nonlinear estimation pipeline. This mode is meant
@@ -303,10 +340,40 @@ case "$MODE" in
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.003}"
     ;;
   *)
-    echo "Unknown MODE=$MODE. Use smoke, calibration, pilot, estimation_pilot, final_nonlinear, full_hlt, or full." >&2
+    echo "Unknown MODE=$MODE. Use smoke, calibration, pilot, estimation_pilot, first_estimation, final_nonlinear, full_hlt, or full." >&2
     exit 2
     ;;
 esac
+
+if [[ "${JAX_LOG_DENSITY_GRADIENT:-1}" == "1" ]]; then
+  JAX_LOG_DENSITY_GRADIENT_FLAG="--hlt-jax-log-density-gradient"
+else
+  JAX_LOG_DENSITY_GRADIENT_FLAG="--no-hlt-jax-log-density-gradient"
+fi
+
+if [[ "${JAX_LOG_DENSITY_SMOKE:-1}" == "1" ]]; then
+  JAX_LOG_DENSITY_SMOKE_FLAG="--hlt-jax-log-density-smoke"
+else
+  JAX_LOG_DENSITY_SMOKE_FLAG="--no-hlt-jax-log-density-smoke"
+fi
+
+if [[ "${DIFFERENTIATE_SHOCKS:-0}" == "1" ]]; then
+  DIFFERENTIATE_SHOCKS_FLAG="--hlt-jax-differentiate-shocks"
+else
+  DIFFERENTIATE_SHOCKS_FLAG="--no-hlt-jax-differentiate-shocks"
+fi
+
+if [[ "${SEP_LINE_SEARCH:-1}" == "1" ]]; then
+  SEP_LINE_SEARCH_FLAG="--sep-line-search"
+else
+  SEP_LINE_SEARCH_FLAG="--no-sep-line-search"
+fi
+
+if [[ "${VERBOSE_PROGRESS:-0}" == "1" ]]; then
+  VERBOSE_PROGRESS_FLAG="--verbose-progress"
+else
+  VERBOSE_PROGRESS_FLAG="--no-verbose-progress"
+fi
 
 HLT_TARGET_BUILDER_EFFECTIVE="${HLT_TARGET_BUILDER:-$DEFAULT_HLT_TARGET_BUILDER}"
 if [[ -z "${HLT_SEP_BATCH_CHUNK_SIZE:-}" ]]; then
@@ -329,6 +396,7 @@ POSTERIOR_COMPARISON_PATH="${POSTERIOR_COMPARISON_PATH:-$RESULT_ROOT/hlt_${MODE}
 POSTERIOR_COMPARISON_CSV_PATH="${POSTERIOR_COMPARISON_CSV_PATH:-$RESULT_ROOT/hlt_${MODE}_posterior_comparison.csv}"
 
 OPTIONAL_FLAGS=()
+HMC_OPTIONAL_FLAGS=()
 if [[ "${ONLY_FULL_SUCCESS:-0}" == "1" ]]; then
   OPTIONAL_FLAGS+=(--only-full-success)
 fi
@@ -391,6 +459,9 @@ fi
 if [[ -n "${HLT_MAX_HMC_ACCEPTED_SHARE:-}" ]]; then
   OPTIONAL_FLAGS+=(--hlt-max-hmc-accepted-share "$HLT_MAX_HMC_ACCEPTED_SHARE")
 fi
+if [[ -n "${HMC_MAX_ACCEPTED_SHARE:-}" ]]; then
+  HMC_OPTIONAL_FLAGS+=(--hlt-surrogate-hmc-max-accepted-share "$HMC_MAX_ACCEPTED_SHARE")
+fi
 
 mkdir -p "$RESULT_ROOT"
 
@@ -449,14 +520,18 @@ LIKELIHOOD_RUNTIME_MODE=${LIKELIHOOD_RUNTIME_MODE:-fixed-reference}
 LIKELIHOOD_QME_ALGORITHM=${LIKELIHOOD_QME_ALGORITHM:-schur}
 LIKELIHOOD_STATIC_ROWS_MODE=${LIKELIHOOD_STATIC_ROWS_MODE:-reference}
 JAX_LOG_DENSITY_REPEAT_EVALS=${JAX_LOG_DENSITY_REPEAT_EVALS:-0}
+JAX_LOG_DENSITY_SMOKE=${JAX_LOG_DENSITY_SMOKE:-1}
 JAX_LOG_DENSITY_BATCH_SIZE=${JAX_LOG_DENSITY_BATCH_SIZE:-0}
 JAX_LOG_DENSITY_BATCH_REPEAT_EVALS=${JAX_LOG_DENSITY_BATCH_REPEAT_EVALS:-0}
 HMC_WARMUP=$HMC_WARMUP
 HMC_SAMPLES=$HMC_SAMPLES
 HMC_CHAINS=$HMC_CHAINS
+HMC_CHAIN_BATCH_SIZE=${HMC_CHAIN_BATCH_SIZE:-0}
 HMC_LEAPFROG_STEPS=$HMC_LEAPFROG_STEPS
 HMC_STEP_SIZE=$HMC_STEP_SIZE
+HMC_MAX_ACCEPTED_SHARE=${HMC_MAX_ACCEPTED_SHARE:-}
 HMC_MAX_RETRIES=${HMC_MAX_RETRIES:-3}
+HMC_RETRY_STEP_SIZE_GROWTH_FACTOR=${HMC_RETRY_STEP_SIZE_GROWTH_FACTOR:-2.0}
 RUN_ROM1_COMPARISON=${RUN_ROM1_COMPARISON:-0}
 ROM1_HMC_DRAWS_PATH=$ROM1_HMC_DRAWS_PATH
 ROM1_HMC_OUTPUT_PATH=$ROM1_HMC_OUTPUT_PATH
@@ -564,8 +639,10 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --hlt-surrogate-hmc-prior-width-scale "${HMC_PRIOR_WIDTH_SCALE:-0.01}" \
   --hlt-surrogate-hmc-prior-width-floor "${HMC_PRIOR_WIDTH_FLOOR:-1e-4}" \
   --hlt-surrogate-hmc-min-accepted-share "${HMC_MIN_ACCEPTED_SHARE:-0.01}" \
+  "${HMC_OPTIONAL_FLAGS[@]}" \
   --hlt-surrogate-hmc-max-retries "${HMC_MAX_RETRIES:-3}" \
   --hlt-surrogate-hmc-retry-step-size-factor "${HMC_RETRY_STEP_SIZE_FACTOR:-0.25}" \
+  --hlt-surrogate-hmc-retry-step-size-growth-factor "${HMC_RETRY_STEP_SIZE_GROWTH_FACTOR:-2.0}" \
   --hlt-surrogate-hmc-draws-output "$HLT_SURROGATE_HMC_DRAWS_PATH" \
   --hlt-surrogate-hmc-seed "${HMC_SEED:-20260923}" \
   "${OPTIONAL_FLAGS[@]}" \

@@ -33,8 +33,10 @@ def test_stage_sequence_runs_smoke_before_full() -> None:
     assert module.stage_sequence("smoke_then_full") == ("smoke", "full")
     assert module.stage_sequence("smoke_pilot_full") == ("smoke", "pilot", "full")
     assert module.stage_sequence("estimation_pilot") == ("estimation_pilot",)
+    assert module.stage_sequence("first_estimation") == ("first_estimation",)
     assert module.stage_sequence("full_hlt") == ("full_hlt",)
     assert module.stage_sequence("smoke_then_estimation_pilot") == ("smoke", "estimation_pilot")
+    assert module.stage_sequence("smoke_then_first_estimation") == ("smoke", "first_estimation")
     assert module.stage_sequence("smoke_then_final_nonlinear") == ("smoke", "final_nonlinear")
     assert module.stage_sequence("smoke_then_full_hlt") == ("smoke", "full_hlt")
     assert module.stage_sequence("smoke_estimation_pilot_full") == (
@@ -170,6 +172,39 @@ def test_hlt_final_nonlinear_dry_run_enables_correctness_gates(tmp_path: Path) -
     assert lines["JAX_LOG_DENSITY_BATCH_REPEAT_EVALS"] == "0"
     assert lines["TRAIN_DTYPE"] == "float32"
     assert lines["FAIL_ON_QUALITY_GATE"] == "1"
+
+
+def test_hlt_first_estimation_dry_run_uses_fixed_reference_hmc(tmp_path: Path) -> None:
+    script = _ROOT / "benchmarks" / "run_hlt_gpu_estimation.sh"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=_ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "MODE": "first_estimation",
+            "DRY_RUN": "1",
+            "RESULT_ROOT": str(tmp_path),
+        },
+    )
+
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+    assert lines["MODE"] == "first_estimation"
+    assert lines["HLT_PARAMETER_SET"] == "phase1_18params_narrow"
+    assert lines["HLT_THETA_DESIGN"] == "prior"
+    assert lines["HLT_TARGET_BUILDER"] == "batched-sep"
+    assert lines["LIKELIHOOD_RUNTIME_MODE"] == "fixed-reference"
+    assert lines["LIKELIHOOD_QME_ALGORITHM"] == "schur_gpu"
+    assert lines["JAX_LOG_DENSITY_SMOKE"] == "0"
+    assert lines["HLT_REQUIRE_JAX_PARITY"] == "0"
+    assert lines["HMC_CHAINS"] == "64"
+    assert lines["HMC_CHAIN_BATCH_SIZE"] == "8"
+    assert lines["HMC_SAMPLES"] == "1000"
+    assert lines["HMC_STEP_SIZE"] == "0.01"
+    assert lines["HMC_MAX_ACCEPTED_SHARE"] == ""
 
 
 def test_hlt_final_nonlinear_dry_run_can_enable_runtime_preflight_only(tmp_path: Path) -> None:
