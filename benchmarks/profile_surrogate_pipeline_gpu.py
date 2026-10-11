@@ -287,6 +287,31 @@ def _training_namespace_from_bundle(bundle: Any) -> SimpleNamespace:
     )
 
 
+def _target_full_path_success_applicable(target_diagnostics: Mapping[str, Any]) -> bool:
+    """Return whether theta-level full-path success is meaningful for targets."""
+
+    explicit = target_diagnostics.get("theta_full_success_applicable")
+    if explicit is not None:
+        return bool(explicit)
+    builder = str(
+        target_diagnostics.get("builder")
+        or target_diagnostics.get("source_target_builder")
+        or ""
+    ).strip().lower().replace("_", "-")
+    source_builder = str(target_diagnostics.get("source_target_builder") or "").strip().lower().replace("_", "-")
+    if builder in {"grid-batched-sep", "feature-grid-batched-sep"} or source_builder in {
+        "grid-batched-sep",
+        "feature-grid-batched-sep",
+    }:
+        return False
+    if (
+        target_diagnostics.get("training_input") == "BatchedSurrogateRolloutArrays"
+        and target_diagnostics.get("theta_full_success_count") is None
+    ):
+        return False
+    return True
+
+
 def _validate_loaded_hlt_surrogate(
     *,
     frozen: Any,
@@ -3259,6 +3284,8 @@ def _build_grid_batched_hlt_sep_arrays(
         "fallback_samples": 0,
         "fallback_share": 0.0,
         "theta_full_success_count": None,
+        "theta_full_success_applicable": False,
+        "target_success_unit": "independent_grid_point",
         "accepted_by_branching_order": {
             str(int(config.branching_order)): int(diagnostics.get("accepted_samples", 0))
         },
@@ -3746,6 +3773,12 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             ),
             "reused_target_diagnostics": reused_target_diagnostics,
         }
+        target_diagnostics.setdefault(
+            "theta_full_success_applicable",
+            _target_full_path_success_applicable(reused_target_diagnostics),
+        )
+        if not bool(target_diagnostics["theta_full_success_applicable"]):
+            target_diagnostics.setdefault("target_success_unit", "independent_grid_point")
         result = SimpleNamespace(
             training=training,
             dataset_summary=training.metadata.get("dataset_summary", {}),
@@ -3936,6 +3969,12 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 "source_target_builder": checkpoint_target_diagnostics.get("builder"),
                 "checkpoint_array_summary": checkpoint.array_summary,
             }
+            target_diagnostics.setdefault(
+                "theta_full_success_applicable",
+                _target_full_path_success_applicable(checkpoint_target_diagnostics),
+            )
+            if not bool(target_diagnostics["theta_full_success_applicable"]):
+                target_diagnostics.setdefault("target_success_unit", "independent_grid_point")
             target_arrays_checkpoint_reused = True
         else:
             _progress(
@@ -3960,7 +3999,6 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 batch_chunk_size=int(args.hlt_sep_batch_chunk_size),
             )
             target_diagnostics["target_min_stable_periods"] = 1
-            target_diagnostics["effective_validation_fraction"] = 0.0
             target_diagnostics["training_input"] = "BatchedSurrogateRolloutArrays"
         array_summary = summarize_batched_surrogate_arrays(arrays)
         if (
@@ -3990,11 +4028,28 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 metadata=checkpoint_metadata,
             )
             _progress(f"saved HLT target-array checkpoint {target_arrays_checkpoint_saved_path}")
+        validation_fraction = float(args.validation_fraction)
+        split_by_theta = bool(args.split_by_theta)
+        if split_by_theta and validation_fraction > 0.0:
+            valid_mask = np.asarray(arrays.sample_mask, dtype=bool).reshape(-1)
+            theta_ids_for_split = np.asarray(arrays.theta_ids, dtype=np.int64).reshape(-1)
+            if bool(args.only_full_success):
+                theta_success_for_split = np.asarray(arrays.theta_success, dtype=bool).reshape(-1)
+                valid_mask &= theta_success_for_split[theta_ids_for_split]
+            successful_groups = np.unique(theta_ids_for_split[valid_mask]).size
+            if successful_groups < 2:
+                _progress(
+                    "disabling fixed-shape held-out-theta validation because fewer than two theta groups "
+                    f"have positive-weight targets (groups={successful_groups})"
+                )
+                validation_fraction = 0.0
         batched_result = fit_surrogate_pipeline_from_batched_arrays_jax(
             arrays,
             architecture="resnet",
             rom_residual=True,
             only_full_success=bool(args.only_full_success),
+            validation_fraction=validation_fraction,
+            split_by_theta=split_by_theta,
             d_hidden=int(args.hidden),
             n_blocks=int(args.blocks),
             nepoch=int(args.epochs),
@@ -4009,7 +4064,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             bundle_path=batched_result.bundle_path,
         )
         target_diagnostics.setdefault("target_min_stable_periods", 1)
-        target_diagnostics.setdefault("effective_validation_fraction", 0.0)
+        target_diagnostics["effective_validation_fraction"] = float(validation_fraction)
+        target_diagnostics["effective_split_by_theta"] = bool(split_by_theta)
+        target_diagnostics["training_train_size"] = int(batched_result.training.train_size)
+        target_diagnostics["training_val_size"] = int(batched_result.training.val_size)
         target_diagnostics.setdefault("training_input", "BatchedSurrogateRolloutArrays")
     else:
         raise ValueError(
@@ -4581,23 +4639,38 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
 
     quality_issues: list[str] = []
     accepted_samples = int(target_diagnostics.get("accepted_samples", 0) or 0)
-    full_success_count = int(target_diagnostics.get("theta_full_success_count", 0) or 0)
+    full_success_applicable = _target_full_path_success_applicable(target_diagnostics)
+    raw_full_success_count = target_diagnostics.get("theta_full_success_count")
+    full_success_count = None if raw_full_success_count is None else int(raw_full_success_count)
     runtime_prepared_count = int(target_diagnostics.get("runtime_prepared_theta_draws", theta.shape[1]) or 0)
     full_success_share = (
         float(full_success_count / runtime_prepared_count)
-        if runtime_prepared_count > 0
-        else 0.0
+        if full_success_count is not None and runtime_prepared_count > 0
+        else None
     )
-    if bool(args.hlt_require_full_target_success) and full_success_count != runtime_prepared_count:
-        quality_issues.append(
-            "Not all runtime-prepared theta draws generated full SEP paths "
-            f"({full_success_count}/{runtime_prepared_count})."
-        )
-    if float(args.hlt_min_full_success_share) > 0.0 and full_success_share < float(args.hlt_min_full_success_share):
-        quality_issues.append(
-            "Full-path theta share below gate: "
-            f"{full_success_share:.6g} < {float(args.hlt_min_full_success_share):.6g}."
-        )
+    if full_success_applicable:
+        if bool(args.hlt_require_full_target_success):
+            if full_success_count is None:
+                quality_issues.append(
+                    "Full-path target-success gate requested but target diagnostics do not "
+                    "contain theta_full_success_count."
+                )
+            elif full_success_count != runtime_prepared_count:
+                quality_issues.append(
+                    "Not all runtime-prepared theta draws generated full SEP paths "
+                    f"({full_success_count}/{runtime_prepared_count})."
+                )
+        if float(args.hlt_min_full_success_share) > 0.0:
+            if full_success_share is None:
+                quality_issues.append(
+                    "Full-path theta-share gate requested but target diagnostics do not "
+                    "contain theta_full_success_count."
+                )
+            elif full_success_share < float(args.hlt_min_full_success_share):
+                quality_issues.append(
+                    "Full-path theta share below gate: "
+                    f"{full_success_share:.6g} < {float(args.hlt_min_full_success_share):.6g}."
+                )
     if int(args.hlt_min_accepted_samples) > 0 and accepted_samples < int(args.hlt_min_accepted_samples):
         quality_issues.append(
             f"Accepted target samples below gate: {accepted_samples} < {args.hlt_min_accepted_samples}."
@@ -4667,6 +4740,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         "status": "ok" if not quality_issues else "failed",
         "issues": quality_issues,
         "require_full_target_success": bool(args.hlt_require_full_target_success),
+        "full_success_applicable": bool(full_success_applicable),
+        "target_success_unit": target_diagnostics.get("target_success_unit", "theta_path"),
+        "theta_full_success_count": full_success_count,
+        "runtime_prepared_theta_draws": runtime_prepared_count,
         "full_success_share": full_success_share,
         "min_full_success_share": float(args.hlt_min_full_success_share),
         "accepted_samples": accepted_samples,

@@ -614,6 +614,29 @@ def test_parse_args_accepts_surrogate_hmc_draw_export_path() -> None:
     assert args.hlt_surrogate_hmc_draws_output == Path("surrogate_draws.npz")
 
 
+def test_grid_batched_target_success_gate_is_not_theta_path_gate() -> None:
+    mod = _load_profile_module()
+
+    grid_diag = {
+        "builder": "grid_batched_sep",
+        "theta_full_success_count": None,
+        "training_input": "BatchedSurrogateRolloutArrays",
+    }
+    reused_diag = {
+        "builder": "reused_bundle",
+        "source_target_builder": "grid_batched_sep",
+        "theta_full_success_count": None,
+    }
+    sequential_diag = {
+        "builder": "batched_sep",
+        "theta_full_success_count": 3,
+    }
+
+    assert mod._target_full_path_success_applicable(grid_diag) is False
+    assert mod._target_full_path_success_applicable(reused_diag) is False
+    assert mod._target_full_path_success_applicable(sequential_diag) is True
+
+
 def test_static_hmc_on_bounded_surrogate_log_density_tiny_cpu_smoke(tmp_path: Path) -> None:
     mod = _load_profile_module()
     center = mod.jnp.asarray([0.25, 0.75], dtype=mod.jnp.float64)

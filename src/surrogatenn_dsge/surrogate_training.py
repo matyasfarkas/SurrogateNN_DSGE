@@ -262,6 +262,94 @@ def split_surrogate_dataset(
     )
 
 
+def split_batched_surrogate_arrays(
+    arrays: BatchedSurrogateRolloutArrays,
+    *,
+    validation_fraction: float = 0.10,
+    split_by_theta: bool = False,
+    only_full_success: bool = False,
+    seed: int = 1,
+) -> SurrogateTrainValidationSplit:
+    """Split fixed-shape JAX rollout arrays while preserving GPU array shape.
+
+    The split is represented by indices into the fixed arrays. Training can keep
+    the full tensors on device and assign zero weight to held-out or invalid
+    samples, while validation is evaluated on ``val_idx`` after fitting.
+    """
+
+    val_frac = float(validation_fraction)
+    if val_frac < 0.0 or val_frac >= 1.0:
+        raise ValueError(f"validation_fraction must be in [0, 1), got {validation_fraction}.")
+    n_samples_total = int(arrays.X.shape[1])
+    mask = np.array(arrays.sample_mask, dtype=bool, copy=True).reshape(-1)
+    theta_ids = np.asarray(arrays.theta_ids, dtype=np.int64).reshape(-1)
+    if mask.shape[0] != n_samples_total or theta_ids.shape[0] != n_samples_total:
+        raise ValueError("Batched rollout sample_mask/theta_ids length must match the sample count.")
+    if only_full_success:
+        theta_success = np.asarray(arrays.theta_success, dtype=bool).reshape(-1)
+        if theta_success.shape[0] != int(arrays.theta.shape[1]):
+            raise ValueError("Batched rollout theta_success must have one entry per theta draw.")
+        mask &= theta_success[theta_ids]
+    sample_idx = np.flatnonzero(mask).astype(np.int64)
+    if sample_idx.size < 1:
+        raise ValueError("No positive-weight samples remain after applying the batched rollout mask.")
+
+    rng = np.random.default_rng(int(seed))
+    sample_theta_ids = theta_ids[sample_idx]
+    if split_by_theta:
+        groups = np.unique(sample_theta_ids)
+        if val_frac <= 0.0 or sample_idx.size == 1:
+            return SurrogateTrainValidationSplit(
+                train_idx=sample_idx,
+                val_idx=np.zeros((0,), dtype=np.int64),
+                split_by_theta=True,
+                validation_fraction=val_frac,
+                only_full_success=only_full_success,
+                train_theta_ids=groups,
+                val_theta_ids=np.zeros((0,), dtype=np.int64),
+            )
+        if groups.size < 2:
+            raise ValueError("split_by_theta requires at least two theta groups when validation_fraction > 0.")
+        shuffled_groups = rng.permutation(groups)
+        n_val_groups = int(np.rint(val_frac * groups.size))
+        n_val_groups = min(max(n_val_groups, 1), groups.size - 1)
+        val_theta_ids = np.asarray(shuffled_groups[:n_val_groups], dtype=np.int64)
+        train_theta_ids = np.asarray(shuffled_groups[n_val_groups:], dtype=np.int64)
+        val_mask = np.isin(sample_theta_ids, val_theta_ids)
+        train_idx = sample_idx[~val_mask]
+        val_idx = sample_idx[val_mask]
+        if train_idx.size == 0 or val_idx.size == 0:
+            raise ValueError("Theta-group split produced an empty train or validation set.")
+        return SurrogateTrainValidationSplit(
+            train_idx=train_idx,
+            val_idx=val_idx,
+            split_by_theta=True,
+            validation_fraction=val_frac,
+            only_full_success=only_full_success,
+            train_theta_ids=train_theta_ids,
+            val_theta_ids=val_theta_ids,
+        )
+
+    if val_frac <= 0.0 or sample_idx.size == 1:
+        train_idx = sample_idx
+        val_idx = np.zeros((0,), dtype=np.int64)
+    else:
+        perm = rng.permutation(sample_idx)
+        n_train = int(np.floor((1.0 - val_frac) * sample_idx.size))
+        n_train = min(max(n_train, 1), sample_idx.size - 1)
+        train_idx = perm[:n_train]
+        val_idx = perm[n_train:]
+    return SurrogateTrainValidationSplit(
+        train_idx=train_idx,
+        val_idx=val_idx,
+        split_by_theta=False,
+        validation_fraction=val_frac,
+        only_full_success=only_full_success,
+        train_theta_ids=np.unique(theta_ids[train_idx]),
+        val_theta_ids=np.unique(theta_ids[val_idx]) if val_idx.size else np.zeros((0,), dtype=np.int64),
+    )
+
+
 def surrogate_sample_weights_from_residuals(
     sep_residuals: Any,
     *,
@@ -906,8 +994,11 @@ def train_surrogate_from_batched_arrays_jax(
     *,
     architecture: str = "resnet",
     rom_residual: bool = False,
+    calibrate_residual_shrinkage: bool = True,
     output_indices: Optional[Sequence[int] | np.ndarray] = None,
     only_full_success: bool = False,
+    validation_fraction: float = 0.0,
+    split_by_theta: bool = False,
     seed: int = 1,
     sample_weights: Optional[Any] = None,
     d_hidden: int = 128,
@@ -925,10 +1016,9 @@ def train_surrogate_from_batched_arrays_jax(
     """Train directly from fixed-shape JAX rollout arrays.
 
     Failed SEP branches are represented by ``arrays.sample_mask=False`` and are
-    assigned zero weight. This avoids variable-size compaction before training
-    while preserving the same MLP/ResNet trainer and device-placement controls.
-    Validation is intentionally disabled for this fixed-shape path; compact to
-    ``SurrogateDataset`` first when held-out validation diagnostics are needed.
+    assigned zero weight. Held-out validation samples are also assigned zero
+    training weight, so the tensors can stay fixed-shape on the selected JAX
+    device while still producing validation RMSE/improvement diagnostics.
     """
 
     arch = str(architecture).strip().lower()
@@ -948,24 +1038,26 @@ def train_surrogate_from_batched_arrays_jax(
     y_rom = arrays.Y_rom if out_idx is None else jnp.take(arrays.Y_rom, jnp.asarray(out_idx, dtype=jnp.int32), axis=0)
     y_target = y_full - y_rom if rom_residual else y_full
 
-    mask = np.array(arrays.sample_mask, dtype=bool, copy=True).reshape(-1)
     theta_ids = np.asarray(arrays.theta_ids, dtype=np.int64).reshape(-1)
-    if only_full_success:
-        theta_success = np.asarray(arrays.theta_success, dtype=bool).reshape(-1)
-        if theta_success.shape[0] != int(arrays.theta.shape[1]):
-            raise ValueError("Batched rollout theta_success must have one entry per theta draw.")
-        mask &= theta_success[theta_ids]
-    weights = mask.astype(np.float64)
+    split = split_batched_surrogate_arrays(
+        arrays,
+        validation_fraction=validation_fraction,
+        split_by_theta=split_by_theta,
+        only_full_success=only_full_success,
+        seed=seed,
+    )
+    weights = np.zeros((n_samples_total,), dtype=np.float64)
+    weights[split.train_idx] = 1.0
     if sample_weights is not None:
         weights *= _validate_sample_weights(sample_weights, n_samples_total)
     if not np.sum(weights) > 0.0:
-        raise ValueError("No positive-weight samples remain after applying the batched rollout mask.")
+        raise ValueError("No positive-weight samples remain after applying the batched rollout mask/split.")
 
     epochs = int(nepoch) if nepoch is not None else (600 if arch == "resnet" else 400)
     target_device = resolve_jax_device(device)
     training_dtype = normalize_training_dtype(train_dtype)
     effective_batch_size = min(
-        int(batch_size) if batch_size is not None else min(512, max(32, n_samples_total // 20)),
+        int(batch_size) if batch_size is not None else min(512, max(32, split.train_size // 20)),
         n_samples_total,
     )
     training_loop = "full_batch_scan" if effective_batch_size >= n_samples_total else "epoch_scan"
@@ -1007,23 +1099,39 @@ def train_surrogate_from_batched_arrays_jax(
             train_dtype=training_dtype,
         )
 
-    train_idx = np.flatnonzero(weights > 0.0).astype(np.int64)
-    split = SurrogateTrainValidationSplit(
-        train_idx=train_idx,
-        val_idx=np.zeros((0,), dtype=np.int64),
-        split_by_theta=False,
-        validation_fraction=0.0,
-        only_full_success=only_full_success,
-        train_theta_ids=np.unique(theta_ids[train_idx]),
-        val_theta_ids=np.zeros((0,), dtype=np.int64),
-    )
+    validation: Optional[SurrogateValidationResult] = None
+    validation_rmse: Optional[np.ndarray] = None
+    validation_rmse_residual: Optional[np.ndarray] = None
+    validation_rmse_rom: Optional[np.ndarray] = None
+    validation_improvement: Optional[np.ndarray] = None
+    residual_shrinkage: Optional[np.ndarray] = None
+    if split.val_idx.size:
+        X_val = arrays.X[:, split.val_idx]
+        Y_val_target = np.asarray(y_target[:, split.val_idx], dtype=np.float64)
+        Y_pred_target = np.asarray(predict_frozen_batch(frozen, X_val), dtype=np.float64)
+        if rom_residual and bool(calibrate_residual_shrinkage):
+            residual_shrinkage = residual_shrinkage_factors(Y_pred_target, Y_val_target)
+            frozen = scale_frozen_output(frozen, residual_shrinkage)
+            Y_pred_target = np.asarray(predict_frozen_batch(frozen, X_val), dtype=np.float64)
+        validation_rmse_residual = _rmse_per_dim(Y_pred_target - Y_val_target)
+        if rom_residual:
+            Y_rom_val = np.asarray(y_rom[:, split.val_idx], dtype=np.float64)
+            Y_full_val = np.asarray(y_full[:, split.val_idx], dtype=np.float64)
+            validation_rmse = _rmse_per_dim(Y_pred_target + Y_rom_val - Y_full_val)
+            validation_rmse_rom = _rmse_per_dim(Y_rom_val - Y_full_val)
+            validation_improvement = _improvement_vs_baseline(validation_rmse, validation_rmse_rom)
+            validation = validate_surrogate(frozen, X_val, Y_val_target, Y_rom=np.zeros_like(Y_val_target))
+        else:
+            validation_rmse = validation_rmse_residual
+            validation = validate_surrogate(frozen, X_val, Y_val_target)
+
     metadata: dict[str, object] = {
         "architecture": arch,
         "target_mode": "batched_jax",
         "rom_residual": bool(rom_residual),
-        "validation_split": "disabled for fixed-shape batched arrays",
+        "validation_split": "held-out parameter vectors" if split_by_theta else "random samples",
         "train_size": split.train_size,
-        "val_size": 0,
+        "val_size": split.val_size,
         "n_samples_total": n_samples_total,
         "masked_sample_count": int(np.count_nonzero(weights <= 0.0)),
         "jax_backend": jax.default_backend(),
@@ -1033,6 +1141,8 @@ def train_surrogate_from_batched_arrays_jax(
         "training_loop": training_loop,
         "training_batch_size": int(effective_batch_size),
         "output_indices": None if out_idx is None else out_idx.copy(),
+        "residual_shrinkage_calibrated": bool(rom_residual and residual_shrinkage is not None),
+        "residual_shrinkage": None if residual_shrinkage is None else residual_shrinkage.copy(),
     }
     if arch == "resnet":
         metadata["d_theta"] = int(arrays.theta.shape[0])
@@ -1042,11 +1152,11 @@ def train_surrogate_from_batched_arrays_jax(
         frozen=frozen,
         architecture=arch,
         split=split,
-        validation=None,
-        validation_rmse=None,
-        validation_rmse_residual=None,
-        validation_rmse_rom=None,
-        validation_improvement=None,
+        validation=validation,
+        validation_rmse=validation_rmse,
+        validation_rmse_residual=validation_rmse_residual,
+        validation_rmse_rom=validation_rmse_rom,
+        validation_improvement=validation_improvement,
         target_is_residual=bool(rom_residual),
         output_indices=out_idx,
         metadata=metadata,
@@ -1058,8 +1168,11 @@ def fit_surrogate_pipeline_from_batched_arrays_jax(
     *,
     architecture: str = "resnet",
     rom_residual: bool = True,
+    calibrate_residual_shrinkage: bool = True,
     output_indices: Optional[Sequence[int] | np.ndarray] = None,
     only_full_success: bool = False,
+    validation_fraction: float = 0.0,
+    split_by_theta: bool = False,
     train_seed: int = 1,
     sample_weights: Optional[Any] = None,
     d_hidden: int = 128,
@@ -1083,8 +1196,11 @@ def fit_surrogate_pipeline_from_batched_arrays_jax(
         arrays,
         architecture=architecture,
         rom_residual=rom_residual,
+        calibrate_residual_shrinkage=calibrate_residual_shrinkage,
         output_indices=output_indices,
         only_full_success=only_full_success,
+        validation_fraction=validation_fraction,
+        split_by_theta=split_by_theta,
         seed=train_seed,
         sample_weights=sample_weights,
         d_hidden=d_hidden,
@@ -1130,8 +1246,11 @@ def fit_surrogate_pipeline_from_batched_sep_jax(
     require_accepted: bool = True,
     architecture: str = "resnet",
     rom_residual: bool = True,
+    calibrate_residual_shrinkage: bool = True,
     output_indices: Optional[Sequence[int] | np.ndarray] = None,
     only_full_success: bool = False,
+    validation_fraction: float = 0.0,
+    split_by_theta: bool = False,
     train_seed: int = 1,
     sample_weights: Optional[Any] = None,
     d_hidden: int = 128,
@@ -1171,8 +1290,11 @@ def fit_surrogate_pipeline_from_batched_sep_jax(
         arrays,
         architecture=architecture,
         rom_residual=rom_residual,
+        calibrate_residual_shrinkage=calibrate_residual_shrinkage,
         output_indices=output_indices,
         only_full_success=only_full_success,
+        validation_fraction=validation_fraction,
+        split_by_theta=split_by_theta,
         train_seed=train_seed,
         sample_weights=sample_weights,
         d_hidden=d_hidden,

@@ -491,6 +491,62 @@ def test_parsed_batched_sep_feeds_fixed_shape_surrogate_pipeline() -> None:
     assert np.isfinite(prediction).all()
 
 
+def test_batched_array_training_supports_held_out_validation() -> None:
+    rng = np.random.default_rng(42)
+    n_theta = 4
+    samples_per_theta = 5
+    theta = np.linspace(-0.3, 0.4, n_theta, dtype=np.float64)[None, :]
+    theta_ids = np.repeat(np.arange(n_theta, dtype=np.int64), samples_per_theta)
+    period_ids = np.tile(np.arange(samples_per_theta, dtype=np.int64), n_theta)
+    state_shock = rng.normal(size=(3, theta_ids.size))
+    theta_features = theta[:, theta_ids]
+    X = np.vstack([state_shock, theta_features])
+    Y_rom = np.vstack(
+        [
+            0.20 * state_shock[0] - 0.10 * state_shock[1],
+            -0.30 * state_shock[2],
+        ]
+    )
+    residual = np.vstack(
+        [
+            0.30 * theta_features[0] + 0.05 * state_shock[0],
+            -0.20 * theta_features[0] + 0.03 * state_shock[1],
+        ]
+    )
+    arrays = BatchedSurrogateRolloutArrays(
+        X=jnp.asarray(X, dtype=jnp.float64),
+        Y=jnp.asarray(Y_rom + residual, dtype=jnp.float64),
+        Y_rom=jnp.asarray(Y_rom, dtype=jnp.float64),
+        theta=jnp.asarray(theta, dtype=jnp.float64),
+        theta_ids=jnp.asarray(theta_ids, dtype=jnp.int64),
+        period_ids=jnp.asarray(period_ids, dtype=jnp.int64),
+        sample_mask=jnp.ones((theta_ids.size,), dtype=bool),
+        theta_success=jnp.ones((n_theta,), dtype=bool),
+        theta_stable_periods=jnp.full((n_theta,), samples_per_theta, dtype=jnp.int64),
+    )
+
+    result = train_surrogate_from_batched_arrays_jax(
+        arrays,
+        architecture="mlp",
+        rom_residual=True,
+        validation_fraction=0.25,
+        split_by_theta=True,
+        seed=7,
+        d_hidden=10,
+        d_hidden2=None,
+        nepoch=8,
+        batch_size=8,
+        device="cpu",
+    )
+
+    assert result.train_size > 0
+    assert result.val_size > 0
+    assert result.validation_rmse is not None
+    assert result.validation_rmse_rom is not None
+    assert result.validation_improvement is not None
+    assert result.metadata["validation_split"] == "held-out parameter vectors"
+
+
 def test_save_and_load_surrogate_training_result_bundle_round_trips_predictions(tmp_path) -> None:
     dataset = _supervised_dataset()
     result = train_surrogate_from_dataset(
