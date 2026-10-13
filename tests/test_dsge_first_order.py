@@ -6,6 +6,8 @@ import numpy as np
 
 from surrogatenn_dsge import (
     DSGETimings,
+    analyze_quadratic_matrix_equation_cayley_gpu_jax,
+    analyze_quadratic_matrix_equation_schur,
     kalman_loglikelihood,
     linear_state_space_from_first_order_solution,
     simulate_linear_gaussian_state_space,
@@ -315,6 +317,95 @@ def test_jax_gpu_schur_quadratic_matrix_equation_matches_scipy_schur() -> None:
 
     assert bool(np.asarray(result.converged))
     np.testing.assert_allclose(result.solution, expected.solution, rtol=1e-8, atol=1e-8)
+
+
+def test_cayley_gpu_qz_screen_matches_scipy_ordqz_diagnostics() -> None:
+    timings, a_tilde_plus, a_tilde_zero, a_tilde_minus = _rbc_cme_qme_fixture()
+
+    result = jax.jit(
+        analyze_quadratic_matrix_equation_cayley_gpu_jax,
+        static_argnames=("timings",),
+    )(
+        a_tilde_plus,
+        a_tilde_zero,
+        a_tilde_minus,
+        timings,
+    )
+    expected = analyze_quadratic_matrix_equation_schur(
+        a_tilde_plus,
+        a_tilde_zero,
+        a_tilde_minus,
+        timings,
+    )
+
+    assert bool(np.asarray(result.diagnostics.success))
+    assert int(np.asarray(result.diagnostics.stable_count)) == expected.diagnostics.stable_count
+    assert int(np.asarray(result.diagnostics.expected_stable_count)) == (
+        expected.diagnostics.expected_stable_count
+    )
+    assert int(np.asarray(result.diagnostics.near_unit_count)) == 0
+    assert float(np.asarray(result.diagnostics.spectral_margin)) > 1.0e-3
+    np.testing.assert_allclose(result.solution, expected.solution, rtol=1e-8, atol=1e-8)
+    cayley_magnitudes = np.asarray(result.diagnostics.root_magnitudes, dtype=np.float64)
+    qz_magnitudes = np.abs(np.asarray(expected.diagnostics.companion_roots, dtype=np.complex128))
+    qz_magnitudes = np.where(qz_magnitudes > 1.0e12, np.inf, qz_magnitudes)
+    np.testing.assert_allclose(
+        np.sort(cayley_magnitudes),
+        np.sort(qz_magnitudes),
+        rtol=1e-8,
+        atol=1e-8,
+    )
+
+
+def test_cayley_gpu_qz_screen_avoids_host_callback() -> None:
+    timings, a_tilde_plus, a_tilde_zero, a_tilde_minus = _rbc_cme_qme_fixture()
+
+    jaxpr = str(
+        jax.make_jaxpr(
+            lambda shifted_zero: analyze_quadratic_matrix_equation_cayley_gpu_jax(
+                a_tilde_plus,
+                shifted_zero,
+                a_tilde_minus,
+                timings,
+            ).diagnostics.spectral_margin
+        )(a_tilde_zero)
+    )
+
+    assert "pure_callback" not in jaxpr
+
+
+def test_cayley_gpu_qz_screen_supports_vmap() -> None:
+    timings, a_tilde_plus, a_tilde_zero, a_tilde_minus = _rbc_cme_qme_fixture()
+    shifts = jnp.asarray([0.0, 1.0e-5, -1.0e-5], dtype=jnp.float64)
+
+    def analyze_shifted(shift: jax.Array) -> tuple[jax.Array, jax.Array]:
+        result = analyze_quadratic_matrix_equation_cayley_gpu_jax(
+            a_tilde_plus,
+            a_tilde_zero.at[0, 0].add(shift),
+            a_tilde_minus,
+            timings,
+        )
+        return result.solution, result.diagnostics.spectral_margin
+
+    solutions, margins = jax.jit(jax.vmap(analyze_shifted))(shifts)
+
+    assert solutions.shape == (3,) + a_tilde_plus.shape
+    assert margins.shape == (3,)
+    assert np.all(np.asarray(margins) > 1.0e-3)
+    for idx, shift in enumerate(np.asarray(shifts)):
+        expected = analyze_quadratic_matrix_equation_schur(
+            a_tilde_plus,
+            a_tilde_zero.at[0, 0].add(float(shift)),
+            a_tilde_minus,
+            timings,
+        )
+        assert expected.diagnostics.unique_stable_solution
+        np.testing.assert_allclose(
+            solutions[idx],
+            expected.solution,
+            rtol=1e-8,
+            atol=1e-8,
+        )
 
 
 def test_jax_gpu_schur_quadratic_matrix_equation_avoids_host_callback() -> None:

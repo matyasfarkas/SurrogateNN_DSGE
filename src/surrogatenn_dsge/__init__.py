@@ -81,7 +81,10 @@ from .regime_switching_api import (
 )
 from .dsge import (
     analyze_first_order_dsge_determinacy,
+    analyze_quadratic_matrix_equation_cayley_gpu_jax,
     analyze_quadratic_matrix_equation_schur,
+    CayleyQZDiagnostics,
+    CayleyQZResult,
     DSGETimings,
     FirstOrderDeterminacyResult,
     FirstOrderDSGEResult,
@@ -624,6 +627,9 @@ __all__ = [
     "solve_discrete_sylvester",
     "solve_discrete_sylvester_direct",
     "solve_discrete_sylvester_doubling",
+    "analyze_quadratic_matrix_equation_cayley_gpu_jax",
+    "CayleyQZDiagnostics",
+    "CayleyQZResult",
     "solve_quadratic_matrix_equation_doubling",
     "solve_quadratic_matrix_equation_doubling_jax",
     "solve_quadratic_matrix_equation_schur",

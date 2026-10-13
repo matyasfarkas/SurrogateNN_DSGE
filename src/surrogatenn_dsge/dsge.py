@@ -45,6 +45,25 @@ class SchurQZDeterminacyResult(NamedTuple):
     diagnostics: SchurQZDeterminacyDiagnostics
 
 
+class CayleyQZDiagnostics(NamedTuple):
+    companion_roots: jax.Array
+    root_magnitudes: jax.Array
+    stable_mask: jax.Array
+    stable_count: jax.Array
+    expected_stable_count: jax.Array
+    spectral_margin: jax.Array
+    near_unit_count: jax.Array
+    invariant_subspace_rcond: jax.Array
+    solution_imag_max_abs: jax.Array
+    relative_residual: jax.Array
+    success: jax.Array
+
+
+class CayleyQZResult(NamedTuple):
+    solution: jax.Array
+    diagnostics: CayleyQZDiagnostics
+
+
 class _QuadraticMatrixEquationDoublingState(NamedTuple):
     e_matrix: jax.Array
     f_matrix: jax.Array
@@ -945,14 +964,31 @@ def _build_qme_pencils_jax(
     return d_pencil, e_pencil
 
 
-def _solve_quadratic_matrix_equation_schur_gpu_impl(
+def _analyze_quadratic_matrix_equation_cayley_gpu_impl(
     a: jax.Array,
     b: jax.Array,
     c: jax.Array,
     timings: DSGETimings,
-) -> tuple[jax.Array, jax.Array]:
+    *,
+    unit_root_tol: float = 1.0e-6,
+) -> CayleyQZResult:
     if a.shape[0] == 0:
-        return jnp.zeros_like(a), jnp.asarray(True)
+        roots = jnp.zeros((0,), dtype=jnp.result_type(a.dtype, jnp.complex64))
+        zeros = jnp.zeros((0,), dtype=a.dtype)
+        diagnostics = CayleyQZDiagnostics(
+            companion_roots=roots,
+            root_magnitudes=zeros,
+            stable_mask=jnp.zeros((0,), dtype=bool),
+            stable_count=jnp.asarray(0, dtype=jnp.int32),
+            expected_stable_count=jnp.asarray(0, dtype=jnp.int32),
+            spectral_margin=jnp.asarray(jnp.inf, dtype=a.dtype),
+            near_unit_count=jnp.asarray(0, dtype=jnp.int32),
+            invariant_subspace_rcond=jnp.asarray(1.0, dtype=a.dtype),
+            solution_imag_max_abs=jnp.asarray(0.0, dtype=a.dtype),
+            relative_residual=jnp.asarray(0.0, dtype=a.dtype),
+            success=jnp.asarray(True),
+        )
+        return CayleyQZResult(solution=jnp.zeros_like(a), diagnostics=diagnostics)
 
     d_pencil, e_pencil = _build_qme_pencils_jax(a, b, c, timings)
     complex_dtype = jnp.result_type(a.dtype, jnp.complex64)
@@ -996,6 +1032,12 @@ def _solve_quadratic_matrix_equation_schur_gpu_impl(
         jnp.asarray(jnp.inf, dtype=a.dtype),
         root_magnitudes,
     )
+    stable_mask = root_magnitudes < 1.0
+    stable_count = jnp.sum(stable_mask)
+    expected_stable_count = jnp.asarray(timings.nPast_not_future_and_mixed, dtype=jnp.int32)
+    distance_from_unit = jnp.abs(root_magnitudes - 1.0)
+    spectral_margin = jnp.min(distance_from_unit)
+    near_unit_count = jnp.sum(distance_from_unit <= jnp.asarray(unit_root_tol, dtype=a.dtype))
     stable_order = jnp.argsort(root_magnitudes)[: timings.nPast_not_future_and_mixed]
     stable_roots = roots[stable_order]
     stable_vectors = vectors[:, stable_order]
@@ -1025,19 +1067,49 @@ def _solve_quadratic_matrix_equation_schur_gpu_impl(
     solution_complex = sol[list(timings.dynamic_order), :] @ selection
     solution = jnp.asarray(jnp.real(solution_complex), dtype=a.dtype)
 
-    stable_count = jnp.sum(root_magnitudes < 1.0)
+    invariant_subspace_cond = jnp.linalg.cond(z11)
+    invariant_subspace_rcond = jnp.where(
+        jnp.isfinite(invariant_subspace_cond),
+        1.0 / invariant_subspace_cond,
+        jnp.asarray(0.0, dtype=a.dtype),
+    )
+    solution_imag_max_abs = jnp.max(jnp.abs(jnp.imag(solution_complex)))
     imag_tol = jnp.asarray(
         1.0e-6 if a.dtype == jnp.float32 else 1.0e-9,
         dtype=a.dtype,
     )
+    residual = quadratic_matrix_equation_residual(a, solution, b, c)
     success = (
         (stable_count == n_past)
         & jnp.all(jnp.isfinite(transformed))
         & jnp.all(jnp.isfinite(stable_roots))
         & jnp.all(jnp.isfinite(solution))
-        & (jnp.max(jnp.abs(jnp.imag(solution_complex))) <= imag_tol)
+        & (solution_imag_max_abs <= imag_tol)
     )
-    return solution, success
+    diagnostics = CayleyQZDiagnostics(
+        companion_roots=roots,
+        root_magnitudes=root_magnitudes,
+        stable_mask=stable_mask,
+        stable_count=jnp.asarray(stable_count, dtype=jnp.int32),
+        expected_stable_count=expected_stable_count,
+        spectral_margin=spectral_margin,
+        near_unit_count=jnp.asarray(near_unit_count, dtype=jnp.int32),
+        invariant_subspace_rcond=invariant_subspace_rcond,
+        solution_imag_max_abs=solution_imag_max_abs,
+        relative_residual=jnp.where(success, residual, jnp.asarray(jnp.inf, dtype=a.dtype)),
+        success=success,
+    )
+    return CayleyQZResult(solution=solution, diagnostics=diagnostics)
+
+
+def _solve_quadratic_matrix_equation_schur_gpu_impl(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    timings: DSGETimings,
+) -> tuple[jax.Array, jax.Array]:
+    result = _analyze_quadratic_matrix_equation_cayley_gpu_impl(a, b, c, timings)
+    return result.solution, result.diagnostics.success
 
 
 @partial(jax.custom_vjp, nondiff_argnums=(3,))
@@ -1396,6 +1468,39 @@ def solve_quadratic_matrix_equation_schur_gpu_jax(
         iterations=jnp.asarray(0),
         relative_residual=relative_residual,
     )
+
+
+def analyze_quadratic_matrix_equation_cayley_gpu_jax(
+    a: Union[jax.Array, np.ndarray],
+    b: Union[jax.Array, np.ndarray],
+    c: Union[jax.Array, np.ndarray],
+    timings: DSGETimings,
+    *,
+    acceptance_tol: float = 1e-8,
+    unit_root_tol: float = 1e-6,
+) -> CayleyQZResult:
+    """Analyze QME determinacy with a GPU-native Cayley generalized-eigen screen.
+
+    This is not an ordered generalized Schur/QZ decomposition. It solves the
+    equivalent generalized eigenproblem through a Cayley transform and standard
+    complex eigendecomposition, both of which are JAX-native and GPU-compatible.
+    Use the returned ``spectral_margin``/``near_unit_count`` diagnostics to
+    decide whether a CPU ``ordqz`` audit is required near the unit circle.
+    """
+
+    a_arr, b_arr, c_arr = _cast_quadratic_matrix_equation_inputs(a, b, c)
+    result = _analyze_quadratic_matrix_equation_cayley_gpu_impl(
+        a_arr,
+        b_arr,
+        c_arr,
+        timings,
+        unit_root_tol=unit_root_tol,
+    )
+    accepted = result.diagnostics.success & (
+        result.diagnostics.relative_residual < jnp.asarray(acceptance_tol, dtype=a_arr.dtype)
+    )
+    diagnostics = result.diagnostics._replace(success=accepted)
+    return CayleyQZResult(solution=result.solution, diagnostics=diagnostics)
 
 
 def _prepare_first_order_qme_system(
