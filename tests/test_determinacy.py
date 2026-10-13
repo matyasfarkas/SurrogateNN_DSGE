@@ -138,7 +138,14 @@ def test_doubling_convergence_does_not_certify_schur_determinacy_support() -> No
         steady_state_initial_guess={"k": 0.0, "q": 0.0},
         qme_algorithm="doubling",
     )
+    cayley = solve_first_order_model(
+        model,
+        parameter_values=parameter_values,
+        steady_state_initial_guess={"k": 0.0, "q": 0.0},
+        qme_algorithm="schur_gpu",
+    )
 
     assert schur.determinacy.classification == "indeterminate"
     assert not schur.determinacy.unique_stable_solution
     assert doubling.solution.converged
+    assert not cayley.solution.converged
