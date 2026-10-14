@@ -1,6 +1,6 @@
 # Referee Review and Revision Record
 
-Paper: `Real Determinacy Screens for DSGE Estimation`
+Paper: `Real Determinacy Tests for DSGE Estimation`
 
 Author: Matyas Farkas
 
@@ -67,6 +67,7 @@ The paper now includes an `Acknowledgments and AI Use Disclosure` section credit
 ## Publication Readiness Checklist
 
 - The central claim appears in the abstract and introduction.
+- DSGE, determinacy, QZ, states, jumps, the graph condition, Cayley, and doubling are introduced before being used.
 - The econometric object is defined as a posterior-support restriction.
 - The theorem states assumptions explicitly.
 - The proof avoids overclaiming and covers conjugate pairs, realification, graph representation, and damped real cycles.
@@ -75,3 +76,9 @@ The paper now includes an `Acknowledgments and AI Use Disclosure` section credit
 - The doubling statement is conservative.
 - The compiled PDF is three pages.
 - Remaining author-only item: add affiliation/email if needed for submission.
+
+## Second Revision: Readability and Self-Containment
+
+The paper was revised again to reduce assumed background knowledge. The title now uses `Tests` instead of `Screens`, because `screens` is less standard for readers outside computational macro. The introduction defines DSGE models and determinacy in plain language before showing the posterior-support equation. The objects section now introduces generalized eigenvalues, finite and infinite roots, states, jumps, the stable deflating subspace, and the state-to-jump graph condition before stating the formal determinacy set.
+
+The audit section now explains real QZ, complex QZ, Cayley, and doubling in words before reporting Table 1. The language was also checked for generic AI-style filler phrases and tightened while preserving the three-page compiled length.
