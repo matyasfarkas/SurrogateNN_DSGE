@@ -1,0 +1,259 @@
+\documentclass[10pt]{article}
+
+\usepackage[margin=0.72in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{microtype}
+
+\setlength{\parskip}{0.2em}
+\setlength{\parindent}{1.1em}
+\linespread{0.96}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{assumption}{Assumption}
+
+\title{\vspace{-1.6em}Real Determinacy Screens for DSGE Estimation}
+\author{}
+\date{\vspace{-0.9em}\today}
+
+\begin{document}
+\maketitle
+\vspace{-1.1em}
+
+\begin{abstract}
+\noindent
+Bayesian DSGE estimation imposes determinacy as a support restriction on the
+posterior. This paper shows that a common numerical rule, rejecting draws whose
+complex-QZ extraction returns a complex policy matrix, is not a valid support
+restriction. For a real linear rational-expectations pencil, complex stable
+roots occur in conjugate pairs and span a real stable deflating subspace. If
+the stable-root count and graph condition hold, the DSGE policy rule is real;
+non-zero imaginary entries in a complex extraction reflect basis recovery error,
+not economic instability. In one million loose-prior HLT draws, a complex-QZ
+screen falsely rejects 464,685 draws that real QZ accepts with median residual
+$8.8\times10^{-14}$. A Cayley real-part screen matches real QZ on all draws,
+while doubling accepts 84,606 non-unique cases.
+\end{abstract}
+\vspace{-0.4em}
+\noindent\textbf{Keywords:} DSGE estimation; determinacy; generalized Schur;
+Bayesian support; GPU computing.
+
+\section{Introduction}
+
+Determinacy restrictions shape DSGE posteriors. In a Bayesian estimation, the
+posterior density is proportional to
+\[
+    p(\theta \mid Y) \propto L(Y \mid \theta)\pi(\theta)
+    \mathbf{1}\{\theta \in \Theta_D\},
+\]
+where $L(Y \mid \theta)$ is the likelihood, $\pi(\theta)$ is the prior, and
+$\Theta_D$ is the determinacy region. A wrong numerical definition of
+$\Theta_D$ changes the estimand: it truncates the prior, distorts the posterior,
+and can make two implementations disagree even when their likelihood code is
+otherwise identical.
+
+This paper proves a small but important point for first-order DSGE estimation:
+complex roots are not complex economics. For real linear rational-expectations
+models, complex generalized eigenvalues inside the unit circle represent damped
+oscillations in a real state space. They should not be rejected. A draw should
+be rejected when the stable-root count is wrong, when the stable subspace fails
+the graph condition, or when the recovered policy rule fails the residual
+check. A complex-valued intermediate Schur basis is not enough.
+
+The result matters for GPU estimation. Generalized QZ is the reference method
+for linear rational-expectations models (Blanchard and Kahn, 1980; Klein, 2000;
+Sims, 2002), but full QZ is hard to port efficiently to JAX/GPU. Faster screens
+such as Cayley transforms and doubling iterations are useful only if they
+preserve the posterior support. The HLT audit below shows that a real-part
+Cayley screen can match real QZ on the tested prior support, while doubling is
+too permissive as a final support classifier.
+
+\section{Econometric Object}
+
+Let $(D(\theta),E(\theta))$ be the real generalized pencil from the linearized
+DSGE model at parameter vector $\theta$. Generalized eigenvalues solve
+\[
+    \det(D(\theta)-\lambda E(\theta))=0.
+\]
+Let $n_s$ be the number of predetermined states. Define the econometric
+determinacy set as
+\[
+    \Theta_D =
+    \left\{
+        \theta :
+        \#\{|\lambda_i(\theta)|<1\}=n_s,\;
+        Z_x(\theta)\text{ is nonsingular},\;
+        r(\theta)\leq \tau
+    \right\},
+\]
+where $Z=(Z_x',Z_y')'$ spans the stable deflating subspace, $Z_x$ is the state
+block, $Z_y$ is the jump-variable block, $r(\theta)$ is the relative residual
+of the recovered policy rule, and $\tau$ is a numerical tolerance. This
+definition follows the Blanchard-Kahn logic: exactly one stable path must exist
+for each state.
+
+A numerical support classifier is valid on a parameter region only if it
+returns the same indicator as $\mathbf{1}\{\theta\in\Theta_D\}$. A classifier
+that rejects complex intermediate objects rather than failed real-domain
+solutions is a different econometric model.
+
+\begin{assumption}[real regular pencil]
+For the parameter vector under consideration, $D$ and $E$ are real, the pencil
+$(D,E)$ is regular, and no generalized eigenvalue lies on the unit circle.
+\end{assumption}
+
+\begin{assumption}[graph condition]
+The stable deflating subspace has dimension $n_s$. For any full-rank basis
+$Z=(Z_x',Z_y')'$ of this subspace, the state block $Z_x$ is nonsingular.
+\end{assumption}
+
+\section{Proposition and Proof}
+
+\begin{proposition}[real policy from a complex stable basis]
+Under Assumptions 1 and 2, the first-order policy rule
+\[
+    y_t = Gx_t,\qquad G=Z_yZ_x^{-1},
+\]
+is real. Complex generalized eigenvalues with modulus below one imply damped
+real cycles, not instability. If a complex-QZ implementation returns a
+policy matrix with economically meaningful imaginary entries despite the
+correct root count and graph condition, the failure is numerical extraction,
+not a rejection of $\theta$ from $\Theta_D$.
+\end{proposition}
+
+The intuition is simple. A real model maps real states into real choices.
+Complex arithmetic is a representation device: one complex stable root and its
+conjugate describe a two-dimensional real rotation that contracts over time.
+The real and imaginary parts of the associated eigenvector span the real plane
+on which that cycle lives.
+
+\begin{proof}
+Because $D$ and $E$ are real, conjugation preserves generalized eigenpairs. If
+$Dv=\lambda Ev$, then $D\bar v=\bar\lambda E\bar v$. Hence non-real
+generalized eigenvalues and eigenvectors occur in conjugate pairs. The set
+$\{\lambda:|\lambda|<1\}$ is closed under conjugation, so the stable deflating
+subspace is closed under conjugation.
+
+Every conjugation-closed complex subspace has a real basis. For each non-real
+vector $v=a+ib$, replace the conjugate pair $(v,\bar v)$ by the real vectors
+$a=\operatorname{Re}v$ and $b=\operatorname{Im}v$. These vectors span the same
+real invariant plane. Repeating this operation yields a real full-rank stable
+basis $Z=(Z_x',Z_y')'$.
+
+Assumption 2 makes $Z_x$ nonsingular, so the stable subspace is the graph of
+$G=Z_yZ_x^{-1}$. Since both $Z_y$ and $Z_x$ are real, $G$ is real. Moreover, if
+$\tilde Z=ZT$ is any other complex basis of the same subspace with invertible
+$T$, then
+\[
+    \tilde Z_y\tilde Z_x^{-1}
+    = Z_yT(Z_xT)^{-1}
+    = Z_yZ_x^{-1}.
+\]
+Thus the policy matrix is basis-invariant in exact arithmetic. Non-zero
+imaginary entries in a computed policy matrix reflect finite precision,
+ill-conditioning, or a failure to keep conjugate pairs aligned.
+
+Finally, a complex stable root $\lambda=a+ib$ corresponds in real coordinates
+to a $2\times2$ block with eigenvalues $a\pm ib$. Powers of this block decay at
+rate $|\lambda|$. The path oscillates but converges. This is real stability.
+\end{proof}
+
+\section{Monte Carlo Audit}
+
+The proposition is algebraic. The relevant econometric question is whether a
+wrong complex rejection rule changes the posterior support in a model used for
+estimation. The audit draws one million loose-prior parameter vectors from the
+HLT model and classifies each draw using four screens: the old complex-QZ
+classifier, real QZ, a Cayley real-part classifier, and doubling. The audit file is
+\texttt{benchmarks/results/qz\_real\_cayley\_hlt\_loose\_1m\_stream.json}.
+
+\begin{table}[h!]
+\centering
+\caption{Support classification in one million loose-prior HLT draws}
+\label{tab:audit}
+\begin{tabular}{lrr}
+\toprule
+Classification event & Count & Share \\
+\midrule
+Real QZ accepts: unique stable solution & 702,789 & 70.3\% \\
+Real QZ rejects: indeterminate & 256,850 & 25.7\% \\
+Real QZ rejects: no stable solution & 40,361 & 4.0\% \\
+Complex-QZ accepts: unique stable solution & 238,104 & 23.8\% \\
+Complex-QZ rejects as ``complex solution'' & 464,685 & 46.5\% \\
+Real QZ accepts those ``complex'' cases & 464,685 & 46.5\% \\
+Cayley real-part disagrees with real QZ & 0 & 0.0\% \\
+Doubling accepts a real-QZ non-unique case & 84,606 & 8.5\% \\
+\bottomrule
+\end{tabular}
+\vspace{0.25em}
+
+\footnotesize
+Notes: The median real-QZ residual among accepted draws is
+$8.8\times10^{-14}$; the maximum is $1.0\times10^{-11}$. The Cayley
+real-part screen uses the same support decision as real QZ in this audit, but
+the statement is model-support evidence, not a global theorem.
+\end{table}
+
+Table \ref{tab:audit} shows a large false-rejection problem. The complex-QZ
+classifier removes 46.5 percent of the tested support because the extracted
+policy matrix is complex. Real QZ accepts all of these draws and rejects none
+of the draws that complex QZ labels unique. The old rule therefore changes
+$\Theta_D$ by excluding many real, stable, unique solutions.
+
+The table also separates speed devices from support classifiers. Doubling
+finds all real-QZ unique cases, but it accepts 84,606 non-unique cases. It is
+therefore useful as a candidate solver, warm start, or intermediate screen, but
+not as the final posterior support test. By contrast, the Cayley real-part
+screen has zero support disagreements with real QZ in the tested HLT region.
+
+\section{Implications for Estimation}
+
+The posterior sampler should use the following support hierarchy. First, screen
+the stable-root count. Second, verify the graph condition. Third, recover a
+real policy matrix and check the model residual. Complex intermediate objects
+should trigger realification or fallback to real QZ; they should not trigger
+economic rejection by themselves.
+
+This hierarchy gives a practical GPU path. JAX can run a Cayley real-part
+screen and batched residual checks on the GPU. Real QZ remains the reference
+validator on CPU until a reliable GPU-native generalized QZ is available.
+Doubling remains useful for speed, but only under a verification layer because
+it admits indeterminate points in the HLT audit.
+
+\section{Conclusion}
+
+A complex-QZ ``complex solution'' label is not a determinacy diagnosis. In a
+real DSGE model, complex stable roots are real damped cycles. The valid
+determinacy restriction is root count plus the graph condition plus residual
+accuracy. Applying this distinction to one million HLT draws changes the
+accepted support from 238,104 to 702,789 draws relative to the old complex-QZ
+screen. For estimation, this is not cosmetic: it changes the posterior support.
+
+\begin{thebibliography}{9}
+\setlength{\itemsep}{0pt}
+\small
+
+\bibitem{bk1980}
+Olivier Jean Blanchard and Charles M. Kahn. 1980.
+The solution of linear difference models under rational expectations.
+\emph{Econometrica} 48(5): 1305--1311.
+
+\bibitem{klein2000}
+Paul Klein. 2000.
+Using the generalized Schur form to solve a multivariate linear rational
+expectations model.
+\emph{Journal of Economic Dynamics and Control} 24(10): 1405--1423.
+
+\bibitem{sims2002}
+Christopher A. Sims. 2002.
+Solving linear rational expectations models.
+\emph{Computational Economics} 20: 1--20.
+
+\bibitem{lapack1999}
+LAPACK Working Group. 1999.
+\emph{LAPACK Users' Guide}. Third edition. SIAM.
+
+\end{thebibliography}
+
+\end{document}
