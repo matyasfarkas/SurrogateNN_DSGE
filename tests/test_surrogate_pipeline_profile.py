@@ -192,6 +192,18 @@ def test_hlt_runtime_preflight_only_flag_is_parsed() -> None:
     assert args.hlt_runtime_preflight_only is True
 
 
+def test_residual_shrinkage_calibration_can_be_disabled_for_honest_holdout() -> None:
+    mod = _load_profile_module()
+
+    default_args = mod.parse_args(["--mode", "hlt-fixed-ss-smoke"])
+    evidence_args = mod.parse_args(
+        ["--mode", "hlt-fixed-ss-smoke", "--no-calibrate-residual-shrinkage"]
+    )
+
+    assert default_args.calibrate_residual_shrinkage is True
+    assert evidence_args.calibrate_residual_shrinkage is False
+
+
 def test_hlt_surrogate_bundle_path_defaults_to_output_stem(tmp_path) -> None:
     mod = _load_profile_module()
     output = tmp_path / "hlt_debug.json"

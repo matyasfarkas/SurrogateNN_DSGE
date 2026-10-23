@@ -29,15 +29,18 @@ publication run with that flag cannot satisfy the clean-revision gate.
    configuration, training design, and case identifiers.
 2. Generate positive-order stochastic-SEP targets with multiple quadrature
    nodes and nonzero variation in every shock dimension.
-3. Cross-check common steady states, QZ solutions, trajectories, and
+3. Keep an untouched parameter-group test partition. Disable residual-shrinkage
+   calibration unless a distinct calibration partition is frozen in advance;
+   never tune shrinkage on the block used for the reported test error.
+4. Cross-check common steady states, QZ solutions, trajectories, and
    likelihoods against MacroModelling.jl. Preserve failures from either
    implementation in the denominator.
-4. Build a full nonlinear $(\phi_\pi,\phi_y)$ likelihood grid. Double the grid
+5. Build a full nonlinear $(\phi_\pi,\phi_y)$ likelihood grid. Double the grid
    resolution until posterior moments and interval endpoints stabilize.
-5. Compare ROM, residual-surrogate, surrogate-target HMC, and nonlinear-target
+6. Compare ROM, residual-surrogate, surrogate-target HMC, and nonlinear-target
    corrected HMC against the grid. Report numerical uncertainty or pooled Monte
    Carlo error.
-6. Stop if posterior fidelity fails. Do not scale the parameter dimension to
+7. Stop if posterior fidelity fails. Do not scale the parameter dimension to
    compensate for a failed correctness reference.
 
 ### Experiment B: computational scaling
@@ -65,6 +68,8 @@ publication run with that flag cannot satisfy the clean-revision gate.
 - Held-out tests are disjoint in parameter vectors, shock sequences, and
   trajectories. Per-output and tail errors, paired ROM improvement with a 95%
   interval, and learning curves are included.
+- Residual-shrinkage factors are either disabled or fitted on a prespecified
+  calibration partition that is disjoint from the untouched test partition.
 - Likelihood comparisons include centered error, tail error, near-mode rank
   reversals, and normalized gradient error with a declared reference-gradient
   floor.

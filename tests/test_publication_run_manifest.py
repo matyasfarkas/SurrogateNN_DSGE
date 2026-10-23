@@ -199,5 +199,6 @@ def test_gali_pilot_dry_run_uses_stochastic_sep_and_explicit_seeds(
     assert "--sep-order 1" in completed.stdout
     assert "--sep-nnodes 3" in completed.stdout
     assert completed.stdout.startswith("JAX_ENABLE_X64=1 ")
+    assert "--no-calibrate-residual-shrinkage" in completed.stdout
     assert "--hlt-surrogate-hmc-seed 20261023" in completed.stdout
     assert "--seed 20261019" in completed.stdout

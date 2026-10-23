@@ -12,8 +12,8 @@
     },
     {
       "id": "surrogate_improves_rom_in_pilot_design",
-      "statement": "The default pilot reports mean validation improvement over the ROM of 53.9 percent.",
-      "status": "supported_by_pilot"
+      "statement": "The default pilot reports mean calibration-set improvement over the ROM of 53.9 percent after fitting per-output shrinkage on that same parameter block. The value is not an untouched out-of-sample estimate.",
+      "status": "calibration_set_only"
     },
     {
       "id": "jax_python_likelihood_implementation_parity",
@@ -45,6 +45,7 @@
   "hard_blockers": [
     "Independent MacroModelling.jl trajectory and likelihood comparisons.",
     "Positive-order stochastic SEP with multiple quadrature nodes and all shocks active.",
+    "An untouched test split; residual-shrinkage calibration must use a separate partition or be disabled.",
     "A full nonlinear likelihood or an explicitly surrogate-defined estimand.",
     "Explicit invalid-solve support handling rather than a finite log-density plateau.",
     "Four tuned chains with convergence and effective-sample-size diagnostics.",

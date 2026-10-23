@@ -56,6 +56,7 @@ ARGS=(
   --train-dtype float64
   --validation-fraction 0.25
   --split-by-theta
+  --no-calibrate-residual-shrinkage
   --hlt-likelihood-periods "${GALI_PERIODS:-10}"
   --hlt-likelihood-runtime-mode "${GALI_LIKELIHOOD_RUNTIME_MODE:-fixed-reference}"
   --hlt-jax-log-density-smoke

@@ -4128,6 +4128,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             output_names=output_names,
             architecture="resnet",
             rom_residual=True,
+            calibrate_residual_shrinkage=bool(args.calibrate_residual_shrinkage),
             validation_fraction=float(args.validation_fraction),
             split_by_theta=bool(args.split_by_theta),
             only_full_success=bool(args.only_full_success),
@@ -4188,6 +4189,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             dataset,
             architecture="resnet",
             rom_residual=True,
+            calibrate_residual_shrinkage=bool(args.calibrate_residual_shrinkage),
             validation_fraction=validation_fraction,
             split_by_theta=split_by_theta,
             only_full_success=bool(args.only_full_success),
@@ -4247,6 +4249,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             dataset,
             architecture="resnet",
             rom_residual=True,
+            calibrate_residual_shrinkage=bool(args.calibrate_residual_shrinkage),
             validation_fraction=validation_fraction,
             split_by_theta=split_by_theta,
             only_full_success=bool(args.only_full_success),
@@ -4378,6 +4381,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             arrays,
             architecture="resnet",
             rom_residual=True,
+            calibrate_residual_shrinkage=bool(args.calibrate_residual_shrinkage),
             only_full_success=bool(args.only_full_success),
             validation_fraction=validation_fraction,
             split_by_theta=split_by_theta,
@@ -5346,6 +5350,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--validation-fraction", type=float, default=0.10)
     parser.add_argument("--split-by-theta", action="store_true")
+    parser.add_argument(
+        "--calibrate-residual-shrinkage",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Fit per-output residual-shrinkage factors on the validation partition. "
+            "Disable for an untouched validation estimate unless a separate calibration "
+            "partition is supplied by the surrounding protocol."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=20260918)
     parser.add_argument(
         "--verbose-progress",

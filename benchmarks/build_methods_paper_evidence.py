@@ -229,10 +229,12 @@ def build_evidence(suite_root: Path) -> dict[str, Any]:
         },
         {
             "id": "surrogate_improves_rom_in_pilot_design",
-            "status": "supported_by_pilot",
+            "status": "calibration_set_only",
             "statement": (
-                "The default pilot reports mean validation improvement over the ROM of "
-                f"{100.0 * default['validation_improvement_mean']:.1f} percent."
+                "The default pilot reports mean calibration-set improvement over the ROM of "
+                f"{100.0 * default['validation_improvement_mean']:.1f} percent after fitting "
+                "per-output shrinkage on that same parameter block. The value is not an "
+                "untouched out-of-sample estimate."
             ),
         },
         {
@@ -294,6 +296,7 @@ def build_evidence(suite_root: Path) -> dict[str, Any]:
         "hard_blockers": [
             "Independent MacroModelling.jl trajectory and likelihood comparisons.",
             "Positive-order stochastic SEP with multiple quadrature nodes and all shocks active.",
+            "An untouched test split; residual-shrinkage calibration must use a separate partition or be disabled.",
             "A full nonlinear likelihood or an explicitly surrogate-defined estimand.",
             "Explicit invalid-solve support handling rather than a finite log-density plateau.",
             "Four tuned chains with convergence and effective-sample-size diagnostics.",
@@ -356,14 +359,14 @@ def render_latex_table(evidence: Mapping[str, Any]) -> str:
 \setlength{{\tabcolsep}}{{3pt}}
 \begin{{tabular}}{{llrrrrrr}}
 \toprule
-Run & Target runtime & $N_\theta \times T$ & Max. residual & Val. RMSE & Corrected & Accept. & Draws/s \\
+Run & Target runtime & $N_\theta \times T$ & Max. residual & Calib. RMSE & Corrected & Accept. & Draws/s \\
 \midrule
 {body}
 \bottomrule
 \end{{tabular}}
 
 \vspace{{0.4em}}
-\parbox{{0.98\textwidth}}{{\footnotesize\textit{{Notes:}} All runs use the complete 23-equation nonlinear Galí source but estimate only two policy-rule parameters. $N_\theta$ is the number of parameter vectors and $T$ is the observation horizon. Target construction used branching order zero and one node, so these are deterministic nonlinear extended-path pilots, not stochastic-expectations SEP validation. ``Full-JAX'' recomputes the parameter-dependent steady state and first-order ROM inside the surrogate profile inversion objective. It does not evaluate a full nonlinear SEP likelihood inside HMC. Correction therefore targets the declared surrogate objective, not an exact full-nonlinear posterior. The quick, corrected-resource, and default runs use respectively 1, 2, and 1 chains with 2, 2, and 50 post-warmup draws per chain. These runs establish execution and resource feasibility only.}}
+\parbox{{0.98\textwidth}}{{\footnotesize\textit{{Notes:}} All runs use the complete 23-equation nonlinear Galí source but estimate only two policy-rule parameters. $N_\theta$ is the number of parameter vectors and $T$ is the observation horizon. Target construction used branching order zero and one node, so these are deterministic nonlinear extended-path pilots, not stochastic-expectations SEP validation. The reported calibration RMSE is computed on the parameter block also used to fit per-output residual-shrinkage factors; it is not an untouched test error. ``Full-JAX'' recomputes the parameter-dependent steady state and first-order ROM inside the surrogate profile inversion objective. It does not evaluate a full nonlinear SEP likelihood inside HMC. Correction therefore targets the declared surrogate objective, not an exact full-nonlinear posterior. The quick, corrected-resource, and default runs use respectively 1, 2, and 1 chains with 2, 2, and 50 post-warmup draws per chain. These runs establish execution and resource feasibility only.}}
 \end{{table}}
 """
 

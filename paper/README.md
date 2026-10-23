@@ -36,8 +36,10 @@ The preserved suite is an engineering pilot. It uses the complete 23-equation
 model, but its target construction has branching order zero and one node. The
 corrected HMC run targets a parameter-dependent surrogate profile objective,
 not a full nonlinear SEP likelihood. Its Schur QME path also invokes a SciPy host
-callback and is not GPU-native. These limitations are stated in the abstract,
-results table, limitations section, and generated claim ledger.
+callback and is not GPU-native. The preserved RMSE also uses a parameter block
+that calibrated per-output residual shrinkage, so it is labelled a calibration
+metric rather than an untouched test result. These limitations are stated in
+the abstract, results table, limitations section, and generated claim ledger.
 
 The confirmatory plan is in `../docs/submission_readiness_plan.md`. The paper
 should be promoted to a submission draft only when every hard gate is backed by
@@ -56,5 +58,6 @@ DEVICE=gpu PYTHON=.venv/bin/python \
 The launcher refuses a dirty worktree, records the exact command, Git revision,
 allowlisted numerical environment, design and HMC seeds, and input hashes before
 execution, then records the exit code and output hashes in
-`run_manifest.json`. Budgets remain intentionally small; a successful pilot is
-still not confirmatory evidence.
+`run_manifest.json`. The publication launcher disables residual-shrinkage
+calibration so the held-out parameter block remains untouched. Budgets remain
+intentionally small; a successful pilot is still not confirmatory evidence.

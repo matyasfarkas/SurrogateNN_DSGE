@@ -97,6 +97,12 @@ def test_builder_preserves_claim_boundary(tmp_path: Path) -> None:
     assert claims["target_corrected_sampler_executes"]["status"] == (
         "resource_feasibility_only"
     )
+    assert claims["surrogate_improves_rom_in_pilot_design"]["status"] == (
+        "calibration_set_only"
+    )
+    assert "untouched out-of-sample estimate" in claims[
+        "surrogate_improves_rom_in_pilot_design"
+    ]["statement"]
     assert claims["exact_full_nonlinear_posterior"]["status"] == "not_supported"
     corrected = evidence["runs"]["corrected_full_jax_resource"]
     assert corrected["likelihood_kind"] == "surrogate_profile_inversion_objective"
@@ -130,4 +136,6 @@ def test_cli_writes_machine_and_manuscript_outputs(tmp_path: Path) -> None:
     markdown = (output / "pilot_evidence.md").read_text(encoding="utf-8")
     latex = (output / "pilot_results.tex").read_text(encoding="utf-8")
     assert "**Publication ready:** no" in markdown
+    assert "Calib. RMSE" in latex
+    assert "not an untouched test error" in latex
     assert "Correction therefore targets the declared surrogate objective" in latex

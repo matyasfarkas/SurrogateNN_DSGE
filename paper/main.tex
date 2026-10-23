@@ -20,64 +20,96 @@ An Auditable Target-Corrected Workflow}
 \maketitle
 
 \begin{abstract}
-Repeated nonlinear model solution can dominate likelihood-based estimation of
-dynamic stochastic general equilibrium models. We develop an auditable workflow
-that learns the discrepancy between a first-order reduced-order model and
-nonlinear extended-path solutions, evaluates the resulting profile inversion objective
-in JAX, and uses a cheap differentiable density to construct Hamiltonian
-proposals. A Metropolis test at each trajectory endpoint can preserve any
-declared target density that is evaluated there. This correction is established
-MCMC theory; our contribution is its integration with residual learning,
-parameter-dependent DSGE solution, cross-implementation checks, and a frozen
-evidence protocol. A preserved engineering pilot exercises the complete
-23-equation nonlinear Gal\'i model while estimating two policy parameters. It
-accepts 80 order-zero extended-path targets with maximum equation residual
-$9.92\times10^{-9}$, reduces held-out state error relative to the first-order
-model by 53.9 percent on average, and matches Python and JAX evaluations of the
-same surrogate objective within $1.71\times10^{-13}$. These results establish
-pipeline execution, not posterior fidelity or speedup: the pilot uses
-deterministic extended path, and its corrected HMC target remains a surrogate
-objective. We therefore state the confirmatory tests required before the method
-can support substantive inference claims.
+Repeated nonlinear solution can dominate likelihood-based estimation of dynamic
+stochastic general equilibrium models. We develop an auditable workflow in
+which a neural network learns the difference between extended-path trajectories
+and a parameter-specific first-order solution. Cheap surrogate gradients form
+Hamiltonian proposals; an endpoint Metropolis test preserves the density
+actually evaluated there. This distinction matters because correcting for a
+surrogate profile objective is not exact inference for the nonlinear model. On
+the complete 23-equation Gal\'i model, preserved deterministic pilots solve 80
+targets with maximum residual $9.92\times10^{-9}$, improve calibration-set
+error over the first-order model by 53.9 percent, and match Python and JAX
+evaluations within $1.71\times10^{-13}$. These results establish software
+feasibility, not posterior fidelity or speed. The paper therefore couples the
+method with frozen gates for stochastic-solution accuracy, independent parity,
+untouched test performance, posterior agreement, multichain sampling, and
+same-work timing.
 \end{abstract}
 
 \section{Introduction}
 
-Likelihood-based estimation of nonlinear DSGE models repeats a difficult
-numerical task at many parameter values. Each likelihood evaluation can require
-a steady state, a local solution, nonlinear conditional trajectories, shock
-inversion, and measurement-error evaluation. The same work then appears inside
-optimization or posterior simulation. A neural surrogate is attractive only if
-it reduces this repeated cost without hiding the numerical failures that matter
-for inference.
+Likelihood-based estimation of a nonlinear DSGE model repeats a costly
+numerical experiment at every parameter proposal. A single evaluation may
+require a steady state, a local solution, nonlinear conditional trajectories,
+latent-shock inversion, and measurement-error evaluation. Posterior simulation
+then repeats this stack thousands of times. Approximation is attractive, but an
+unmeasured approximation can change the objective, the posterior geometry, and
+even the numerical support of the model.
 
-This paper develops a workflow around that requirement. The method first solves
-the complete nonlinear equation system at a designed set of parameter, state,
-and shock inputs. It then fits a residual network to the gap between those
-solutions and a first-order reduced-order model (ROM). The ROM supplies global
-economic structure and a strong baseline; the network learns only the remaining
-nonlinearity. During posterior simulation, a cheap differentiable density can
-generate Hamiltonian trajectories, while a separately declared target density
-is evaluated at the endpoints. When the proposal map is reversible and volume
-preserving, the endpoint Metropolis test preserves that declared target.
+This paper develops a residual-surrogate workflow designed around that risk.
+The method solves the complete nonlinear equations at designed parameter,
+state, and shock inputs, then learns the difference between those solutions and
+a parameter-specific first-order reduced-order model (ROM). The ROM supplies a
+disciplined local baseline; the network is responsible only for the remaining
+nonlinearity. During sampling, the cheap differentiable objective supplies the
+Hamiltonian force. A separately declared density is evaluated at each proposal
+endpoint. Standard Metropolis correction then preserves that declared density
+when the numerical proposal map is reversible and volume preserving.
 
-The central contribution is the integrated estimation and validation design,
-not the generic observation that an approximate Hamiltonian may be corrected by
-an exact Metropolis test. That result is standard \citep{neal2011hmc}, and
-surrogate-gradient HMC has been studied with both random-basis and neural
-surrogates \citep{zhang2017surrogate,li2019nnghmc}. The contribution must instead
-be judged by four empirical questions. Does the residual surrogate improve on
-the ROM outside its training parameter values? Does it preserve likelihood and
-posterior geometry in the inference-relevant region? Does endpoint correction
-target the density claimed in the paper? And does the complete workflow improve
-effective samples per second after training and compilation costs are counted?
+The preserved Gal\'i pilots establish that this software path composes on the
+complete 23-equation nonlinear model while only the estimated parameter vector
+is reduced. Across 80 deterministic extended-path targets, the largest recorded
+equation residual is $9.92\times10^{-9}$. Python and JAX evaluations of the same
+surrogate profile objective differ by at most $1.71\times10^{-13}$ at the
+audited calibration. A calibration block shows a 53.9 percent mean reduction in
+state error relative to the ROM after per-output shrinkage is fitted on that
+same block. The last number is not an untouched test result, the HMC budgets are
+not convergence evidence, and no preserved run yet establishes a nonlinear
+posterior speed advantage.
 
-We answer only the first, engineering-level version of these questions in the
-preserved pilot. The full confirmatory exercise is deliberately separated from
-the pilot. This separation prevents a successful software run from being
-mistaken for publication evidence.
+The paper makes three contributions. First, it separates three objects often
+conflated in surrogate estimation: nonlinear trajectories used as labels, a
+surrogate profile objective used for cheap differentiation, and the nonlinear
+likelihood required for a structural-posterior claim. Second, it integrates
+parameter-dependent DSGE solution, residual learning, bounded-parameter HMC,
+and explicit failure handling in a content-addressed workflow. Third, it turns
+publication claims into executable gates covering stochastic expectations,
+cross-language parity, untouched test accuracy, posterior fidelity, sampler
+diagnostics, and full computational accounting.
 
-\section{Model, solution objects, and likelihoods}
+The paper does not claim that endpoint correction or neural solution methods
+are new by themselves. Its narrow claim is that nonlinear DSGE surrogates can
+be made auditable enough to determine when they are safe and useful for
+estimation. The rest of the paper defines the estimands, describes the numerical
+workflow, proves the target-invariance statement used by the sampler, and
+reports the preserved engineering evidence before stating the confirmatory
+design and stopping rules.
+
+\subsection{Relation to the literature}
+
+The estimation problem sits between nonlinear DSGE solution, neural
+approximation, and accelerated MCMC. Extended path provides the nonlinear
+trajectory construction \citep{fair1983extended}; stochastic extended path
+replaces future-shock means with numerical integration over conditional
+expectations \citep{adjemian2025sep}. Likelihood construction for nonlinear
+DSGE models remains model- and solution-dependent \citep{kollmann2017tractable},
+which is why this paper treats the trajectory solver, latent-shock treatment,
+and statistical objective as separate validation targets.
+
+Neural networks have been used to solve high-dimensional dynamic economic
+models \citep{maliar2021deep}. Here the network does not replace the economic
+model wholesale: it learns the full-minus-first-order discrepancy and is always
+benchmarked against the ROM. Surrogate-gradient HMC and neural-gradient HMC
+already establish the proposal-side idea \citep{zhang2017surrogate,li2019nnghmc}.
+Our focus is the less forgiving DSGE case in which the endpoint density may
+contain parameter-dependent solution failures and may differ from the density
+used to generate the force. The independent implementation benchmark uses
+MacroModelling.jl \citep{kockerols2023macromodelling}, while the JAX path builds
+on the differentiable state-space perspective of
+\citet{childers2022differentiable}.
+
+\section{Economic model and statistical objects}
 
 Let $\theta\in\Theta$ denote structural parameters, $s_t$ predetermined states,
 $x_t$ endogenous variables, and $\varepsilon_t$ structural shocks. Write the
@@ -96,10 +128,10 @@ fit a network $r_{\psi}$ to the residual
   \widehat{x}^{F}_t(\theta)=x^{R}_t(\theta)+r_{\psi}(z_t,\theta),
   \label{eq:residual-surrogate}
 \end{equation}
-where $z_t$ contains the states, shocks, and other features available at the
-prediction point. Parameter vectors, rather than individual rows, are assigned
-to training or validation. This prevents trajectories from the same parameter
-value from appearing on both sides of the split.
+where $z_t$ contains the states and shocks available at the prediction point.
+Parameter vectors, rather than individual rows, are assigned to data
+partitions. This prevents periods from the same parameter-specific trajectory
+from appearing on both sides of a split.
 
 The target nonlinear posterior for data $y_{1:T}$ is
 \begin{equation}
@@ -138,14 +170,64 @@ clear: the latent shocks are optimized, not integrated out. It also clarifies
 why agreement between two implementations of this calculation is a software
 check rather than likelihood validation.
 
-The benchmark model is the complete nonlinear New Keynesian system distributed
-with the MacroModelling.jl examples and associated with the model in
-\citet{gali2015}. It contains 23 equations, 16 declared parameters, and three
-structural shocks. The reduced pilot estimates the Taylor-rule responses to
-inflation and output, $\phi_\pi$ and $\phi_y$, while retaining every model
-equation. Reducing the parameter dimension makes a numerical posterior reference
-feasible; it does not turn the model into the familiar three-equation
-linearization.
+Table~\ref{tab:objects} records the three numerical objects used below. A
+trajectory label is not a density, and a profile objective is not a marginal
+likelihood. Keeping their names distinct prevents a correct MCMC kernel from
+being used to support the wrong inferential claim.
+
+\begin{table}[t]
+\centering
+\caption{Numerical objects and the claims they can support}
+\label{tab:objects}
+\small
+\begin{tabular}{p{0.22\textwidth}p{0.32\textwidth}p{0.34\textwidth}}
+\toprule
+Object & Construction & Valid interpretation \\
+\midrule
+Nonlinear label $x^F$ & Extended-path solution of the complete equilibrium system & Supervised target for trajectory approximation; not a probability density \\
+Surrogate objective $\widetilde L_\psi$ & ROM plus learned residual, with shocks profiled by \eqref{eq:shock-profile} & A declared pseudo-posterior target when combined with a prior and transform Jacobian \\
+Nonlinear likelihood $L_F$ & Independently validated statistical likelihood with latent variables and Jacobians treated explicitly & Structural likelihood and posterior in \eqref{eq:exact-posterior} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The benchmark is the complete nonlinear New Keynesian system distributed with
+the MacroModelling.jl examples \citep{kockerols2023macromodelling} and associated
+with \citet{gali2015}. It contains 23 equations, 16 declared parameters, and
+three structural shocks. The reduced experiment estimates the Taylor-rule
+responses to inflation and output, $\phi_\pi$ and $\phi_y$, while retaining
+every model equation. Reducing the parameter dimension makes a numerical
+posterior reference feasible; it does not replace the model with the familiar
+three-equation linearization.
+
+\section{Residual-surrogate construction}
+
+For training case $i$, let $u_i=(z_i,\theta_i)$ and
+$d_i=x^F_i-x^R_i$. Input and output location and scale are estimated only from
+the training partition. In standardized coordinates, the implemented data-fit
+loss is
+\begin{equation}
+  \widehat\psi
+  =\arg\min_{\psi}
+  \frac{1}{\sum_{i\in\mathcal I_{\rm tr}}w_i}
+  \sum_{i\in\mathcal I_{\rm tr}}
+  w_i\left\|\widetilde d_i-r_\psi(\widetilde u_i)\right\|_2^2,
+  \label{eq:training-loss}
+\end{equation}
+with zero weight for masked failures. The optimizer is AdamW with gradient
+clipping. The network embeds states and shocks, conditions hidden activations
+on the full estimated parameter vector through feature-wise affine modulation,
+and uses residual blocks with SiLU activations. Deployment restores the original
+units and adds the predicted discrepancy to the ROM.
+
+The implementation can fit an additional per-output shrinkage coefficient in
+$[0,1]$ after network training. In the preserved pilots, those coefficients
+were fitted on the same parameter block used to report the resulting RMSE.
+That block is therefore a calibration set, not an untouched test set. We retain
+the values as engineering diagnostics but do not treat them as out-of-sample
+evidence. Publication launchers disable this calibration; a future use of
+shrinkage requires a distinct calibration partition and an untouched test
+partition.
 
 \subsection{Offline and online computations}
 
@@ -198,9 +280,26 @@ preserving, and $\pi_T$ is evaluated at both endpoints used in
 even when $\pi_P\neq\pi_T$.
 \end{proposition}
 
-\noindent
-The proposition follows from the standard deterministic-proposal Metropolis
-argument for leapfrog HMC \citep{neal2011hmc}. It places two practical
+\begin{proof}
+On the extended state $z=(q,p)$, the target density is proportional to
+$\exp\{-H_T(z)\}$. Compose the leapfrog map with momentum negation. By the
+assumptions, the resulting map is an involution with unit Jacobian determinant.
+The deterministic Metropolis ratio is therefore
+$\exp\{-H_T(z')+H_T(z)\}$, and \eqref{eq:acceptance} gives detailed balance on
+the extended state. Marginalizing the refreshed momentum leaves $\pi_T(q)$
+invariant. The construction of $\Phi_{\pi_P}$ affects acceptance but not this
+invariance argument.
+\end{proof}
+
+One transition has four auditable steps. Draw fresh Gaussian momentum; apply
+$L$ leapfrog steps using only $\nabla\log\pi_P$; reject immediately if the
+proposal or target is non-finite; otherwise apply \eqref{eq:acceptance} using
+$\pi_T$ at the two endpoints. Step size and mass-matrix adaptation end with
+warmup. The frozen network, normalization constants, parameter transform, and
+target implementation are part of the recorded sampling state.
+
+The proposition is the standard deterministic-proposal Metropolis argument for
+leapfrog HMC \citep{neal2011hmc}. It places two practical
 restrictions on the implementation. First, the surrogate and every preprocessing
 transformation used in the force must be frozen during production sampling.
 Second, ``exact'' always modifies the declared target. If
@@ -259,6 +358,35 @@ branching order, multiple quadrature nodes, and nonzero coverage of every
 declared shock. Common case identifiers are evaluated by both the Python and
 MacroModelling.jl implementations.
 
+For trajectory case $i$ with $d_x$ reported outputs, the primary approximation
+metric is the scale-adjusted root mean squared error
+\begin{equation}
+ e^{x}_i=\left\{\frac{1}{Td_x}
+ \sum_{t=1}^{T}\left\|D_x^{-1}
+ (\widehat x^F_{it}-x^F_{it})\right\|_2^2\right\}^{1/2},
+ \label{eq:trajectory-error}
+\end{equation}
+where $D_x$ is fixed from the training partition. Paired differences
+$e^x_{i,\mathrm{ROM}}-e^x_{i,\mathrm{sur}}$ are summarized with a 95 percent
+interval over prespecified test cases. Reporting includes medians, upper-tail
+quantiles, and every output separately; an average cannot hide failure in one
+observable.
+
+Likelihood geometry is compared after removing an arbitrary additive constant.
+For reference point $\theta_0$, define
+\begin{equation}
+ e^\ell(\theta)=
+ \bigl[\log\widetilde L_\psi(\theta)-
+       \log\widetilde L_\psi(\theta_0)\bigr]
+ -\bigl[\log L_F(\theta)-\log L_F(\theta_0)\bigr].
+ \label{eq:centered-likelihood-error}
+\end{equation}
+The grid analysis reports the distribution of $e^\ell$, rank reversals near the
+mode, and normalized gradient discrepancies only where the reference gradient
+exceeds a frozen floor. Posterior means and interval endpoints are compared to
+their combined grid-discretization or Monte Carlo uncertainty, not to an
+arbitrary number of printed decimal places.
+
 The primary accuracy outcomes are scaled equilibrium residuals; held-out,
 per-output trajectory errors; paired improvement over the ROM with uncertainty;
 centered log-likelihood error; rank reversals near the mode; and normalized
@@ -277,6 +405,14 @@ GPU-native likelihood. The available GPU-native matrix-sign alternative must
 pass Gal\'i-specific solution and likelihood parity before it enters a speed
 claim.
 
+The primary decision is sequential. Experiment A first asks whether the
+two-parameter nonlinear reference and surrogate conclusions agree within the
+frozen numerical tolerances. A failure stops escalation to the higher-dimensional
+sampling experiment. Conditional on correctness, Experiment B asks whether the
+method improves effective samples per second after offline target generation,
+training, compilation, transfers, and failed solves are included. A method can
+therefore pass the correctness gate and fail the computational-value gate.
+
 The protocol is frozen before confirmatory execution. It records the repository
 revision, dirty-worktree state, environment, command, seeds, hardware, precision,
 and content hashes for every evidence artifact. Numerical failures remain in
@@ -288,12 +424,14 @@ source of manuscript tables; hand-entered numerical cells are not permitted.
 
 \input{generated/pilot_results.tex}
 
-The pilot establishes four narrow facts. The parser, parameter-specific
+The pilot establishes three narrow facts. The parser, parameter-specific
 preflight, nonlinear equation solver, residual network, likelihood, and sampler
 compose on the full model. The order-zero extended-path targets satisfy a strict
-residual check in this small design. The fitted residual improves held-out state
-error over the first-order ROM. Finally, the Python and JAX implementations of
-the same surrogate profile inversion objective agree at the audited calibration.
+residual check in this small design. Finally, the Python and JAX implementations
+of the same surrogate profile inversion objective agree at the audited
+calibration. The recorded improvement over the ROM is a calibration-set result
+because per-output shrinkage was fitted on the same block; it is not counted as
+a fourth out-of-sample fact.
 
 The corrected resource run establishes only that endpoint evaluation is
 possible under a tiny budget. It retained four draws in total, achieved 100
@@ -301,7 +439,7 @@ percent acceptance, and processed 0.0267 draws per second. Those numbers are not
 convergence evidence and are not a speed advantage. The acceptance rate instead
 suggests that the static-HMC tuning is far from an efficient production regime.
 
-\section{Required confirmatory evidence}
+\section{Claim-specific decision rules}
 
 Table~\ref{tab:submission-gates} defines the minimum evidence needed to promote
 the working draft to a submission. Counts are protocol defaults, not universal
@@ -321,7 +459,8 @@ a missing observation or silently omitted path.
 The preserved evidence is an engineering pilot. Its nonlinear targets use
 branching order zero and one node, so it does not validate stochastic
 expectations. Most likelihood calls hold the reference steady state and ROM
-fixed. The parameter-dependent full-JAX run still targets the surrogate profile
+fixed. Its reported surrogate RMSE is calibration-adjusted rather than measured
+on an untouched test partition. The parameter-dependent full-JAX run still targets the surrogate profile
 inversion objective, assigns a finite $-10^{12}$ sentinel to failed solves, and
 uses a host-callback Schur solve. An exact structural posterior instead requires
 explicit support handling and an economically defined likelihood. The sampler
@@ -339,16 +478,17 @@ reduced to numerical infrastructure.
 
 \section{Conclusion}
 
-Residual learning can be useful for nonlinear DSGE estimation because a
+Residual learning may be useful for nonlinear DSGE estimation because a
 first-order model provides a disciplined baseline and the network concentrates
 on the nonlinear discrepancy. Target-corrected HMC can remove error from the
 trajectory force, but only relative to the density actually evaluated at the
 Metropolis endpoints. The preserved Gal\'i pilot shows that the software path is
-feasible and identifies the dominant remaining costs. Publication readiness now
-depends on stochastic-SEP validation, an independently converged nonlinear
-posterior reference, cross-language parity, efficient multi-chain sampling, and
-same-work timing. The accompanying evidence protocol makes those requirements
-falsifiable and reproducible.
+feasible and reveals where apparently favorable diagnostics can overstate the
+evidence. Publication readiness depends on stochastic-SEP validation, an
+untouched test design, an independently converged nonlinear posterior reference,
+cross-language parity, efficient multi-chain sampling, and same-work timing.
+The accompanying protocol makes those requirements falsifiable and preserves
+negative results rather than redefining success after a run.
 
 \section*{Disclosure on computational assistance}
 
