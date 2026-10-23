@@ -6339,6 +6339,7 @@ class MacroModel:
             Sequence[Sequence[Sequence[float]]] | Mapping[str, Sequence[Sequence[float]]]
         ] = None,
         initial_guess: Optional[Sequence[Sequence[float]]] = None,
+        fallback_to_default_initial_guess: bool = False,
         batch_size: Optional[int] = None,
     ) -> ParsedModelBatchedSEPResult:
         """Solve a fixed-shape batch of parsed-model SEP problems with JAX.
@@ -6525,7 +6526,8 @@ class MacroModel:
             dtype=jnp.float64,
         )
         batched_initial_guess = initial_guess
-        if batched_initial_guess is None:
+        fallback_initial_guess = None
+        if batched_initial_guess is None or bool(fallback_to_default_initial_guess):
             rule = (
                 _gauss_hermite_sparse_rule(
                     config.nnodes,
@@ -6568,7 +6570,11 @@ class MacroModel:
                         ]
                     )
                 guess_blocks.append(np.asarray(linear_guess, dtype=np.float64))
-            batched_initial_guess = np.stack(guess_blocks, axis=0)
+            default_initial_guess = np.stack(guess_blocks, axis=0)
+            if batched_initial_guess is None:
+                batched_initial_guess = default_initial_guess
+            else:
+                fallback_initial_guess = default_initial_guess
 
         def conditional_residual(
             lag_state: jax.Array,
@@ -6596,6 +6602,7 @@ class MacroModel:
             deterministic_shocks=deterministic_shock_values,
             params=(parameter_batch_array, steady_reference_batch),
             initial_guess=batched_initial_guess,
+            fallback_initial_guess=fallback_initial_guess,
         )
         return ParsedModelBatchedSEPResult(
             steady_state=jnp.asarray(steady_matrix, dtype=jnp.float64),
@@ -8301,6 +8308,7 @@ def solve_batched_stochastic_extended_path_model(
         Sequence[Sequence[Sequence[float]]] | Mapping[str, Sequence[Sequence[float]]]
     ] = None,
     initial_guess: Optional[Sequence[Sequence[float]]] = None,
+    fallback_to_default_initial_guess: bool = False,
     batch_size: Optional[int] = None,
 ) -> ParsedModelBatchedSEPResult:
     return model.solve_batched_stochastic_extended_path(
@@ -8314,6 +8322,7 @@ def solve_batched_stochastic_extended_path_model(
         config=config,
         deterministic_shocks=deterministic_shocks,
         initial_guess=initial_guess,
+        fallback_to_default_initial_guess=fallback_to_default_initial_guess,
         batch_size=batch_size,
     )
 

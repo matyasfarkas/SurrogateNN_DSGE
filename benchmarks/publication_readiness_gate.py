@@ -141,6 +141,12 @@ GATES: tuple[Gate, ...] = (
 
     _gate("numerical_solution", "numerical_solution.parameter_draws", "min_int", 8, 100, 1000,
           "Coverage must extend beyond a few favorable calibrations."),
+    _gate("numerical_solution", "numerical_solution.runtime_success_count", "min_int", 0, 0, 0,
+          "The runtime-success share must be backed by an explicit numerator."),
+    _gate("numerical_solution", "numerical_solution.full_path_success_count", "min_int", 0, 0, 0,
+          "The full-path success share must be backed by an explicit numerator."),
+    _gate("numerical_solution", "numerical_solution.steady_state_fallback_count", "min_int", 0, 0, 0,
+          "The fallback share must be backed by an explicit numerator."),
     _gate("numerical_solution", "numerical_solution.runtime_success_share", "min_fraction",
           0.80, 0.95, 0.99,
           "Steady-state and first-order preparation must work over the declared support."),
@@ -345,6 +351,76 @@ def _evaluate(value: Any, operator: str, threshold: Any) -> tuple[bool, str]:
     raise ValueError(f"Unknown gate operator {operator!r}.")
 
 
+def _numerical_solution_counts_are_consistent(
+    payload: Mapping[str, Any],
+) -> tuple[bool, dict[str, Any], str]:
+    """Check that reported numerical-solution shares use one declared denominator."""
+
+    keys = (
+        "parameter_draws",
+        "runtime_success_count",
+        "runtime_success_share",
+        "full_path_success_count",
+        "full_path_success_share",
+        "steady_state_fallback_count",
+        "steady_state_fallback_share",
+    )
+    observed = {
+        key: _lookup(payload, f"numerical_solution.{key}")
+        for key in keys
+    }
+    serializable = {
+        key: None if value is _MISSING else value
+        for key, value in observed.items()
+    }
+    draws = observed["parameter_draws"]
+    count_keys = (
+        "runtime_success_count",
+        "full_path_success_count",
+        "steady_state_fallback_count",
+    )
+    if (
+        not isinstance(draws, int)
+        or isinstance(draws, bool)
+        or draws <= 0
+        or any(
+            not isinstance(observed[key], int)
+            or isinstance(observed[key], bool)
+            or not 0 <= observed[key] <= draws
+            for key in count_keys
+        )
+    ):
+        return (
+            False,
+            serializable,
+            "counts must be non-negative integers no larger than parameter_draws",
+        )
+    if observed["full_path_success_count"] > observed["runtime_success_count"]:
+        return (
+            False,
+            serializable,
+            "full_path_success_count cannot exceed runtime_success_count",
+        )
+
+    count_share_pairs = (
+        ("runtime_success_count", "runtime_success_share"),
+        ("full_path_success_count", "full_path_success_share"),
+        ("steady_state_fallback_count", "steady_state_fallback_share"),
+    )
+    for count_key, share_key in count_share_pairs:
+        share = observed[share_key]
+        expected = observed[count_key] / draws
+        if not _finite_number(share) or not math.isclose(
+            float(share), float(expected), rel_tol=0.0, abs_tol=1.0e-12
+        ):
+            return (
+                False,
+                serializable,
+                f"{share_key} must equal {count_key} / parameter_draws",
+            )
+    return True, serializable, "counts and shares use parameter_draws as their denominator"
+
+
 def evaluate_payload(
     payload: Mapping[str, Any],
     *,
@@ -431,6 +507,31 @@ def evaluate_payload(
             "threshold": "equal",
             "detail": "parameter count must equal the number of parameter names",
             "rationale": "The declared parameter dimension and parameter list must agree.",
+        }
+    )
+
+    numerical_counts_consistent, numerical_counts, numerical_counts_detail = (
+        _numerical_solution_counts_are_consistent(payload)
+    )
+    evaluated += 1
+    numerical = categories["numerical_solution"]
+    numerical["passed" if numerical_counts_consistent else "failed"] += 1
+    if not numerical_counts_consistent:
+        failed += 1
+        numerical["status"] = "fail"
+    numerical["checks"].append(
+        {
+            "path": "numerical_solution.count_share_consistency",
+            "status": "pass" if numerical_counts_consistent else "fail",
+            "observed": numerical_counts,
+            "missing": any(value is None for value in numerical_counts.values()),
+            "operator": "consistent_counts_and_shares",
+            "threshold": "shares equal counts / parameter_draws",
+            "detail": numerical_counts_detail,
+            "rationale": (
+                "A common denominator prevents failed or dropped parameter draws from "
+                "being removed when solution coverage is reported."
+            ),
         }
     )
 

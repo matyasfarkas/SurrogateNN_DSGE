@@ -17,17 +17,17 @@
     },
     {
       "id": "jax_python_likelihood_implementation_parity",
-      "statement": "JAX and Python evaluations of the same surrogate inversion likelihood agree within 1.705e-13 at the audited calibration.",
+      "statement": "JAX and Python evaluations of the same surrogate profile inversion objective agree within 1.705e-13 at the audited calibration.",
       "status": "supported_by_pilot"
     },
     {
       "id": "target_corrected_sampler_executes",
-      "statement": "A target-corrected sampler can use fixed-reference proposal gradients and evaluate the parameter-dependent full-JAX surrogate likelihood only at trajectory endpoints without differentiating that target.",
+      "statement": "A target-corrected sampler can use fixed-reference proposal gradients and evaluate the parameter-dependent full-JAX surrogate profile objective only at trajectory endpoints without differentiating that target.",
       "status": "resource_feasibility_only"
     },
     {
       "id": "exact_full_nonlinear_posterior",
-      "statement": "The pilot does not establish exact sampling from a full nonlinear SEP posterior because its endpoint target remains a surrogate inversion likelihood.",
+      "statement": "The pilot does not establish exact sampling from a full nonlinear SEP posterior because its endpoint target remains a surrogate profile objective.",
       "status": "not_supported"
     },
     {
@@ -78,7 +78,7 @@
       "jax_backend": "gpu",
       "jax_density_caveat": "Evaluates the full JAX surrogate likelihood with parameter-dependent steady-state and first-order ROM solves; gradient evaluation was disabled.",
       "jax_parity_abs_diff": 0.0,
-      "jax_python_comparison_scope": "same surrogate likelihood implementation",
+      "jax_python_comparison_scope": "same surrogate profile objective implementation",
       "label": "corrected_full_jax_resource",
       "likelihood_kind": "surrogate_profile_inversion_objective",
       "likelihood_runtime_mode": "full-jax",
@@ -113,7 +113,7 @@
       "jax_backend": "gpu",
       "jax_density_caveat": "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; steady-state and first-order matrices are held fixed in this smoke check.",
       "jax_parity_abs_diff": 1.7053025658242404e-13,
-      "jax_python_comparison_scope": "same surrogate likelihood implementation",
+      "jax_python_comparison_scope": "same surrogate profile objective implementation",
       "label": "default",
       "likelihood_kind": "surrogate_profile_inversion_objective",
       "likelihood_runtime_mode": "fixed-reference",
@@ -148,7 +148,7 @@
       "jax_backend": "gpu",
       "jax_density_caveat": "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; steady-state and first-order matrices are held fixed in this smoke check.",
       "jax_parity_abs_diff": 0.0,
-      "jax_python_comparison_scope": "same surrogate likelihood implementation",
+      "jax_python_comparison_scope": "same surrogate profile objective implementation",
       "label": "quick",
       "likelihood_kind": "surrogate_profile_inversion_objective",
       "likelihood_runtime_mode": "fixed-reference",

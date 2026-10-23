@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Callable, NamedTuple
 
 import jax
@@ -104,8 +105,49 @@ def _momentum_like(
 
 
 def _sanitize_accept_prob(log_accept_ratio: Any) -> Any:
-    accept_prob = jnp.exp(jnp.minimum(log_accept_ratio, 0.0))
-    return jnp.where(jnp.isfinite(accept_prob), accept_prob, 0.0)
+    finite_ratio = jnp.isfinite(log_accept_ratio)
+    safe_log_accept_ratio = jnp.where(
+        finite_ratio,
+        jnp.minimum(log_accept_ratio, 0.0),
+        -jnp.inf,
+    )
+    return jnp.exp(safe_log_accept_ratio)
+
+
+def _require_finite_if_concrete(value: Any, *, name: str) -> None:
+    """Reject nonfinite eager inputs while allowing traced JAX values."""
+    try:
+        all_finite = bool(jnp.all(jnp.isfinite(value)))
+    except jax.errors.ConcretizationTypeError:
+        return
+    if not all_finite:
+        raise ValueError(f"{name} must contain only finite values")
+
+
+def _require_positive_finite_if_concrete(value: Any, *, name: str) -> None:
+    """Reject nonpositive or nonfinite eager inputs while allowing tracers."""
+    try:
+        all_positive_finite = bool(jnp.all(jnp.isfinite(value) & (value > 0.0)))
+    except jax.errors.ConcretizationTypeError:
+        return
+    if not all_positive_finite:
+        raise ValueError(f"{name} must contain only finite, positive values")
+
+
+def _require_valid_step_bounds_if_concrete(min_step_size: Any, max_step_size: Any) -> None:
+    """Validate eager step-size bounds without constraining JIT-traced scalars."""
+    try:
+        minimum = float(min_step_size)
+        maximum = float(max_step_size)
+    except (TypeError, jax.errors.ConcretizationTypeError):
+        return
+    if (
+        not math.isfinite(minimum)
+        or not math.isfinite(maximum)
+        or minimum <= 0.0
+        or maximum <= minimum
+    ):
+        raise ValueError("step-size bounds must be finite and satisfy 0 < min < max")
 
 
 def static_hmc_sample(
@@ -134,19 +176,14 @@ def static_hmc_sample(
     position = jnp.asarray(initial_position)
     if position.ndim != 2:
         raise ValueError("initial_position must have shape (num_chains, num_parameters)")
+    _require_finite_if_concrete(position, name="initial_position")
     if num_warmup < 0 or num_samples < 0:
         raise ValueError("num_warmup and num_samples must be non-negative")
     if num_leapfrog_steps <= 0:
         raise ValueError("num_leapfrog_steps must be positive")
-    if min_step_size <= 0.0 or max_step_size <= min_step_size:
-        raise ValueError("step-size bounds must satisfy 0 < min < max")
+    _require_valid_step_bounds_if_concrete(min_step_size, max_step_size)
     step_size_array = jnp.asarray(step_size, dtype=position.dtype)
-    try:
-        if float(step_size) <= 0.0:
-            raise ValueError("step_size must be positive")
-    except (TypeError, jax.errors.ConcretizationTypeError):
-        # Dynamic JAX scalars are validated by the caller and clipped below.
-        pass
+    _require_positive_finite_if_concrete(step_size_array, name="step_size")
 
     if inverse_mass is None:
         inverse_mass_array = jnp.ones((position.shape[-1],), dtype=position.dtype)
@@ -154,10 +191,13 @@ def static_hmc_sample(
         inverse_mass_array = jnp.asarray(inverse_mass, dtype=position.dtype)
         if inverse_mass_array.shape != (position.shape[-1],):
             raise ValueError("inverse_mass must have shape (num_parameters,)")
+    _require_positive_finite_if_concrete(inverse_mass_array, name="inverse_mass")
 
     value_and_grad = jax.value_and_grad(log_prob_fn)
     batched_value_and_grad = jax.vmap(value_and_grad)
     initial_log_prob, initial_grad = batched_value_and_grad(position)
+    _require_finite_if_concrete(initial_log_prob, name="initial log probability")
+    _require_finite_if_concrete(initial_grad, name="initial log-probability gradient")
     state = StaticHMCState(position, initial_log_prob, initial_grad)
     log_min_step = jnp.log(jnp.asarray(min_step_size, dtype=position.dtype))
     log_max_step = jnp.log(jnp.asarray(max_step_size, dtype=position.dtype))
@@ -344,18 +384,14 @@ def surrogate_trajectory_hmc_sample(
     position = jnp.asarray(initial_position)
     if position.ndim != 2:
         raise ValueError("initial_position must have shape (num_chains, num_parameters)")
+    _require_finite_if_concrete(position, name="initial_position")
     if num_warmup < 0 or num_samples < 0:
         raise ValueError("num_warmup and num_samples must be non-negative")
     if num_leapfrog_steps <= 0:
         raise ValueError("num_leapfrog_steps must be positive")
-    if min_step_size <= 0.0 or max_step_size <= min_step_size:
-        raise ValueError("step-size bounds must satisfy 0 < min < max")
+    _require_valid_step_bounds_if_concrete(min_step_size, max_step_size)
     step_size_array = jnp.asarray(step_size, dtype=position.dtype)
-    try:
-        if float(step_size) <= 0.0:
-            raise ValueError("step_size must be positive")
-    except (TypeError, jax.errors.ConcretizationTypeError):
-        pass
+    _require_positive_finite_if_concrete(step_size_array, name="step_size")
 
     if inverse_mass is None:
         inverse_mass_array = jnp.ones((position.shape[-1],), dtype=position.dtype)
@@ -363,6 +399,7 @@ def surrogate_trajectory_hmc_sample(
         inverse_mass_array = jnp.asarray(inverse_mass, dtype=position.dtype)
         if inverse_mass_array.shape != (position.shape[-1],):
             raise ValueError("inverse_mass must have shape (num_parameters,)")
+    _require_positive_finite_if_concrete(inverse_mass_array, name="inverse_mass")
 
     batched_target_log_prob = jax.vmap(target_log_prob_fn)
     proposal_value_and_grad = jax.value_and_grad(proposal_log_prob_fn)
@@ -370,6 +407,18 @@ def surrogate_trajectory_hmc_sample(
     initial_target_log_prob = batched_target_log_prob(position)
     initial_proposal_log_prob, initial_proposal_grad = batched_proposal_value_and_grad(
         position
+    )
+    _require_finite_if_concrete(
+        initial_target_log_prob,
+        name="initial target log probability",
+    )
+    _require_finite_if_concrete(
+        initial_proposal_log_prob,
+        name="initial proposal log probability",
+    )
+    _require_finite_if_concrete(
+        initial_proposal_grad,
+        name="initial proposal log-probability gradient",
     )
     state = SurrogateTrajectoryHMCState(
         position,

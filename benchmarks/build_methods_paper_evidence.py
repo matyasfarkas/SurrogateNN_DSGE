@@ -4,7 +4,7 @@
 The builder deliberately distinguishes three objects that are easy to conflate:
 
 1. nonlinear SEP targets used to train and validate the residual surrogate;
-2. the parameter-dependent, full-JAX *surrogate* inversion likelihood; and
+2. the parameter-dependent, full-JAX surrogate profile inversion objective; and
 3. an exact nonlinear SEP likelihood, which the current pilot does not evaluate
    inside HMC.
 
@@ -140,7 +140,7 @@ def _run_metrics(label: str, summary: Mapping[str, Any], raw: Mapping[str, Any])
             summary.get("likelihood_runtime_mode") == "full-jax"
         ),
         "full_nonlinear_likelihood_in_hmc": False,
-        "jax_python_comparison_scope": "same surrogate likelihood implementation",
+        "jax_python_comparison_scope": "same surrogate profile objective implementation",
         "hmc_kind": str(hmc.get("kind")),
         "raw_quality_gate_status": str(gate.get("status")),
         "jax_density_caveat": str(jax_density.get("caveat", "")),
@@ -239,7 +239,7 @@ def build_evidence(suite_root: Path) -> dict[str, Any]:
             "id": "jax_python_likelihood_implementation_parity",
             "status": "supported_by_pilot",
             "statement": (
-                "JAX and Python evaluations of the same surrogate inversion likelihood agree "
+                "JAX and Python evaluations of the same surrogate profile inversion objective agree "
                 f"within {default['jax_parity_abs_diff']:.3e} at the audited calibration."
             ),
         },
@@ -248,7 +248,7 @@ def build_evidence(suite_root: Path) -> dict[str, Any]:
             "status": "resource_feasibility_only",
             "statement": (
                 "A target-corrected sampler can use fixed-reference proposal gradients and "
-                "evaluate the parameter-dependent full-JAX surrogate likelihood only at "
+                "evaluate the parameter-dependent full-JAX surrogate profile objective only at "
                 "trajectory endpoints without differentiating that target."
             ),
         },
@@ -257,7 +257,7 @@ def build_evidence(suite_root: Path) -> dict[str, Any]:
             "status": "not_supported",
             "statement": (
                 "The pilot does not establish exact sampling from a full nonlinear SEP "
-                "posterior because its endpoint target remains a surrogate inversion likelihood."
+                "posterior because its endpoint target remains a surrogate profile objective."
             ),
         },
         {
@@ -352,8 +352,8 @@ def render_latex_table(evidence: Mapping[str, Any]) -> str:
 \centering
 \caption{{Preserved full-model Galí engineering pilots}}
 \label{{tab:pilot-results}}
-\small
-\begin{{threeparttable}}
+\scriptsize
+\setlength{{\tabcolsep}}{{3pt}}
 \begin{{tabular}}{{llrrrrrr}}
 \toprule
 Run & Target runtime & $N_\theta \times T$ & Max. residual & Val. RMSE & Corrected & Accept. & Draws/s \\
@@ -361,10 +361,9 @@ Run & Target runtime & $N_\theta \times T$ & Max. residual & Val. RMSE & Correct
 {body}
 \bottomrule
 \end{{tabular}}
-\begin{{tablenotes}}\footnotesize
-\item \textit{{Notes:}} All runs use the complete 23-equation nonlinear Galí source but estimate only two policy-rule parameters. $N_\theta$ is the number of parameter vectors and $T$ is the observation horizon. Target construction used branching order zero and one node, so these are deterministic nonlinear extended-path pilots, not stochastic-expectations SEP validation. ``Full-JAX'' recomputes the parameter-dependent steady state and first-order ROM inside the surrogate inversion likelihood. It does not evaluate a full nonlinear SEP likelihood inside HMC. Correction therefore targets the declared surrogate likelihood, not an exact full-nonlinear posterior. The quick, corrected-resource, and default runs use respectively 1, 2, and 1 chains with 2, 2, and 50 post-warmup draws per chain. These runs establish execution and resource feasibility only.
-\end{{tablenotes}}
-\end{{threeparttable}}
+
+\vspace{{0.4em}}
+\parbox{{0.98\textwidth}}{{\footnotesize\textit{{Notes:}} All runs use the complete 23-equation nonlinear Galí source but estimate only two policy-rule parameters. $N_\theta$ is the number of parameter vectors and $T$ is the observation horizon. Target construction used branching order zero and one node, so these are deterministic nonlinear extended-path pilots, not stochastic-expectations SEP validation. ``Full-JAX'' recomputes the parameter-dependent steady state and first-order ROM inside the surrogate profile inversion objective. It does not evaluate a full nonlinear SEP likelihood inside HMC. Correction therefore targets the declared surrogate objective, not an exact full-nonlinear posterior. The quick, corrected-resource, and default runs use respectively 1, 2, and 1 chains with 2, 2, and 50 post-warmup draws per chain. These runs establish execution and resource feasibility only.}}
 \end{{table}}
 """
 

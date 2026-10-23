@@ -3,7 +3,6 @@
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath,amssymb,amsthm}
 \usepackage{booktabs}
-\usepackage{threeparttable}
 \usepackage{microtype}
 \usepackage{natbib}
 \usepackage[hidelinks]{hyperref}
@@ -15,7 +14,7 @@
 \title{Residual Surrogates for Nonlinear DSGE Estimation:\\
 An Auditable Target-Corrected Workflow}
 \author{Anonymous working draft}
-\date{October 22, 2026}
+\date{October 23, 2026}
 
 \begin{document}
 \maketitle
@@ -24,7 +23,7 @@ An Auditable Target-Corrected Workflow}
 Repeated nonlinear model solution can dominate likelihood-based estimation of
 dynamic stochastic general equilibrium models. We develop an auditable workflow
 that learns the discrepancy between a first-order reduced-order model and
-nonlinear extended-path solutions, evaluates the resulting inversion likelihood
+nonlinear extended-path solutions, evaluates the resulting profile inversion objective
 in JAX, and uses a cheap differentiable density to construct Hamiltonian
 proposals. A Metropolis test at each trajectory endpoint can preserve any
 declared target density that is evaluated there. This correction is established
@@ -35,10 +34,10 @@ evidence protocol. A preserved engineering pilot exercises the complete
 accepts 80 order-zero extended-path targets with maximum equation residual
 $9.92\times10^{-9}$, reduces held-out state error relative to the first-order
 model by 53.9 percent on average, and matches Python and JAX evaluations of the
-same surrogate likelihood within $1.71\times10^{-13}$. These results establish
+same surrogate objective within $1.71\times10^{-13}$. These results establish
 pipeline execution, not posterior fidelity or speedup: the pilot uses
 deterministic extended path, and its corrected HMC target remains a surrogate
-likelihood. We therefore state the confirmatory tests required before the method
+objective. We therefore state the confirmatory tests required before the method
 can support substantive inference claims.
 \end{abstract}
 
@@ -102,13 +101,14 @@ prediction point. Parameter vectors, rather than individual rows, are assigned
 to training or validation. This prevents trajectories from the same parameter
 value from appearing on both sides of the split.
 
-The exact nonlinear estimand for data $y_{1:T}$ is
+The target nonlinear posterior for data $y_{1:T}$ is
 \begin{equation}
   \pi_F(\theta\mid y)\propto p(\theta)L_F(y_{1:T}\mid\theta),
   \label{eq:exact-posterior}
 \end{equation}
-where $L_F$ uses the declared nonlinear solution and shock-inversion procedure.
-The present implementation also defines a surrogate inversion objective
+where $L_F$ denotes an independently validated nonlinear likelihood with a
+declared treatment of latent shocks and every required change-of-variables
+term. The present implementation instead defines a surrogate inversion objective
 $\widetilde L_{\psi}$ by replacing nonlinear trajectories with
 \eqref{eq:residual-surrogate}, optimizing latent shocks, and evaluating the
 shock and measurement penalties at that optimizer. Unless an integration,
@@ -118,6 +118,26 @@ two objects are therefore scientifically distinct. Agreement between Python and
 JAX evaluations of $\widetilde L_{\psi}$ is implementation parity; it is not
 evidence that $\widetilde L_{\psi}=L_F$.
 
+More explicitly, let $h_{\psi}(s_t,\varepsilon_t,\theta)$ map a state and
+structural shock into the observables implied by the ROM plus residual
+surrogate. At each date, the implementation computes
+\begin{equation}
+  \widehat\varepsilon_t(\theta)
+  =\arg\min_{\varepsilon}
+  \left\{
+  \lVert R^{-1/2}[y_t-h_{\psi}(s_t,\varepsilon,\theta)]\rVert_2^2
+  +\lVert Q^{-1/2}\varepsilon\rVert_2^2
+  \right\},
+  \label{eq:shock-profile}
+\end{equation}
+using a damped Gauss--Newton iteration, and then sums the Gaussian penalties
+evaluated at $\widehat\varepsilon_t(\theta)$. Here $R$ and $Q$ are diagonal in
+the pilot. The state passed to date $t+1$ follows the configured ROM or
+surrogate replay. Equation~\eqref{eq:shock-profile} makes the missing operation
+clear: the latent shocks are optimized, not integrated out. It also clarifies
+why agreement between two implementations of this calculation is a software
+check rather than likelihood validation.
+
 The benchmark model is the complete nonlinear New Keynesian system distributed
 with the MacroModelling.jl examples and associated with the model in
 \citet{gali2015}. It contains 23 equations, 16 declared parameters, and three
@@ -126,6 +146,34 @@ inflation and output, $\phi_\pi$ and $\phi_y$, while retaining every model
 equation. Reducing the parameter dimension makes a numerical posterior reference
 feasible; it does not turn the model into the familiar three-equation
 linearization.
+
+\subsection{Offline and online computations}
+
+The offline stage draws complete parameter vectors, solves a parameter-specific
+steady state and first-order ROM, and generates nonlinear extended-path targets
+conditional on designed state and shock paths. Each attempted target retains a
+case identifier, solver status, residual norm, and parameter-group identifier.
+Only the training partition determines feature scaling and network weights.
+Validation partitions are disjoint in complete parameter vectors, not merely in
+individual rows. The residual network and every preprocessing constant are
+then frozen and serialized with the model identity and source hashes.
+
+The online stage transforms an unconstrained vector $q$ to bounded structural
+parameters, adds the transform Jacobian to the declared log target, rebuilds
+the parameter-dependent objects required by the selected runtime, and evaluates
+either the profile objective or a nonlinear reference. A surrogate-gradient
+trajectory costs many cheap force evaluations but only one new target
+evaluation per transition. This accounting---rather than draws per second
+alone---is central when the endpoint target contains a nonlinear solution.
+
+Extended path traces back to \citet{fair1983extended}. Deterministic extended
+path sets future innovations to their conditional means and therefore does not
+capture Jensen effects in nonlinear expectations. Stochastic extended path
+approximates those conditional expectations over future shocks
+\citep{adjemian2025sep}. This is why positive branching order, multiple nodes,
+and active variation in every shock are hard requirements for confirmatory
+evidence, even though order zero is useful for debugging deterministic
+nonlinearity.
 
 \section{Target-corrected surrogate trajectories}
 
@@ -159,6 +207,32 @@ Second, ``exact'' always modifies the declared target. If
 $\pi_T\propto p(\theta)\widetilde L_{\psi}$, the chain is exact for the
 surrogate-defined posterior, not for \eqref{eq:exact-posterior}. Exact nonlinear
 posterior claims require endpoint evaluation of $L_F$ itself.
+
+For bounded parameters $\theta_j\in(a_j,b_j)$, the implementation samples
+$q_j\in\mathbb{R}$ and uses
+\begin{equation}
+  \theta_j=a_j+(b_j-a_j)\operatorname{logit}^{-1}(q_j),
+  \qquad
+  \log J(q)=\sum_j\left[
+    \log(b_j-a_j)+\log\sigma(q_j)+\log\{1-\sigma(q_j)\}
+  \right].
+  \label{eq:bounded-transform}
+\end{equation}
+Thus the endpoint target is defined in $q$ coordinates and must include
+$\log J(q)$. Invalid steady states, indeterminate local solutions, failed
+nonlinear paths, or non-finite objective values must be rejected as points
+outside support. A large finite penalty is not equivalent: it creates an
+artificial plateau with positive density. The preserved pilot still uses such a
+sentinel and therefore cannot support an exact structural-posterior claim.
+
+The sampler has three implementation-level regression checks. When proposal and
+target densities coincide, its draws and accept/reject decisions match the
+ordinary static-HMC implementation under the same key. Under a deliberately
+shifted and rescaled proposal force, a fixed-seed multi-chain test recovers the
+known moments of a standard-normal target after endpoint correction. Finally,
+non-finite candidate targets receive zero acceptance probability. These tests
+check kernel plumbing; they do not replace convergence and posterior-fidelity
+evidence for the DSGE application.
 
 This distinction is especially relevant for differentiable state-space and
 DSGE estimation, where automatic differentiation improves computation but does
@@ -203,6 +277,13 @@ GPU-native likelihood. The available GPU-native matrix-sign alternative must
 pass Gal\'i-specific solution and likelihood parity before it enters a speed
 claim.
 
+The protocol is frozen before confirmatory execution. It records the repository
+revision, dirty-worktree state, environment, command, seeds, hardware, precision,
+and content hashes for every evidence artifact. Numerical failures remain in
+attempted-case denominators and are stratified by prior-interior,
+posterior-region, and boundary-stress designs. Machine-readable evidence is the
+source of manuscript tables; hand-entered numerical cells are not permitted.
+
 \section{Preserved engineering pilot}
 
 \input{generated/pilot_results.tex}
@@ -212,7 +293,7 @@ preflight, nonlinear equation solver, residual network, likelihood, and sampler
 compose on the full model. The order-zero extended-path targets satisfy a strict
 residual check in this small design. The fitted residual improves held-out state
 error over the first-order ROM. Finally, the Python and JAX implementations of
-the same surrogate likelihood agree at the audited calibration.
+the same surrogate profile inversion objective agree at the audited calibration.
 
 The corrected resource run establishes only that endpoint evaluation is
 possible under a tiny budget. It retained four draws in total, achieved 100

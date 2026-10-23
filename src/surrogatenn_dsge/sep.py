@@ -42,6 +42,10 @@ class BatchedSEPSolution(NamedTuple):
     iterations: jax.Array
     group_counts: tuple[int, ...]
     jacobian_method: str
+    # 0 = terminal-state guess, 1 = primary initial_guess,
+    # 2 = fallback_initial_guess.  None is retained for compatibility with
+    # externally constructed fixtures that predate initial-guess diagnostics.
+    initial_guess_source: Optional[jax.Array] = None
 
 
 class _SEPTreeMetadata(NamedTuple):
@@ -1006,6 +1010,7 @@ def solve_batched_stochastic_extended_path_residual_expectation(
     config: SEPConfig = SEPConfig(),
     params: object = None,
     initial_guess: Optional[Sequence[Sequence[float]]] = None,
+    fallback_initial_guess: Optional[Sequence[Sequence[float]]] = None,
 ) -> BatchedSEPSolution:
     """Solve a fixed-shape batch of conditional-residual SEP problems with JAX.
 
@@ -1126,21 +1131,40 @@ def solve_batched_stochastic_extended_path_residual_expectation(
         ],
         axis=1,
     )
-    if initial_guess is None:
-        guess = terminal_guess
-    else:
-        guess_arr = jnp.asarray(initial_guess, dtype=jnp.float64)
+    def coerce_initial_guess(
+        values: Sequence[Sequence[float]],
+        *,
+        label: str,
+    ) -> jax.Array:
+        guess_arr = jnp.asarray(values, dtype=jnp.float64)
         if guess_arr.shape[0] != batch_size:
             raise ValueError(
-                "initial_guess must have one leading batch entry per deterministic_shocks draw, "
+                f"{label} must have one leading batch entry per deterministic_shocks draw, "
                 f"got {guess_arr.shape[0]} vs {batch_size}."
             )
-        guess = jnp.reshape(guess_arr, (batch_size, -1))
-        if guess.shape[1] != expected_stacked_size:
+        flattened = jnp.reshape(guess_arr, (batch_size, -1))
+        if flattened.shape[1] != expected_stacked_size:
             raise ValueError(
-                "initial_guess must flatten per draw to shape "
-                f"({expected_stacked_size},), got {guess.shape[1]}."
+                f"{label} must flatten per draw to shape "
+                f"({expected_stacked_size},), got {flattened.shape[1]}."
             )
+        return flattened
+
+    primary_guess = (
+        None
+        if initial_guess is None
+        else coerce_initial_guess(initial_guess, label="initial_guess")
+    )
+    fallback_guess = (
+        None
+        if fallback_initial_guess is None
+        else coerce_initial_guess(
+            fallback_initial_guess,
+            label="fallback_initial_guess",
+        )
+    )
+    guess = terminal_guess
+    initial_guess_source = jnp.zeros((batch_size,), dtype=jnp.int8)
 
     def weighted_child_sum(terms: jax.Array, weights: jax.Array) -> jax.Array:
         weight_shape = (weights.shape[0],) + (1,) * (terms.ndim - 1)
@@ -1256,13 +1280,43 @@ def solve_batched_stochastic_extended_path_residual_expectation(
             return jacobian_batch(stacked_batch, deterministic, initial_state_arr, terminal_state_arr)
         return jacobian_batch(stacked_batch, deterministic, initial_state_arr, terminal_state_arr, params_batch)
 
-    if initial_guess is not None:
-        guess_residual_norm = jnp.max(jnp.abs(eval_residual(guess)), axis=1)
-        terminal_residual_norm = jnp.max(jnp.abs(eval_residual(terminal_guess)), axis=1)
-        use_initial_guess = jnp.isfinite(guess_residual_norm) & (
-            guess_residual_norm <= terminal_residual_norm
+    selected_residual_norm = jnp.max(
+        jnp.abs(eval_residual(terminal_guess)),
+        axis=1,
+    )
+    if fallback_guess is not None:
+        fallback_residual_norm = jnp.max(
+            jnp.abs(eval_residual(fallback_guess)),
+            axis=1,
         )
-        guess = jnp.where(use_initial_guess[:, None], guess, terminal_guess)
+        use_fallback_guess = jnp.isfinite(fallback_residual_norm) & (
+            fallback_residual_norm <= selected_residual_norm
+        )
+        guess = jnp.where(use_fallback_guess[:, None], fallback_guess, guess)
+        selected_residual_norm = jnp.where(
+            use_fallback_guess,
+            fallback_residual_norm,
+            selected_residual_norm,
+        )
+        initial_guess_source = jnp.where(
+            use_fallback_guess,
+            jnp.asarray(2, dtype=jnp.int8),
+            initial_guess_source,
+        )
+    if primary_guess is not None:
+        primary_residual_norm = jnp.max(
+            jnp.abs(eval_residual(primary_guess)),
+            axis=1,
+        )
+        use_primary_guess = jnp.isfinite(primary_residual_norm) & (
+            primary_residual_norm <= selected_residual_norm
+        )
+        guess = jnp.where(use_primary_guess[:, None], primary_guess, guess)
+        initial_guess_source = jnp.where(
+            use_primary_guess,
+            jnp.asarray(1, dtype=jnp.int8),
+            initial_guess_source,
+        )
 
     def solve_direction_batch(jacobian: jax.Array, residual: jax.Array, lambda_values: jax.Array) -> jax.Array:
         return jax.vmap(
@@ -1377,6 +1431,7 @@ def solve_batched_stochastic_extended_path_residual_expectation(
         iterations=iterations,
         group_counts=counts,
         jacobian_method="autodiff",
+        initial_guess_source=initial_guess_source,
     )
 
 

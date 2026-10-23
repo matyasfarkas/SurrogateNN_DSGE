@@ -1145,3 +1145,124 @@ def test_batched_hlt_sep_dataset_matches_single_config_adaptive_builder() -> Non
         np.testing.assert_allclose(left, right, rtol=1e-9, atol=1e-10)
     for left, right in zip(sorted_columns(batched), sorted_columns(chunked)):
         np.testing.assert_allclose(left, right, rtol=1e-9, atol=1e-10)
+
+
+def test_single_path_sep_shift_appends_terminal_state() -> None:
+    mod = _load_profile_module()
+    stacked = np.asarray(
+        [
+            [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]],
+            [[7.0, 8.0], [9.0, 10.0], [11.0, 12.0]],
+        ],
+        dtype=np.float64,
+    ).reshape((2, -1))
+    terminal = np.asarray([[13.0, 14.0], [15.0, 16.0]], dtype=np.float64)
+
+    shifted = mod._shift_single_path_sep_initial_guess(
+        stacked,
+        terminal,
+        periods=3,
+        state_dim=2,
+    )
+
+    np.testing.assert_array_equal(
+        shifted,
+        np.asarray(
+            [
+                [[3.0, 4.0], [5.0, 6.0], [13.0, 14.0]],
+                [[9.0, 10.0], [11.0, 12.0], [15.0, 16.0]],
+            ],
+            dtype=np.float64,
+        ),
+    )
+
+
+def test_single_path_sep_shift_rejects_nonmatrix_stacked_states() -> None:
+    mod = _load_profile_module()
+
+    with pytest.raises(ValueError, match="stacked_states must have shape"):
+        mod._shift_single_path_sep_initial_guess(
+            np.asarray(1.0),
+            np.asarray([[1.0, 2.0]]),
+            periods=3,
+            state_dim=2,
+        )
+
+
+def test_batched_hlt_shifted_warm_start_preserves_deterministic_targets() -> None:
+    mod = _load_profile_module()
+    model = mod.parse_macro_model(
+        """
+        @model nonlinear_sep_warm_start begin
+            y[0] = rho * y[-1] + gamma * y[1]^2 + u[x]
+        end
+
+        @parameters nonlinear_sep_warm_start begin
+            gamma = 0.15
+            rho = 0.25
+        end
+        """
+    )
+    parameter_values = np.asarray([[0.15, 0.25], [0.17, 0.30]], dtype=np.float64)
+    steady_states = np.zeros((2, 1), dtype=np.float64)
+    initial_states = np.zeros((1, 2), dtype=np.float64)
+    shocks = np.asarray([[[0.04, -0.01, 0.02]], [[-0.03, 0.02, 0.01]]], dtype=np.float64)
+    config = mod.SEPConfig(
+        periods=3,
+        branching_order=0,
+        nnodes=1,
+        tol=1e-10,
+        accept_tol=1e-8,
+        max_iter=12,
+    )
+    transitions = []
+    impacts = []
+    for params in parameter_values:
+        first_order = model.solve_first_order(parameter_values=params, steady_state=[0.0])
+        assert first_order.solution.converged
+        transitions.append(np.asarray(first_order.solution.state_transition, dtype=np.float64))
+        impacts.append(np.asarray(first_order.solution.shock_impact, dtype=np.float64))
+
+    common = dict(
+        model=model,
+        parameter_values_by_theta=parameter_values,
+        theta_features_by_theta=parameter_values,
+        steady_states_by_theta=steady_states,
+        state_transition_by_theta=np.stack(transitions, axis=0),
+        shock_impact_by_theta=np.stack(impacts, axis=0),
+        initial_states=initial_states,
+        shocks=shocks,
+        config=config,
+        target_mode="fom_full",
+        min_stable_periods=3,
+        observable_idx=(0,),
+        state_idx=(0,),
+        input_names=("y", "u", *model.parameter_names),
+        output_names=("y_obs", "y[1]"),
+        target_device=None,
+        max_logged_failures=10,
+    )
+    cold, cold_diag = mod._build_batched_hlt_sep_dataset(
+        **common,
+        shifted_path_warm_start=False,
+    )
+    warm, warm_diag = mod._build_batched_hlt_sep_dataset(
+        **common,
+        shifted_path_warm_start=True,
+    )
+
+    np.testing.assert_array_equal(warm.theta_ids, cold.theta_ids)
+    np.testing.assert_array_equal(warm.period_ids, cold.period_ids)
+    np.testing.assert_allclose(warm.X, cold.X, rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(warm.Y, cold.Y, rtol=1e-10, atol=1e-11)
+    np.testing.assert_allclose(warm.Y_rom, cold.Y_rom, rtol=0.0, atol=0.0)
+    assert cold_diag["shifted_path_warm_start"]["enabled"] is False
+    warm_start = warm_diag["shifted_path_warm_start"]
+    assert warm_start["enabled"] is True
+    assert warm_start["attempted_draws"] == 4
+    assert (
+        warm_start["shifted_selected_draws"]
+        + warm_start["default_selected_draws"]
+        + warm_start["terminal_selected_draws"]
+        == warm_start["attempted_draws"]
+    )

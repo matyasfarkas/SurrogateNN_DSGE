@@ -467,6 +467,41 @@ def _estimate_batched_sep_dense_memory(
     }
 
 
+def _shift_single_path_sep_initial_guess(
+    stacked_states: Any,
+    terminal_states: Any,
+    *,
+    periods: int,
+    state_dim: int,
+) -> np.ndarray:
+    """Shift a deterministic SEP path forward by one receding-horizon period."""
+
+    stacked = np.asarray(stacked_states, dtype=np.float64)
+    terminal = np.asarray(terminal_states, dtype=np.float64)
+    if stacked.ndim != 2:
+        raise ValueError(
+            "stacked_states must have shape "
+            f"(batch, {int(periods) * int(state_dim)}), got {stacked.shape}."
+        )
+    expected_shape = (stacked.shape[0], int(periods) * int(state_dim))
+    if stacked.shape != expected_shape:
+        raise ValueError(
+            "stacked_states must have shape "
+            f"(batch, {int(periods) * int(state_dim)}), got {stacked.shape}."
+        )
+    if terminal.shape != (stacked.shape[0], int(state_dim)):
+        raise ValueError(
+            "terminal_states must have shape "
+            f"({stacked.shape[0]}, {int(state_dim)}), got {terminal.shape}."
+        )
+    path = stacked.reshape((stacked.shape[0], int(periods), int(state_dim)))
+    shifted = np.concatenate(
+        [path[:, 1:, :], terminal[:, None, :]],
+        axis=1,
+    )
+    return shifted
+
+
 def _unique_preserve_order(values: Sequence[Any]) -> tuple[Any, ...]:
     out: list[Any] = []
     for value in values:
@@ -3023,6 +3058,7 @@ def _build_batched_hlt_sep_dataset(
     batch_chunk_size: int | None = None,
     verbose_progress: bool = False,
     progress_chunk_interval: int = 1,
+    shifted_path_warm_start: bool = True,
 ) -> tuple[SurrogateDataset, dict[str, Any]]:
     """Build HLT targets with parsed-model batched SEP solves.
 
@@ -3107,6 +3143,18 @@ def _build_batched_hlt_sep_dataset(
     target_mode_norm = str(target_mode).strip().lower()
     periods = int(shock_array.shape[2])
     current_states = initial_array.T.copy()
+    sep_group_counts = tuple(int(value) for value in memory_estimate["group_counts"])
+    shifted_warm_start_supported = all(count == 1 for count in sep_group_counts[1:])
+    shifted_warm_start_enabled = bool(shifted_path_warm_start) and shifted_warm_start_supported
+    previous_stacked_states = np.full(
+        (n_theta, int(memory_estimate["stacked_unknowns"])),
+        np.nan,
+        dtype=np.float64,
+    )
+    warm_start_attempted_draws = 0
+    warm_start_selected_draws = 0
+    default_guess_selected_draws = 0
+    terminal_guess_selected_draws = 0
     active = np.ones((n_theta,), dtype=bool)
     theta_stable_periods = np.zeros((n_theta,), dtype=np.int64)
     theta_success = np.zeros((n_theta,), dtype=bool)
@@ -3151,6 +3199,16 @@ def _build_batched_hlt_sep_dataset(
             if config.periods > 0:
                 deterministic[:, 0, :] = shock_array[chunk, :, period]
                 deterministic[~active[chunk], 0, :] = 0.0
+            chunk_active = np.asarray(active[chunk], dtype=bool).copy()
+            shifted_initial_guess = None
+            if shifted_warm_start_enabled and period > 0:
+                shifted_initial_guess = _shift_single_path_sep_initial_guess(
+                    previous_stacked_states[chunk],
+                    steady_matrix[chunk],
+                    periods=int(config.periods),
+                    state_dim=int(model.timings.nVars),
+                )
+                warm_start_attempted_draws += int(np.count_nonzero(chunk_active))
             solve_context = nullcontext() if target_device is None else jax.default_device(target_device)
             solve_started = time.perf_counter()
             with solve_context:
@@ -3162,6 +3220,8 @@ def _build_batched_hlt_sep_dataset(
                     terminal_state=steady_matrix[chunk],
                     config=config,
                     deterministic_shocks=deterministic,
+                    initial_guess=shifted_initial_guess,
+                    fallback_to_default_initial_guess=shifted_initial_guess is not None,
                 )
             _block_until_ready_tree(batched_sep)
             batched_calls += 1
@@ -3171,6 +3231,24 @@ def _build_batched_hlt_sep_dataset(
             accepted[chunk] = np.asarray(batched_sep.solution.accepted, dtype=bool)
             residual_norm[chunk] = np.asarray(batched_sep.solution.residual_norm, dtype=np.float64)
             next_states[chunk] = np.asarray(batched_sep.solution.mean_path[:, :, 1], dtype=np.float64)
+            previous_stacked_states[chunk] = np.asarray(
+                batched_sep.solution.stacked_states,
+                dtype=np.float64,
+            ).reshape((end - start, -1))
+            if shifted_initial_guess is not None:
+                guess_source = np.asarray(
+                    batched_sep.solution.initial_guess_source,
+                    dtype=np.int8,
+                )
+                warm_start_selected_draws += int(
+                    np.count_nonzero(chunk_active & (guess_source == 1))
+                )
+                default_guess_selected_draws += int(
+                    np.count_nonzero(chunk_active & (guess_source == 2))
+                )
+                terminal_guess_selected_draws += int(
+                    np.count_nonzero(chunk_active & (guess_source == 0))
+                )
             if should_log_chunk:
                 chunk_residuals = residual_norm[chunk]
                 chunk_summary = _finite_quantile_summary(chunk_residuals)
@@ -3272,6 +3350,15 @@ def _build_batched_hlt_sep_dataset(
             "batch_chunk_size": int(effective_chunk_size),
             "memory_estimate": memory_estimate,
             "failure_log": failure_log,
+            "shifted_path_warm_start": {
+                "requested": bool(shifted_path_warm_start),
+                "supported": bool(shifted_warm_start_supported),
+                "enabled": bool(shifted_warm_start_enabled),
+                "attempted_draws": int(warm_start_attempted_draws),
+                "shifted_selected_draws": int(warm_start_selected_draws),
+                "default_selected_draws": int(default_guess_selected_draws),
+                "terminal_selected_draws": int(terminal_guess_selected_draws),
+            },
             "attempted_residual_summary": _finite_quantile_summary(attempted_residual_values),
             "sep_config": {
                 "periods": int(config.periods),
@@ -3323,6 +3410,17 @@ def _build_batched_hlt_sep_dataset(
         "residual_norm_max": _finite_float_or_none(np.nanmax(residual_array)) if residual_array.size else None,
         "attempted_residual_summary": _finite_quantile_summary(attempted_residual_values),
         "failure_log": failure_log,
+        "shifted_path_warm_start": {
+            "requested": bool(shifted_path_warm_start),
+            "supported": bool(shifted_warm_start_supported),
+            "enabled": bool(shifted_warm_start_enabled),
+            "method": "shift_previous_single_path_and_append_terminal",
+            "selection_rule": "minimum_finite_initial_residual_among_shifted_default_and_terminal",
+            "attempted_draws": int(warm_start_attempted_draws),
+            "shifted_selected_draws": int(warm_start_selected_draws),
+            "default_selected_draws": int(default_guess_selected_draws),
+            "terminal_selected_draws": int(terminal_guess_selected_draws),
+        },
         "sep_config": {
             "periods": int(config.periods),
             "branching_order": int(config.branching_order),

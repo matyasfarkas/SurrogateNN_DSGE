@@ -34,7 +34,7 @@ Run the focused validation tests with:
 
 The preserved suite is an engineering pilot. It uses the complete 23-equation
 model, but its target construction has branching order zero and one node. The
-corrected HMC run targets a parameter-dependent surrogate inversion likelihood,
+corrected HMC run targets a parameter-dependent surrogate profile objective,
 not a full nonlinear SEP likelihood. Its Schur QME path also invokes a SciPy host
 callback and is not GPU-native. These limitations are stated in the abstract,
 results table, limitations section, and generated claim ledger.

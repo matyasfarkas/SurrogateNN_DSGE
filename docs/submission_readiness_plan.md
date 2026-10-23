@@ -10,8 +10,8 @@ DSGE integration, numerical validation, posterior fidelity, and measured
 speed--accuracy tradeoff.
 
 The current pilot is not publication evidence. It uses deterministic order-zero
-extended path, and its corrected target is still a surrogate inversion
-likelihood. No manuscript text may call that run an exact nonlinear posterior.
+extended path, and its corrected target is still a surrogate profile inversion
+objective. No manuscript text may call that run an exact nonlinear posterior.
 
 ## Critical path
 

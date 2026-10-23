@@ -101,6 +101,80 @@ def test_static_hmc_validates_static_inputs() -> None:
             num_leapfrog_steps=0,
         )
 
+    for invalid_step_size in (0.0, -0.1, np.nan, np.inf):
+        with pytest.raises(ValueError, match="step_size.*finite, positive"):
+            static_hmc_sample(
+                log_prob,
+                jnp.zeros((2, 1), dtype=jnp.float64),
+                jax.random.PRNGKey(0),
+                num_warmup=1,
+                num_samples=1,
+                step_size=invalid_step_size,
+                num_leapfrog_steps=2,
+            )
+
+    for min_step_size, max_step_size in ((np.nan, 1.0), (1.0e-5, np.inf)):
+        with pytest.raises(ValueError, match="step-size bounds must be finite"):
+            static_hmc_sample(
+                log_prob,
+                jnp.zeros((2, 1), dtype=jnp.float64),
+                jax.random.PRNGKey(0),
+                num_warmup=1,
+                num_samples=1,
+                step_size=0.1,
+                num_leapfrog_steps=2,
+                min_step_size=min_step_size,
+                max_step_size=max_step_size,
+            )
+
+
+@pytest.mark.parametrize("invalid_inverse_mass", [[0.0], [-1.0], [jnp.nan], [jnp.inf]])
+def test_hmc_rejects_invalid_inverse_mass(invalid_inverse_mass) -> None:
+    def log_prob(position):
+        return -0.5 * jnp.sum(position * position)
+
+    with pytest.raises(ValueError, match="inverse_mass.*finite, positive"):
+        static_hmc_sample(
+            log_prob,
+            jnp.zeros((2, 1), dtype=jnp.float64),
+            jax.random.PRNGKey(0),
+            num_warmup=0,
+            num_samples=1,
+            step_size=0.1,
+            num_leapfrog_steps=2,
+            inverse_mass=invalid_inverse_mass,
+        )
+
+
+def test_hmc_rejects_nonfinite_initial_density() -> None:
+    def nonfinite_log_prob(position):
+        return jnp.where(jnp.all(position == 0.0), jnp.inf, 0.0)
+
+    initial = jnp.zeros((2, 1), dtype=jnp.float64)
+
+    with pytest.raises(ValueError, match="initial log probability.*finite"):
+        static_hmc_sample(
+            nonfinite_log_prob,
+            initial,
+            jax.random.PRNGKey(0),
+            num_warmup=0,
+            num_samples=1,
+            step_size=0.1,
+            num_leapfrog_steps=2,
+        )
+
+    with pytest.raises(ValueError, match="initial target log probability.*finite"):
+        surrogate_trajectory_hmc_sample(
+            nonfinite_log_prob,
+            lambda position: -0.5 * jnp.sum(position * position),
+            initial,
+            jax.random.PRNGKey(0),
+            num_warmup=0,
+            num_samples=1,
+            step_size=0.1,
+            num_leapfrog_steps=2,
+        )
+
 
 def test_surrogate_trajectory_hmc_matches_static_hmc_when_densities_match() -> None:
     def log_prob(position):
@@ -177,3 +251,58 @@ def test_surrogate_trajectory_hmc_uses_exact_target_for_acceptance() -> None:
         rtol=1.0e-12,
         atol=1.0e-12,
     )
+
+
+def test_surrogate_trajectory_hmc_recovers_target_under_misspecified_force() -> None:
+    """Endpoint correction must target N(0, 1), not the proposal density."""
+
+    def target_log_prob(position):
+        return -0.5 * jnp.sum(position * position)
+
+    def misspecified_proposal_log_prob(position):
+        return -0.5 * jnp.sum(((position - 0.7) / 1.25) ** 2)
+
+    initial = jnp.asarray([[-1.5], [-0.5], [0.5], [1.5]], dtype=jnp.float64)
+    sampler = jax.jit(
+        lambda run_key: surrogate_trajectory_hmc_sample(
+            target_log_prob,
+            misspecified_proposal_log_prob,
+            initial,
+            run_key,
+            num_warmup=600,
+            num_samples=2_000,
+            step_size=0.2,
+            num_leapfrog_steps=6,
+            target_accept_prob=0.75,
+        )
+    )
+
+    result = sampler(jax.random.PRNGKey(20261023))
+    pooled = np.asarray(result.samples).reshape(-1)
+
+    assert abs(float(np.mean(pooled))) < 0.06
+    assert 0.88 < float(np.var(pooled, ddof=1)) < 1.12
+    assert 0.55 < float(np.mean(np.asarray(result.accepted))) < 0.95
+
+
+def test_hmc_rejects_nonfinite_candidate_log_density() -> None:
+    """A +inf, -inf, or NaN endpoint is invalid rather than auto-accepted."""
+
+    def invalid_away_from_origin(position):
+        return jnp.where(jnp.all(position == 0.0), 0.0, jnp.inf)
+
+    initial = jnp.zeros((4, 1), dtype=jnp.float64)
+    result = static_hmc_sample(
+        invalid_away_from_origin,
+        initial,
+        jax.random.PRNGKey(109),
+        num_warmup=0,
+        num_samples=3,
+        step_size=0.1,
+        num_leapfrog_steps=2,
+        adapt_step_size=False,
+    )
+
+    np.testing.assert_array_equal(np.asarray(result.samples), 0.0)
+    np.testing.assert_array_equal(np.asarray(result.accept_prob), 0.0)
+    assert not bool(jnp.any(result.accepted))

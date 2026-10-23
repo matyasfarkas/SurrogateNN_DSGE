@@ -51,6 +51,38 @@ def _passing_payload(module: ModuleType, mode: str) -> dict[str, Any]:
         else:  # pragma: no cover - catches a gate added without updating this fixture
             raise AssertionError(gate.operator)
         _assign(payload, gate.path, value)
+    numerical = payload["numerical_solution"]
+    count_values = {
+        "smoke": {
+            "parameter_draws": 8,
+            "runtime_success_count": 8,
+            "full_path_success_count": 6,
+            "steady_state_fallback_count": 1,
+        },
+        "evidence": {
+            "parameter_draws": 100,
+            "runtime_success_count": 95,
+            "full_path_success_count": 90,
+            "steady_state_fallback_count": 5,
+        },
+        "publication": {
+            "parameter_draws": 1000,
+            "runtime_success_count": 990,
+            "full_path_success_count": 990,
+            "steady_state_fallback_count": 10,
+        },
+    }[mode]
+    numerical.update(count_values)
+    denominator = count_values["parameter_draws"]
+    numerical["runtime_success_share"] = (
+        count_values["runtime_success_count"] / denominator
+    )
+    numerical["full_path_success_share"] = (
+        count_values["full_path_success_count"] / denominator
+    )
+    numerical["steady_state_fallback_share"] = (
+        count_values["steady_state_fallback_count"] / denominator
+    )
     return payload
 
 
@@ -151,6 +183,25 @@ def test_out_of_range_fraction_and_parameter_count_mismatch_fail() -> None:
     assert checks[
         "metadata.reduction.estimated_parameter_count_vs_parameter_names"
     ]["status"] == "fail"
+
+
+def test_numerical_solution_counts_and_shares_must_use_all_attempted_draws() -> None:
+    module = _load_module()
+    payload = _passing_payload(module, "publication")
+    payload["numerical_solution"]["runtime_success_count"] = 999
+
+    report = module.evaluate_payload(payload, mode="publication")
+
+    assert report["status"] == "fail"
+    consistency = next(
+        check
+        for check in report["categories"]["numerical_solution"]["checks"]
+        if check["path"] == "numerical_solution.count_share_consistency"
+    )
+    assert consistency["status"] == "fail"
+    assert consistency["detail"] == (
+        "runtime_success_share must equal runtime_success_count / parameter_draws"
+    )
 
 
 def test_cli_writes_json_and_markdown_and_returns_two_on_failure(tmp_path: Path) -> None:

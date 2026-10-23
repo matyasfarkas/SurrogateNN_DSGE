@@ -130,4 +130,4 @@ def test_cli_writes_machine_and_manuscript_outputs(tmp_path: Path) -> None:
     markdown = (output / "pilot_evidence.md").read_text(encoding="utf-8")
     latex = (output / "pilot_results.tex").read_text(encoding="utf-8")
     assert "**Publication ready:** no" in markdown
-    assert "Correction therefore targets the declared surrogate likelihood" in latex
+    assert "Correction therefore targets the declared surrogate objective" in latex
