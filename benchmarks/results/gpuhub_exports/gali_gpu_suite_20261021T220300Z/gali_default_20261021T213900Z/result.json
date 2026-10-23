@@ -1,0 +1,601 @@
+{
+  "environment": {
+    "jax": "0.11.1",
+    "jax_default_backend": "gpu",
+    "jax_devices": [
+      "cuda:0"
+    ],
+    "jax_enable_x64": true,
+    "nvidia_smi": "Thu Oct 22 05:39:13 2026       \n+-----------------------------------------------------------------------------------------+\n| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |\n+-----------------------------------------+------------------------+----------------------+\n| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |\n| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |\n|                                         |                        |               MIG M. |\n|=========================================+========================+======================|\n|   0  NVIDIA GeForce RTX 4080 ...    On  |   00000000:B2:00.0 Off |                  N/A |\n| 30%   30C    P2             24W /  320W |     260MiB /  32760MiB |      0%      Default |\n|                                         |                        |                  N/A |\n+-----------------------------------------+------------------------+----------------------+\n\n+-----------------------------------------------------------------------------------------+\n| Processes:                                                                              |\n|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |\n|        ID   ID                                                               Usage      |\n|=========================================================================================|\n|    0   N/A  N/A            5141      C   python                                  250MiB |\n+-----------------------------------------------------------------------------------------+\n",
+    "python": "3.12.3 | packaged by Anaconda, Inc. | (main, May  6 2024, 19:46:43) [GCC 11.2.0]",
+    "xla_mem_fraction": "0.85",
+    "xla_preallocate": "false"
+  },
+  "plan": {
+    "batch_size": 32,
+    "blocks": 1,
+    "caveats": [
+      "Surrogate training dtype is configurable with --train-dtype; frozen deployed surrogates are still materialized in float64.",
+      "Synthetic fixed-shape batched rollout training can be profiled with --mode batched-training.",
+      "Synthetic batched SEP target generation plus training can be profiled with --mode batched-sep-training.",
+      "Actual parsed HLT target generation can use --hlt-target-builder batched-sep for fixed-config batched SEP across theta draws per period.",
+      "Use --hlt-target-builder grid-batched-sep to label independent ROM/adaptive-grid support points with batched SEP and train directly from masked JAX arrays.",
+      "Adaptive fallback ladders and auxiliary OBC-shock reinjection still use the sequential target-generation path."
+    ],
+    "epochs": 400,
+    "hidden": 64,
+    "memory_estimate_bytes_float32": {
+      "X": 1064960,
+      "Y": 770048,
+      "Y_rom": 770048,
+      "theta_ids": 32768,
+      "total_core_arrays": 2637824
+    },
+    "memory_estimate_bytes_float64": {
+      "X": 2129920,
+      "Y": 1540096,
+      "Y_rom": 1540096,
+      "theta_ids": 32768,
+      "total_core_arrays": 5242880
+    },
+    "requested_mode": "hlt-fixed-ss-smoke",
+    "samples": 4096,
+    "shape": {
+      "obs_dim": 7,
+      "shock_dim": 7,
+      "state_dim": 40,
+      "theta_dim": 18
+    },
+    "status": "plan",
+    "theta_draws": 64,
+    "train_dtype": "float64"
+  },
+  "results": {
+    "hlt_fixed_ss_smoke": {
+      "backend": "gpu",
+      "caveats": [
+        "SEP target generation uses fixed-config parsed-model batched JAX solves across theta draws per period.",
+        "The batched target builder does not run the adaptive fallback ladder or auxiliary OBC-shock reinjection.",
+        "The likelihood block evaluates a trained-surrogate inversion likelihood.",
+        "Optional surrogate HMC samples a fixed-reference steady-state/fixed-ROM likelihood.",
+        "Requires parameter-specific steady states; any failed solve aborts the run."
+      ],
+      "dataset_summary": {
+        "Y_rmse_vs_rom": 0.00045769786725025877,
+        "input_dim": 28,
+        "max_stable_periods": 10,
+        "min_stable_periods": 10,
+        "n_samples": 80,
+        "n_theta": 8,
+        "output_dim": 26,
+        "samples_per_theta": {
+          "0": 10,
+          "1": 10,
+          "2": 10,
+          "3": 10,
+          "4": 10,
+          "5": 10,
+          "6": 10,
+          "7": 10
+        },
+        "target_mode": "fom_full",
+        "theta_success_rate": 1.0
+      },
+      "equation_count": 23,
+      "first_order_qme_algorithm": "schur",
+      "first_order_s": 11.940507788211107,
+      "hlt_parameter_set": "payload",
+      "jax_surrogate_log_density": {
+        "backend": "gpu",
+        "batch_replay": true,
+        "batched_eval_batch_size": 0,
+        "batched_eval_first_per_theta_s": null,
+        "batched_eval_first_s": null,
+        "batched_eval_gradient_norms": [],
+        "batched_eval_perturbation": 0.0,
+        "batched_eval_repeat_count": 0,
+        "batched_eval_repeat_max_s": null,
+        "batched_eval_repeat_median_per_theta_s": null,
+        "batched_eval_repeat_median_s": null,
+        "batched_eval_repeat_min_s": null,
+        "batched_eval_repeat_timings_s": [],
+        "batched_eval_values": [],
+        "caveat": "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; steady-state and first-order matrices are held fixed in this smoke check.",
+        "differentiate_shocks": false,
+        "elapsed_s": 1.1956748007796705,
+        "failure_loglikelihood": -1000000000000.0,
+        "gradient": [
+          -0.009710458291513655,
+          0.1308107335856354
+        ],
+        "gradient_evaluated": true,
+        "gradient_finite": true,
+        "gradient_norm": 0.13117065609900452,
+        "parity_abs_diff": 1.7053025658242404e-13,
+        "parity_effective_tol": 3.1881533247425496e-07,
+        "parity_ok": true,
+        "parity_rel_diff": 7.793341291679733e-16,
+        "parity_rtol": 1e-09,
+        "parity_scale": 218.81533247425494,
+        "parity_tol": 1e-07,
+        "python_surrogate_total_loglikelihood": 218.81533247425494,
+        "qme_algorithm": "schur",
+        "repeat_eval_count": 0,
+        "repeat_eval_gradient_norms": [],
+        "repeat_eval_max_s": null,
+        "repeat_eval_median_s": null,
+        "repeat_eval_min_s": null,
+        "repeat_eval_perturbation": 0.0,
+        "repeat_eval_timings_s": [],
+        "repeat_eval_values": [],
+        "runtime_mode": "fixed-reference",
+        "shock_solver": "rom",
+        "static_equation_rows": null,
+        "static_rows_mode": "reference",
+        "status": "ok",
+        "target_device": "cuda:0",
+        "value": 218.81533247425477,
+        "value_minus_python": -1.7053025658242404e-13
+      },
+      "kind": "actual_nonlinear_gali_surrogate_pipeline",
+      "likelihood_qme_algorithm": "schur",
+      "likelihood_runtime_mode": "fixed-reference",
+      "likelihood_static_rows_mode": "reference",
+      "model_name": "Gali_2015_chapter_3_nonlinear",
+      "model_source": "benchmarks/model_sources/Gali_2015_chapter_3_nonlinear.jl",
+      "n_exo": 3,
+      "n_vars": 23,
+      "original_theta_draws": 8,
+      "parameter_count": 16,
+      "parameter_subset": [
+        "\u03d5\u1d56\u2071",
+        "\u03d5\u02b8"
+      ],
+      "parse_s": 0.38034623581916094,
+      "payload_case": "gali_full_nonlinear_reduced_pilot",
+      "periods": 10,
+      "pipeline_s": 1357.2963775242679,
+      "quality_gate": {
+        "accepted_samples": 80,
+        "full_success_applicable": true,
+        "full_success_share": 1.0,
+        "issues": [],
+        "max_hmc_accepted_share": null,
+        "max_validation_rmse_mean": null,
+        "min_accepted_samples": 8,
+        "min_full_success_share": 1.0,
+        "min_validation_improvement_mean": null,
+        "require_full_target_success": true,
+        "require_hmc": true,
+        "require_jax_parity": true,
+        "require_solved_steady_state": true,
+        "runtime_prepared_theta_draws": 8,
+        "status": "ok",
+        "steady_state_fallback_count": 0,
+        "steady_state_solved_count": 8,
+        "target_success_unit": "theta_path",
+        "theta_full_success_count": 8,
+        "validation_improvement_mean": 0.5393456217476602,
+        "validation_rmse_mean": 7.857795074474851e-06
+      },
+      "runtime_prepare_s": 12.021557490807027,
+      "sep_config": {
+        "accept_tol": 1e-05,
+        "branching_order": 0,
+        "max_iter": 50,
+        "nnodes": 1,
+        "periods": 10,
+        "shock_scale": 1.0,
+        "sparse_tree": true,
+        "tol": 1e-08
+      },
+      "status": "ok",
+      "steady_state_attempted_fallback_count": 0,
+      "steady_state_attempted_solved_count": 7,
+      "steady_state_diagnostics": [
+        {
+          "first_order_s": 11.652356503996998,
+          "parameter_values_max_abs_raw_delta": 0.0,
+          "parameter_values_resolved_from_steady_state": true,
+          "steady_state_converged": true,
+          "steady_state_error": null,
+          "steady_state_iterations": 0,
+          "steady_state_residual_norm": 1.1102230246251565e-16,
+          "steady_state_s": 0.03469433030113578,
+          "steady_state_status": "solved",
+          "theta": [
+            1.5,
+            0.125
+          ],
+          "theta_index": 0
+        },
+        {
+          "first_order_s": 0.05398237891495228,
+          "parameter_values_max_abs_raw_delta": 0.0,
+          "parameter_values_resolved_from_steady_state": true,
+          "steady_state_converged": true,
+          "steady_state_error": null,
+          "steady_state_iterations": 0,
+          "steady_state_residual_norm": 1.1102230246251565e-16,
+          "steady_state_s": 0.01165325241163373,
+          "steady_state_status": "solved",
+          "theta": [
+            1.32,
+            0.14
+          ],
+          "theta_index": 1
+        },
+        {
+          "first_order_s": 0.046542865224182606,
+          "parameter_values_max_abs_raw_delta": 0.0,
+          "parameter_values_resolved_from_steady_state": true,
+          "steady_state_converged": true,
+          "steady_state_error": null,
+          "steady_state_iterations": 0,
+          "steady_state_residual_norm": 1.1102230246251565e-16,
+          "steady_state_s": 0.004593356046825647,
+          "steady_state_status": "solved",
+          "theta": [
+            1.3800000000000001,
+            0.135
+          ],
+          "theta_index": 2
+        },
+        {
+          "first_order_s": 0.04691365407779813,
+          "parameter_values_max_abs_raw_delta": 0.0,
+          "parameter_values_resolved_from_steady_state": true,
+          "steady_state_converged": true,
+          "steady_state_error": null,
+          "steady_state_iterations": 0,
+          "steady_state_residual_norm": 1.1102230246251565e-16,
+          "steady_state_s": 0.004687499720603228,
+          "steady_state_status": "solved",
+          "theta": [
+            1.44,
+            0.13
+          ],
+          "theta_index": 3
+        },
+        {
+          "first_order_s": 0.04636396002024412,
+          "parameter_values_max_abs_raw_delta": 0.0,
+          "parameter_values_resolved_from_steady_state": true,
+          "steady_state_converged": true,
+          "steady_state_error": null,
+          "steady_state_iterations": 0,
+          "steady_state_residual_norm": 1.1102230246251565e-16,
+          "steady_state_s": 0.004634937271475792,
+          "steady_state_status": "solved",
+          "theta": [
+            1.56,
+            0.12
+          ],
+          "theta_index": 5
+        },
+        {
+          "first_order_s": 0.047979189082980156,
+          "parameter_values_max_abs_raw_delta": 0.0,
+          "parameter_values_resolved_from_steady_state": true,
+          "steady_state_converged": true,
+          "steady_state_error": null,
+          "steady_state_iterations": 0,
+          "steady_state_residual_norm": 1.1102230246251565e-16,
+          "steady_state_s": 0.004530854988843203,
+          "steady_state_status": "solved",
+          "theta": [
+            1.62,
+            0.115
+          ],
+          "theta_index": 6
+        },
+        {
+          "first_order_s": 0.04636923689395189,
+          "parameter_values_max_abs_raw_delta": 0.0,
+          "parameter_values_resolved_from_steady_state": true,
+          "steady_state_converged": true,
+          "steady_state_error": null,
+          "steady_state_iterations": 0,
+          "steady_state_residual_norm": 1.1102230246251565e-16,
+          "steady_state_s": 0.004559545777738094,
+          "steady_state_status": "solved",
+          "theta": [
+            1.6800000000000002,
+            0.11
+          ],
+          "theta_index": 7
+        }
+      ],
+      "steady_state_fallback_count": 0,
+      "steady_state_mode": "solve",
+      "steady_state_s": 0.06935377651825547,
+      "steady_state_solved_count": 8,
+      "strict_solved_steady_state_preflight": true,
+      "surrogate_bundle_path": "/root/autodl-tmp/gali_runs/gali_default_20261021T213900Z/surrogate_bundle.snn.npz",
+      "surrogate_bundle_reused": false,
+      "surrogate_hmc": {
+        "accept_prob_max": 1.0,
+        "accept_prob_mean": 0.9999990077979143,
+        "accept_prob_min": 0.9999927714635313,
+        "accepted_share": 1.0,
+        "adapt_step_size": true,
+        "attempt": 0,
+        "attempt_step_size": 0.02,
+        "backend": "gpu",
+        "caveat": "Samples the trained-surrogate inversion likelihood with fixed reference steady state and fixed first-order ROM matrices. This is not yet a parameter-specific full HLT steady-state/ROM recomputation inside the HMC transition.",
+        "chains": 1,
+        "draws_per_second": 8.00093709000185,
+        "elapsed_s": 6.2492679841816425,
+        "exact_endpoint_correction": false,
+        "final_log_prob_mean": 215.8571059805867,
+        "final_step_size": 0.02180469245573498,
+        "gradient_mode": "target",
+        "initial_jitter": 0.02,
+        "initial_step_size": 0.02,
+        "kind": "fixed_rom_surrogate_static_hmc",
+        "leapfrog_steps": 3,
+        "parameter_names": [
+          "\u03d5\u1d56\u2071",
+          "\u03d5\u02b8"
+        ],
+        "parameter_summary": {
+          "\u03d5\u02b8": {
+            "max": 0.1309004641055876,
+            "mean": 0.12988265275792904,
+            "min": 0.1279710004127511,
+            "std": 0.0007498424079589037
+          },
+          "\u03d5\u1d56\u2071": {
+            "max": 1.5068985851061978,
+            "mean": 1.4800617995195193,
+            "min": 1.4526552723797548,
+            "std": 0.012671602608846474
+          }
+        },
+        "post_warmup_draws": 50,
+        "posterior_draws": {
+          "parameter_names": [
+            "\u03d5\u1d56\u2071",
+            "\u03d5\u02b8"
+          ],
+          "path": "/root/autodl-tmp/gali_runs/gali_default_20261021T213900Z/posterior_draws.npz",
+          "post_warmup_draws": 50,
+          "sample_shape": [
+            50,
+            1,
+            2
+          ]
+        },
+        "prior_lower": [
+          1.32,
+          0.11
+        ],
+        "prior_upper": [
+          1.68,
+          0.14
+        ],
+        "proposal_log_density": "target",
+        "qme_algorithm": "schur",
+        "requested_initial_step_size": 0.02,
+        "retry_attempt": 0,
+        "retry_count": 0,
+        "retry_history": [
+          {
+            "accept_prob_mean": 0.9999990077979143,
+            "accepted_share": 1.0,
+            "attempt": 0,
+            "attempt_step_size": 0.02,
+            "draws_per_second": 8.00093709000185,
+            "elapsed_s": 6.2492679841816425,
+            "final_step_size": 0.02180469245573498,
+            "retry_reason": null
+          }
+        ],
+        "retry_max_accepted_share": null,
+        "retry_max_retries": 2,
+        "retry_min_accepted_share": 0.05,
+        "retry_step_size_factor": 0.25,
+        "retry_step_size_growth_factor": 2.0,
+        "runtime_mode": "fixed-reference",
+        "samples": 50,
+        "samples_finite": true,
+        "samples_shape": [
+          50,
+          1,
+          2
+        ],
+        "seed": 20260923,
+        "static_rows_mode": "reference",
+        "status": "ok",
+        "target_accept_prob": 0.8,
+        "target_evaluations": null,
+        "target_evaluations_per_transition": null,
+        "target_gradient_evaluated": true,
+        "warmup": 25
+      },
+      "surrogate_inversion_likelihood": {
+        "elapsed_s": 6.889281345997006,
+        "inferred_shocks_finite": true,
+        "inferred_shocks_max_abs": 0.003004763409246236,
+        "inferred_shocks_shape": [
+          3,
+          10
+        ],
+        "per_period_loglikelihood": [
+          21.87178230913242,
+          21.866484931335947,
+          21.87270659923131,
+          21.877084081236184,
+          21.88067985581648,
+          21.88391866693702,
+          21.88695481530092,
+          21.889764313151446,
+          21.892160610995216,
+          21.893796291118
+        ],
+        "periods": 10,
+        "status": "ok",
+        "total_loglikelihood": 218.81533247425494
+      },
+      "target_arrays_checkpoint_path": null,
+      "target_arrays_checkpoint_reused": false,
+      "target_arrays_checkpoint_saved": false,
+      "target_device": "cuda:0",
+      "target_diagnostics": {
+        "accepted_by_branching_order": {
+          "0": 80
+        },
+        "accepted_samples": 80,
+        "attempted_count": 80,
+        "attempted_residual_summary": {
+          "count": 80,
+          "max": 9.923861066241102e-09,
+          "min": 4.628494478200748e-15,
+          "p50": 1.103888480624704e-09,
+          "p90": 6.414661357645457e-09
+        },
+        "batch_chunk_size": 8,
+        "batched_calls": 10,
+        "builder": "batched_sep",
+        "caveat": "Batched SEP target generation uses one fixed SEP configuration and does not run the adaptive fallback ladder or auxiliary OBC-shock reinjection. It may be chunked by theta draw to fit dense SEP Jacobians into GPU memory.",
+        "effective_validation_fraction": 0.25,
+        "failure_log": [],
+        "fallback_samples": 0,
+        "fallback_share": 0.0,
+        "memory_estimate": {
+          "all_theta_dense_jacobian_gib": 0.003153085708618164,
+          "chunk_dense_jacobian_gib": 0.003153085708618164,
+          "chunk_size": 8,
+          "group_counts": [
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1
+          ],
+          "linear_solver": "qr",
+          "per_theta_dense_jacobian_gib": 0.0003941357135772705,
+          "rough_all_theta_workspace_gib": 0.03783702850341797,
+          "rough_chunk_workspace_gib": 0.03783702850341797,
+          "stacked_unknowns": 230,
+          "total_batch_size": 8,
+          "workspace_multiplier": 12.0
+        },
+        "original_theta_draws": 8,
+        "residual_norm_max": 9.923861066241102e-09,
+        "residual_norm_mean": 2.3828896001759766e-09,
+        "runtime_dropped_theta_count": 0,
+        "runtime_failures": [],
+        "runtime_prepared_theta_draws": 8,
+        "sep_config": {
+          "accept_tol": 1e-05,
+          "batch_chunk_size": 8,
+          "branching_order": 0,
+          "max_iter": 50,
+          "nnodes": 1,
+          "periods": 10,
+          "shock_scale": 1.0,
+          "sparse_tree": true,
+          "tol": 1e-08
+        },
+        "status": "ok",
+        "target_min_stable_periods": 10,
+        "theta_design": {
+          "actual_draws": 8,
+          "design": "perturbation",
+          "include_reference": true,
+          "perturbation": 0.12,
+          "requested_draws": 8,
+          "subset_names": [
+            "\u03d5\u1d56\u2071",
+            "\u03d5\u02b8"
+          ]
+        },
+        "theta_full_success_count": 8,
+        "theta_stable_periods": [
+          10,
+          10,
+          10,
+          10,
+          10,
+          10,
+          10,
+          10
+        ],
+        "theta_success": [
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true,
+          true
+        ],
+        "theta_with_any_sample_count": 8
+      },
+      "theta_draws": 8,
+      "train_dtype": "float64",
+      "train_size": 60,
+      "training_metadata": {
+        "architecture": "resnet",
+        "d_theta": 2,
+        "jax_backend": "gpu",
+        "jax_device": "cuda:0",
+        "jax_device_platform": "gpu",
+        "n_blocks": 1,
+        "output_indices": null,
+        "residual_shrinkage": [
+          0.0,
+          0.9963428584125733,
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          1.0,
+          0.0,
+          0.0,
+          0.99587074944821,
+          1.0,
+          1.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          1.0,
+          0.0,
+          1.0,
+          0.0,
+          0.0,
+          0.9961906268519941,
+          0.0,
+          0.0,
+          0.9930561286594446,
+          0.9916968660602876
+        ],
+        "residual_shrinkage_calibrated": true,
+        "rom_residual": true,
+        "target_mode": "fom_full",
+        "theta_names": [
+          "\u03d5\u1d56\u2071",
+          "\u03d5\u02b8"
+        ],
+        "train_dtype": "float64",
+        "train_size": 60,
+        "training_batch_size": 32,
+        "training_loop": "epoch_scan",
+        "val_size": 20,
+        "validation_split": "held-out parameter vectors"
+      },
+      "val_size": 20,
+      "validation_improvement_mean": 0.5393456217476602,
+      "validation_rmse_mean": 7.857795074474851e-06
+    }
+  }
+}

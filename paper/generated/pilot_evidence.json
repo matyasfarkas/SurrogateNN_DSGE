@@ -1,0 +1,190 @@
+{
+  "claim_ledger": [
+    {
+      "id": "full_model_pipeline_executes",
+      "statement": "The complete 23-equation, 16-parameter, three-shock nonlinear Gal\u00ed source executes through target generation, surrogate fitting, likelihood evaluation, and a sampling smoke test.",
+      "status": "supported_by_pilot"
+    },
+    {
+      "id": "nonlinear_extended_path_targets_solve_in_pilot_design",
+      "statement": "The order-0 nonlinear extended-path pilot accepted 80 targets across 8 parameter paths with maximum recorded residual 9.924e-09. This is not yet a stochastic-expectations SEP validation.",
+      "status": "supported_by_pilot"
+    },
+    {
+      "id": "surrogate_improves_rom_in_pilot_design",
+      "statement": "The default pilot reports mean validation improvement over the ROM of 53.9 percent.",
+      "status": "supported_by_pilot"
+    },
+    {
+      "id": "jax_python_likelihood_implementation_parity",
+      "statement": "JAX and Python evaluations of the same surrogate inversion likelihood agree within 1.705e-13 at the audited calibration.",
+      "status": "supported_by_pilot"
+    },
+    {
+      "id": "target_corrected_sampler_executes",
+      "statement": "A target-corrected sampler can use fixed-reference proposal gradients and evaluate the parameter-dependent full-JAX surrogate likelihood only at trajectory endpoints without differentiating that target.",
+      "status": "resource_feasibility_only"
+    },
+    {
+      "id": "exact_full_nonlinear_posterior",
+      "statement": "The pilot does not establish exact sampling from a full nonlinear SEP posterior because its endpoint target remains a surrogate inversion likelihood.",
+      "status": "not_supported"
+    },
+    {
+      "id": "posterior_convergence_or_fidelity",
+      "statement": "The pilot budgets are too small for R-hat, effective-sample-size, posterior moment, or coverage claims.",
+      "status": "not_supported"
+    },
+    {
+      "id": "computational_speedup",
+      "statement": "The suite lacks repeated same-work exact-baseline timings and therefore does not establish an end-to-end speedup.",
+      "status": "not_supported"
+    }
+  ],
+  "evidence_level": "engineering_pilot",
+  "hard_blockers": [
+    "Independent MacroModelling.jl trajectory and likelihood comparisons.",
+    "Positive-order stochastic SEP with multiple quadrature nodes and all shocks active.",
+    "A full nonlinear likelihood or an explicitly surrogate-defined estimand.",
+    "Explicit invalid-solve support handling rather than a finite log-density plateau.",
+    "Four tuned chains with convergence and effective-sample-size diagnostics.",
+    "Posterior comparison with an exact or independently validated reference.",
+    "Multi-seed, repeated, synchronized end-to-end timing against the same-work baseline.",
+    "Gal\u00ed-specific parity validation for the GPU-native QME solver; the audited Schur path uses a sequential SciPy host callback.",
+    "A clean, content-addressed software environment and revision."
+  ],
+  "model": {
+    "equations": 23,
+    "experiment_scope": "two-parameter reduced experiment",
+    "name": "Gali_2015_chapter_3_nonlinear",
+    "parameters": 16,
+    "shocks": 3
+  },
+  "publication_ready": false,
+  "runs": {
+    "corrected_full_jax_resource": {
+      "accepted_targets": 16,
+      "exact_endpoint_correction": true,
+      "full_jax_recomputes_parameter_runtime": true,
+      "full_nonlinear_likelihood_in_hmc": false,
+      "full_paths": 4,
+      "gpu_native_qme": false,
+      "hmc_accepted_share": 1.0,
+      "hmc_chains": 2,
+      "hmc_draws_per_second": 0.02672678378069654,
+      "hmc_kind": "exact_corrected_surrogate_trajectory_hmc_chain_batched",
+      "hmc_samples": 2,
+      "hmc_warmup": 1,
+      "jax_backend": "gpu",
+      "jax_density_caveat": "Evaluates the full JAX surrogate likelihood with parameter-dependent steady-state and first-order ROM solves; gradient evaluation was disabled.",
+      "jax_parity_abs_diff": 0.0,
+      "jax_python_comparison_scope": "same surrogate likelihood implementation",
+      "label": "corrected_full_jax_resource",
+      "likelihood_kind": "surrogate_profile_inversion_objective",
+      "likelihood_runtime_mode": "full-jax",
+      "max_sep_residual": 7.207055729985257e-09,
+      "periods": 4,
+      "pipeline_s": 128.00142977712676,
+      "qme_algorithm": "schur",
+      "quality_gate": "ok",
+      "raw_quality_gate_status": "ok",
+      "sep_branching_order": 0,
+      "sep_nodes": 1,
+      "status": "ok",
+      "target_builder": "batched_sep",
+      "target_gradient_evaluated": false,
+      "theta_draws": 4,
+      "validation_improvement_mean": 0.6655408970137616,
+      "validation_rmse_mean": 9.172202659008471e-05
+    },
+    "default": {
+      "accepted_targets": 80,
+      "exact_endpoint_correction": false,
+      "full_jax_recomputes_parameter_runtime": false,
+      "full_nonlinear_likelihood_in_hmc": false,
+      "full_paths": 8,
+      "gpu_native_qme": false,
+      "hmc_accepted_share": 1.0,
+      "hmc_chains": 1,
+      "hmc_draws_per_second": 8.00093709000185,
+      "hmc_kind": "fixed_rom_surrogate_static_hmc",
+      "hmc_samples": 50,
+      "hmc_warmup": 25,
+      "jax_backend": "gpu",
+      "jax_density_caveat": "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; steady-state and first-order matrices are held fixed in this smoke check.",
+      "jax_parity_abs_diff": 1.7053025658242404e-13,
+      "jax_python_comparison_scope": "same surrogate likelihood implementation",
+      "label": "default",
+      "likelihood_kind": "surrogate_profile_inversion_objective",
+      "likelihood_runtime_mode": "fixed-reference",
+      "max_sep_residual": 9.923861066241102e-09,
+      "periods": 10,
+      "pipeline_s": 1357.2963775242679,
+      "qme_algorithm": "schur",
+      "quality_gate": "ok",
+      "raw_quality_gate_status": "ok",
+      "sep_branching_order": 0,
+      "sep_nodes": 1,
+      "status": "ok",
+      "target_builder": "batched_sep",
+      "target_gradient_evaluated": true,
+      "theta_draws": 8,
+      "validation_improvement_mean": 0.5393456217476602,
+      "validation_rmse_mean": 7.857795074474851e-06
+    },
+    "quick": {
+      "accepted_targets": 16,
+      "exact_endpoint_correction": false,
+      "full_jax_recomputes_parameter_runtime": false,
+      "full_nonlinear_likelihood_in_hmc": false,
+      "full_paths": 4,
+      "gpu_native_qme": false,
+      "hmc_accepted_share": 1.0,
+      "hmc_chains": 1,
+      "hmc_draws_per_second": 0.3782666240727161,
+      "hmc_kind": "fixed_rom_surrogate_static_hmc",
+      "hmc_samples": 2,
+      "hmc_warmup": 1,
+      "jax_backend": "gpu",
+      "jax_density_caveat": "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; steady-state and first-order matrices are held fixed in this smoke check.",
+      "jax_parity_abs_diff": 0.0,
+      "jax_python_comparison_scope": "same surrogate likelihood implementation",
+      "label": "quick",
+      "likelihood_kind": "surrogate_profile_inversion_objective",
+      "likelihood_runtime_mode": "fixed-reference",
+      "max_sep_residual": 7.207055729985257e-09,
+      "periods": 4,
+      "pipeline_s": 126.95765000907704,
+      "qme_algorithm": "schur",
+      "quality_gate": "ok",
+      "raw_quality_gate_status": "ok",
+      "sep_branching_order": 0,
+      "sep_nodes": 1,
+      "status": "ok",
+      "target_builder": "batched_sep",
+      "target_gradient_evaluated": true,
+      "theta_draws": 4,
+      "validation_improvement_mean": 0.6655408970137616,
+      "validation_rmse_mean": 9.172202659008471e-05
+    }
+  },
+  "schema_version": "surrogatenn-dsge-methods-paper-evidence/v1",
+  "sources": [
+    {
+      "path": "gali_gpu_suite_20261021T220300Z/scientific_summary.json",
+      "sha256": "39c170bd0aa5ea9e720d6a19756660ad3815fd290eedc510707a99d3144a29df"
+    },
+    {
+      "path": "gali_quick_20261021T212843Z/result.json",
+      "sha256": "428b67942b24c5dd85e2e9565b6be3d3f8652cdab2428fedd99002724c9ce729"
+    },
+    {
+      "path": "gali_full_jax_resource_20261021T213300Z/result.json",
+      "sha256": "568870043e0683c5b6fa309c5be84617c4a0dcfc6dd93508875504e1280f5daa"
+    },
+    {
+      "path": "gali_default_20261021T213900Z/result.json",
+      "sha256": "f49d531d107f6bf0ec4acf151303d03db824c878744fab0ff46d77569d280172"
+    }
+  ]
+}

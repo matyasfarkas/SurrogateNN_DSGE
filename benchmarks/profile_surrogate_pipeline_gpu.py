@@ -66,6 +66,7 @@ from surrogatenn_dsge import (
     solve_first_order_model_jax,
     solve_stochastic_extended_path_residual_expectation,
     static_hmc_sample,
+    surrogate_trajectory_hmc_sample,
     summarize_batched_surrogate_arrays,
     summarize_surrogate_dataset,
     surrogate_inversion_loglik_per_period,
@@ -663,9 +664,24 @@ def _summarize_constrained_hmc_samples(
     }
 
 
+def _hmc_retry_run_key(seed: int, attempt: int | None) -> Any:
+    """Return disjoint deterministic keys for tuning attempts and retained draws.
+
+    Retry attempts are pilot runs whose draws are discarded. The retained run
+    uses a separate key so selecting a step size from pilot acceptance cannot
+    condition the exported posterior draws on those same draws.
+    """
+
+    tuning_root, retained_key = jax.random.split(jax.random.PRNGKey(int(seed)))
+    if attempt is None:
+        return retained_key
+    return jax.random.fold_in(tuning_root, int(attempt))
+
+
 def run_static_hmc_on_bounded_surrogate_log_density(
     *,
     log_density_fn: Any,
+    proposal_log_density_fn: Any | None = None,
     center: Any,
     parameter_names: Sequence[str],
     lower: Any,
@@ -739,29 +755,55 @@ def run_static_hmc_on_bounded_surrogate_log_density(
             + bounded_log_abs_det_jacobian(unconstrained, lower_jax, upper_jax)
         )
 
-    key = jax.random.PRNGKey(int(seed))
-    init_key, sample_key = jax.random.split(key)
-    initial_center = bounded_to_unconstrained(center_jax, lower_jax, upper_jax)
-    initial_position = initial_center[None, :] + float(initial_jitter) * jax.random.normal(
-        init_key,
-        shape=(int(chains), int(center_jax.shape[0])),
-        dtype=center_jax.dtype,
-    )
-    compiled_sampler = jax.jit(
-        lambda run_key, position, attempt_step_size: static_hmc_sample(
-            log_posterior_unconstrained,
-            position,
-            run_key,
-            num_warmup=int(warmup),
-            num_samples=int(samples),
-            step_size=attempt_step_size,
-            num_leapfrog_steps=int(leapfrog_steps),
-            target_accept_prob=float(target_accept_prob),
-            adapt_step_size=bool(adapt_step_size),
+    def proposal_log_posterior_unconstrained(unconstrained: jax.Array) -> jax.Array:
+        theta_local = unconstrained_to_bounded(unconstrained, lower_jax, upper_jax)
+        assert proposal_log_density_fn is not None
+        return (
+            proposal_log_density_fn(theta_local)
+            + prior_log_const
+            + bounded_log_abs_det_jacobian(unconstrained, lower_jax, upper_jax)
         )
-    )
 
-    def run_once(attempt_step_size: float) -> dict[str, Any]:
+    initial_center = bounded_to_unconstrained(center_jax, lower_jax, upper_jax)
+    if proposal_log_density_fn is None:
+        compiled_sampler = jax.jit(
+            lambda run_key, position, attempt_step_size: static_hmc_sample(
+                log_posterior_unconstrained,
+                position,
+                run_key,
+                num_warmup=int(warmup),
+                num_samples=int(samples),
+                step_size=attempt_step_size,
+                num_leapfrog_steps=int(leapfrog_steps),
+                target_accept_prob=float(target_accept_prob),
+                adapt_step_size=bool(adapt_step_size),
+            )
+        )
+        sampler_kind = "fixed_rom_surrogate_static_hmc"
+    else:
+        compiled_sampler = jax.jit(
+            lambda run_key, position, attempt_step_size: surrogate_trajectory_hmc_sample(
+                log_posterior_unconstrained,
+                proposal_log_posterior_unconstrained,
+                position,
+                run_key,
+                num_warmup=int(warmup),
+                num_samples=int(samples),
+                step_size=attempt_step_size,
+                num_leapfrog_steps=int(leapfrog_steps),
+                target_accept_prob=float(target_accept_prob),
+                adapt_step_size=bool(adapt_step_size),
+            )
+        )
+        sampler_kind = "exact_corrected_surrogate_trajectory_hmc"
+
+    def run_once(run_key: Any, attempt_step_size: float) -> dict[str, Any]:
+        init_key, sample_key = jax.random.split(run_key)
+        initial_position = initial_center[None, :] + float(initial_jitter) * jax.random.normal(
+            init_key,
+            shape=(int(chains), int(center_jax.shape[0])),
+            dtype=center_jax.dtype,
+        )
         step_size_array = jnp.asarray(attempt_step_size, dtype=center_jax.dtype)
         started = time.perf_counter()
         result = compiled_sampler(sample_key, initial_position, step_size_array)
@@ -785,7 +827,10 @@ def run_static_hmc_on_bounded_surrogate_log_density(
     selected_summary: dict[str, Any] | None = None
     attempt_step_size = requested_step_size
     for attempt in range(retries + 1):
-        attempt_summary = run_once(attempt_step_size)
+        attempt_summary = run_once(
+            _hmc_retry_run_key(int(seed), attempt),
+            attempt_step_size,
+        )
         attempt_summary["attempt"] = int(attempt)
         attempt_summary["attempt_step_size"] = float(attempt_step_size)
         attempt_summaries.append(attempt_summary)
@@ -806,15 +851,39 @@ def run_static_hmc_on_bounded_surrogate_log_density(
         break
 
     assert selected_summary is not None
-    selected_constrained_samples = selected_summary.get("_constrained_samples")
-    summary = dict(selected_summary)
+    # Retry attempts are tuning pilots. If a retry policy is configured, run a
+    # fresh, independently keyed chain after choosing the initial step size.
+    # Otherwise selecting on pilot acceptance would condition the retained path
+    # on that path's own post-warmup outcomes.
+    uses_independent_retained_run = retries > 0
+    retained_summary = (
+        run_once(
+            _hmc_retry_run_key(int(seed), None),
+            float(selected_summary["attempt_step_size"]),
+        )
+        if uses_independent_retained_run
+        else selected_summary
+    )
+    selected_constrained_samples = retained_summary.get("_constrained_samples")
+    summary = dict(retained_summary)
     summary.pop("_raw_result", None)
     summary.pop("_constrained_samples", None)
-    selected_step_size = float(summary["attempt_step_size"])
+    selected_step_size = float(selected_summary["attempt_step_size"])
+    sampling_elapsed_s = float(summary["elapsed_s"])
+    tuning_elapsed_s = (
+        float(sum(float(item["elapsed_s"]) for item in attempt_summaries))
+        if uses_independent_retained_run
+        else 0.0
+    )
+    total_elapsed_s = sampling_elapsed_s + tuning_elapsed_s
+    summary["sampling_elapsed_s"] = sampling_elapsed_s
+    summary["tuning_elapsed_s"] = tuning_elapsed_s
+    summary["elapsed_s"] = total_elapsed_s
+    summary["draws_per_second"] = float(summary["post_warmup_draws"] / total_elapsed_s)
     summary.update(
         {
             "status": "ok",
-            "kind": "fixed_rom_surrogate_static_hmc",
+            "kind": sampler_kind,
             "parameter_names": [str(name) for name in parameter_names],
             "prior_lower": np.asarray(lower_jax, dtype=np.float64).tolist(),
             "prior_upper": np.asarray(upper_jax, dtype=np.float64).tolist(),
@@ -835,6 +904,11 @@ def run_static_hmc_on_bounded_surrogate_log_density(
             "retry_step_size_growth_factor": growth_factor,
             "retry_min_accepted_share": min_accept,
             "retry_max_accepted_share": max_accept,
+            "retained_run_independent_of_tuning": uses_independent_retained_run,
+            "tuning_run_count": len(attempt_summaries) if uses_independent_retained_run else 0,
+            "sampler_run_count": (
+                len(attempt_summaries) + 1 if uses_independent_retained_run else 1
+            ),
             "retry_history": [
                 {
                     "attempt": int(item["attempt"]),
@@ -849,10 +923,35 @@ def run_static_hmc_on_bounded_surrogate_log_density(
                 for item in attempt_summaries
             ],
             "backend": jax.default_backend(),
+            "proposal_log_density": (
+                "target" if proposal_log_density_fn is None else "separate_surrogate"
+            ),
+            "target_gradient_evaluated": proposal_log_density_fn is None,
+            "target_evaluations_per_transition": (
+                None if proposal_log_density_fn is None else 1
+            ),
+            "target_evaluations": (
+                None
+                if proposal_log_density_fn is None
+                else int(chains)
+                * (1 + int(warmup) + int(samples))
+                * (len(attempt_summaries) + 1 if uses_independent_retained_run else 1)
+            ),
+            "retained_target_evaluations": (
+                None
+                if proposal_log_density_fn is None
+                else int(chains) * (1 + int(warmup) + int(samples))
+            ),
             "caveat": (
-                "Samples the trained-surrogate inversion likelihood with fixed reference steady state "
-                "and fixed first-order ROM matrices. This is not yet a parameter-specific full HLT "
-                "steady-state/ROM recomputation inside the HMC transition."
+                "Leapfrog uses a separate surrogate density, while every proposal is accepted or "
+                "rejected with the exact target Hamiltonian. This preserves the target posterior "
+                "without differentiating the target."
+                if proposal_log_density_fn is not None
+                else (
+                    "Samples the trained-surrogate inversion likelihood with fixed reference steady "
+                    "state and fixed first-order ROM matrices. This is not yet a parameter-specific "
+                    "full HLT steady-state/ROM recomputation inside the HMC transition."
+                )
             ),
         }
     )
@@ -861,7 +960,7 @@ def run_static_hmc_on_bounded_surrogate_log_density(
             raise RuntimeError("selected HMC attempt did not retain constrained samples for export.")
         draw_metadata = {
             "source": "profile_surrogate_pipeline_gpu.py",
-            "kind": "fixed_rom_surrogate_static_hmc",
+            "kind": sampler_kind,
             "chains": int(chains),
             "warmup": int(warmup),
             "samples": int(samples),
@@ -886,6 +985,7 @@ def run_static_hmc_on_bounded_surrogate_log_density(
 def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
     *,
     log_density_fn: Any,
+    proposal_log_density_fn: Any | None = None,
     center: Any,
     parameter_names: Sequence[str],
     lower: Any,
@@ -925,6 +1025,7 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
     if batch_size >= total_chains:
         return run_static_hmc_on_bounded_surrogate_log_density(
             log_density_fn=log_density_fn,
+            proposal_log_density_fn=proposal_log_density_fn,
             center=center,
             parameter_names=parameter_names,
             lower=lower,
@@ -1000,34 +1101,66 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
             + bounded_log_abs_det_jacobian(unconstrained, lower_jax, upper_jax)
         )
 
+    def proposal_log_posterior_unconstrained(unconstrained: jax.Array) -> jax.Array:
+        theta_local = unconstrained_to_bounded(unconstrained, lower_jax, upper_jax)
+        assert proposal_log_density_fn is not None
+        return (
+            proposal_log_density_fn(theta_local)
+            + prior_log_const
+            + bounded_log_abs_det_jacobian(unconstrained, lower_jax, upper_jax)
+        )
+
     sampler_cache: dict[int, Any] = {}
 
     def compiled_sampler_for(batch_chains: int) -> Any:
         batch_chains = int(batch_chains)
         if batch_chains not in sampler_cache:
-            sampler_cache[batch_chains] = jax.jit(
-                lambda run_key, position, attempt_step_size: static_hmc_sample(
-                    log_posterior_unconstrained,
-                    position,
-                    run_key,
-                    num_warmup=int(warmup),
-                    num_samples=int(samples),
-                    step_size=attempt_step_size,
-                    num_leapfrog_steps=int(leapfrog_steps),
-                    target_accept_prob=float(target_accept_prob),
-                    adapt_step_size=bool(adapt_step_size),
+            if proposal_log_density_fn is None:
+                sampler_cache[batch_chains] = jax.jit(
+                    lambda run_key, position, attempt_step_size: static_hmc_sample(
+                        log_posterior_unconstrained,
+                        position,
+                        run_key,
+                        num_warmup=int(warmup),
+                        num_samples=int(samples),
+                        step_size=attempt_step_size,
+                        num_leapfrog_steps=int(leapfrog_steps),
+                        target_accept_prob=float(target_accept_prob),
+                        adapt_step_size=bool(adapt_step_size),
+                    )
                 )
-            )
+            else:
+                sampler_cache[batch_chains] = jax.jit(
+                    lambda run_key, position, attempt_step_size: (
+                        surrogate_trajectory_hmc_sample(
+                            log_posterior_unconstrained,
+                            proposal_log_posterior_unconstrained,
+                            position,
+                            run_key,
+                            num_warmup=int(warmup),
+                            num_samples=int(samples),
+                            step_size=attempt_step_size,
+                            num_leapfrog_steps=int(leapfrog_steps),
+                            target_accept_prob=float(target_accept_prob),
+                            adapt_step_size=bool(adapt_step_size),
+                        )
+                    )
+                )
         return sampler_cache[batch_chains]
+
+    sampler_kind = (
+        "fixed_rom_surrogate_static_hmc_chain_batched"
+        if proposal_log_density_fn is None
+        else "exact_corrected_surrogate_trajectory_hmc_chain_batched"
+    )
 
     def run_batch_attempt(
         *,
-        batch_seed: int,
+        run_key: Any,
         batch_chains: int,
         attempt_step_size: float,
     ) -> dict[str, Any]:
-        key = jax.random.PRNGKey(int(batch_seed))
-        init_key, sample_key = jax.random.split(key)
+        init_key, sample_key = jax.random.split(run_key)
         initial_position = initial_center[None, :] + float(initial_jitter) * jax.random.normal(
             init_key,
             shape=(int(batch_chains), int(center_jax.shape[0])),
@@ -1058,13 +1191,18 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
     while chain_start < total_chains:
         current_chains = min(batch_size, total_chains - chain_start)
         batch_seed = int(seed) + 1_000_003 * batch_index
+        _progress(
+            "starting surrogate HMC chain batch "
+            f"{batch_index + 1}/{math.ceil(total_chains / batch_size)} "
+            f"chain_start={chain_start} chains={current_chains}"
+        )
         attempt_summaries: list[dict[str, Any]] = []
         selected_attempt = 0
         selected_batch_result: dict[str, Any] | None = None
         attempt_step_size = float(step_size)
         for attempt in range(retries + 1):
             attempt_summary = run_batch_attempt(
-                batch_seed=batch_seed,
+                run_key=_hmc_retry_run_key(batch_seed, attempt),
                 batch_chains=current_chains,
                 attempt_step_size=attempt_step_size,
             )
@@ -1088,15 +1226,38 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
             break
 
         assert selected_batch_result is not None
+        uses_independent_retained_run = retries > 0
+        retained_batch_result = (
+            run_batch_attempt(
+                run_key=_hmc_retry_run_key(batch_seed, None),
+                batch_chains=current_chains,
+                attempt_step_size=float(selected_batch_result["attempt_step_size"]),
+            )
+            if uses_independent_retained_run
+            else selected_batch_result
+        )
         constrained = np.asarray(
-            selected_batch_result.pop("_constrained_samples"),
+            retained_batch_result.pop("_constrained_samples"),
             dtype=np.float64,
         )
         constrained_batches.append(constrained)
-        selected_batch_result.update(
+        sampling_elapsed_s = float(retained_batch_result["elapsed_s"])
+        tuning_elapsed_s = (
+            float(sum(float(item["elapsed_s"]) for item in attempt_summaries))
+            if uses_independent_retained_run
+            else 0.0
+        )
+        total_batch_elapsed_s = sampling_elapsed_s + tuning_elapsed_s
+        retained_batch_result["sampling_elapsed_s"] = sampling_elapsed_s
+        retained_batch_result["tuning_elapsed_s"] = tuning_elapsed_s
+        retained_batch_result["elapsed_s"] = total_batch_elapsed_s
+        retained_batch_result["draws_per_second"] = float(
+            retained_batch_result["post_warmup_draws"] / total_batch_elapsed_s
+        )
+        retained_batch_result.update(
             {
                 "status": "ok",
-                "kind": "fixed_rom_surrogate_static_hmc",
+                "kind": sampler_kind,
                 "initial_step_size": float(selected_batch_result["attempt_step_size"]),
                 "requested_initial_step_size": float(step_size),
                 "target_accept_prob": float(target_accept_prob),
@@ -1109,6 +1270,13 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
                 "retry_step_size_growth_factor": growth_factor,
                 "retry_min_accepted_share": min_accept,
                 "retry_max_accepted_share": max_accept,
+                "retained_run_independent_of_tuning": uses_independent_retained_run,
+                "tuning_run_count": (
+                    len(attempt_summaries) if uses_independent_retained_run else 0
+                ),
+                "sampler_run_count": (
+                    len(attempt_summaries) + 1 if uses_independent_retained_run else 1
+                ),
                 "retry_history": [
                     {
                         "attempt": int(item["attempt"]),
@@ -1126,7 +1294,7 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
         )
         compact = {
             key: value
-            for key, value in selected_batch_result.items()
+            for key, value in retained_batch_result.items()
             if key
             not in {
                 "parameter_summary",
@@ -1144,6 +1312,12 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
             }
         )
         batch_summaries.append(compact)
+        _progress(
+            "finished surrogate HMC chain batch "
+            f"{batch_index + 1}/{math.ceil(total_chains / batch_size)} "
+            f"elapsed={compact.get('elapsed_s')}s "
+            f"accepted_share={compact.get('accepted_share')}"
+        )
         chain_start += current_chains
         batch_index += 1
 
@@ -1204,7 +1378,7 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
     summary.update(
         {
             "status": "ok",
-            "kind": "fixed_rom_surrogate_static_hmc_chain_batched",
+            "kind": sampler_kind,
             "parameter_names": [str(name) for name in parameter_names],
             "prior_lower": np.asarray(lower, dtype=np.float64).tolist(),
             "prior_upper": np.asarray(upper, dtype=np.float64).tolist(),
@@ -1214,6 +1388,34 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
             "chain_batched": True,
             "compiled_chain_batch_sizes": [int(size) for size in sorted(sampler_cache)],
             "compile_reuse": True,
+            "sampling_elapsed_s": float(
+                sum(float(item.get("sampling_elapsed_s", item["elapsed_s"])) for item in batch_summaries)
+            ),
+            "tuning_elapsed_s": float(
+                sum(float(item.get("tuning_elapsed_s", 0.0)) for item in batch_summaries)
+            ),
+            "proposal_log_density": (
+                "target" if proposal_log_density_fn is None else "separate_surrogate"
+            ),
+            "target_gradient_evaluated": proposal_log_density_fn is None,
+            "target_evaluations_per_transition": (
+                None if proposal_log_density_fn is None else 1
+            ),
+            "target_evaluations": (
+                None
+                if proposal_log_density_fn is None
+                else sum(
+                    int(item["chains"])
+                    * (1 + int(warmup) + int(samples))
+                    * int(item.get("sampler_run_count", 1))
+                    for item in batch_summaries
+                )
+            ),
+            "retained_target_evaluations": (
+                None
+                if proposal_log_density_fn is None
+                else total_chains * (1 + int(warmup) + int(samples))
+            ),
             "warmup": int(warmup),
             "samples": int(samples),
             "leapfrog_steps": int(leapfrog_steps),
@@ -1231,6 +1433,18 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
             "retry_step_size_growth_factor": float(retry_step_size_growth_factor),
             "retry_min_accepted_share": float(min_accepted_share),
             "retry_max_accepted_share": None if max_accepted_share is None else float(max_accepted_share),
+            "retained_run_independent_of_tuning": bool(
+                all(
+                    bool(item.get("retained_run_independent_of_tuning", False))
+                    for item in batch_summaries
+                )
+            ),
+            "tuning_run_count": int(
+                sum(int(item.get("tuning_run_count", 0)) for item in batch_summaries)
+            ),
+            "sampler_run_count": int(
+                sum(int(item.get("sampler_run_count", 1)) for item in batch_summaries)
+            ),
             "batch_summaries": batch_summaries,
             "backend": jax.default_backend(),
             "caveat": (
@@ -1245,7 +1459,7 @@ def run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
     if draws_output is not None:
         draw_metadata = {
             "source": "profile_surrogate_pipeline_gpu.py",
-            "kind": "fixed_rom_surrogate_static_hmc_chain_batched",
+            "kind": sampler_kind,
             "chains": total_chains,
             "chain_batch_size": batch_size,
             "chain_batch_count": len(batch_summaries),
@@ -2388,11 +2602,18 @@ def _make_hlt_theta_design(
         "subset_names": tuple(str(name) for name in subset_names),
     }
     if design_mode == "perturbation":
-        theta = np.repeat(base_subset[:, None], int(draws), axis=1)
-        if draws > 1 and perturbation != 0.0:
-            grid = np.linspace(-1.0, 1.0, int(draws), dtype=np.float64)
+        sampled_draws = int(draws) - (1 if include_reference else 0)
+        columns: list[np.ndarray] = []
+        if include_reference:
+            columns.append(base_subset[:, None])
+        theta_sampled = np.repeat(base_subset[:, None], sampled_draws, axis=1)
+        if sampled_draws > 0 and perturbation != 0.0:
+            grid = np.linspace(-1.0, 1.0, sampled_draws, dtype=np.float64)
             signs = np.where(np.arange(base_subset.size) % 2 == 0, 1.0, -1.0)
-            theta *= 1.0 + float(perturbation) * signs[:, None] * grid[None, :]
+            theta_sampled *= 1.0 + float(perturbation) * signs[:, None] * grid[None, :]
+        if sampled_draws:
+            columns.append(theta_sampled)
+        theta = np.concatenate(columns, axis=1)
         diagnostics["perturbation"] = float(perturbation)
         diagnostics["actual_draws"] = int(theta.shape[1])
         return theta, subset_idx, diagnostics
@@ -3332,6 +3553,17 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
     model = parse_macro_model(model_source.read_text(encoding="utf-8"))
     parse_s = time.perf_counter() - started
     _progress(f"parsed HLT model in {parse_s:.3f}s")
+    model_name = str(model.name)
+    result_kind = (
+        "actual_nonlinear_gali_surrogate_pipeline"
+        if model_name == "Gali_2015_chapter_3_nonlinear"
+        else "actual_hlt_surrogate_pipeline"
+    )
+    preflight_kind = (
+        "actual_nonlinear_gali_runtime_preflight"
+        if model_name == "Gali_2015_chapter_3_nonlinear"
+        else "actual_hlt_runtime_preflight"
+    )
 
     reference_steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
     base_parameters = np.asarray(model.parameter_values, dtype=np.float64)
@@ -3557,21 +3789,19 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
     runtime_prepare_s = time.perf_counter() - runtime_prepare_started
     preflight_minimum = int(args.hlt_min_runtime_successful_theta)
     preflight_ok = bool(initial_state_columns) and len(initial_state_columns) >= preflight_minimum
+    preflight_steady_statuses = [
+        str(runtime.get("steady_state_status")) for runtime in runtime_successes
+    ]
+    steady_fallback_count_for_gate = sum(
+        status.startswith("fallback") for status in preflight_steady_statuses
+    )
+    steady_solved_count_for_gate = sum(
+        status == "solved" for status in preflight_steady_statuses
+    )
     if bool(args.hlt_runtime_preflight_only):
         steady_statuses = [str(row["steady_state_status"]) for row in steady_state_diagnostics]
         attempted_fallback_count = sum(status.startswith("fallback") for status in steady_statuses)
         attempted_solved_count = sum(status == "solved" for status in steady_statuses)
-        kept_theta_index_set = {int(idx) for idx in kept_theta_indices}
-        steady_state_diagnostics_for_gate = [
-            row
-            for row in steady_state_diagnostics
-            if row.get("theta_index") is None or int(row["theta_index"]) in kept_theta_index_set
-        ]
-        steady_statuses_for_gate = [
-            str(row["steady_state_status"]) for row in steady_state_diagnostics_for_gate
-        ]
-        steady_fallback_count_for_gate = sum(status.startswith("fallback") for status in steady_statuses_for_gate)
-        steady_solved_count_for_gate = sum(status == "solved" for status in steady_statuses_for_gate)
         preflight_issues = []
         if not initial_state_columns:
             preflight_issues.append("No HLT theta draw survived steady-state/first-order runtime preparation.")
@@ -3587,10 +3817,13 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         )
         return {
             "status": "ok" if preflight_ok else "runtime_preflight_failed",
-            "kind": "actual_hlt_runtime_preflight",
+            "kind": preflight_kind,
             "backend": jax.default_backend(),
             "target_device": None if target_device is None else str(target_device),
+            "model_name": model_name,
             "model_source": str(model_source),
+            "equation_count": int(len(model.equations)),
+            "parameter_count": int(len(model.parameter_names)),
             "payload_case": str(case["name"]),
             "parse_s": parse_s,
             "runtime_prepare_s": runtime_prepare_s,
@@ -4544,6 +4777,12 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
 
                 if int(args.hlt_surrogate_hmc_samples) > 0:
                     chain_batch_size = int(args.hlt_surrogate_hmc_chain_batch_size)
+                    hmc_gradient_mode = str(args.hlt_surrogate_hmc_gradient_mode)
+                    hmc_proposal_log_density = (
+                        fixed_reference_log_density
+                        if hmc_gradient_mode == "fixed-reference-corrected"
+                        else None
+                    )
                     hmc_runner = (
                         run_chain_batched_static_hmc_on_bounded_surrogate_log_density
                         if 0 < chain_batch_size < int(args.hlt_surrogate_hmc_chains)
@@ -4552,6 +4791,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     _progress(
                         "starting surrogate HMC "
                         f"runtime_mode={likelihood_runtime_mode} "
+                        f"gradient_mode={hmc_gradient_mode} "
                         f"chains={args.hlt_surrogate_hmc_chains} "
                         f"chain_batch_size={chain_batch_size if chain_batch_size > 0 else 'monolithic'} "
                         f"warmup={args.hlt_surrogate_hmc_warmup} "
@@ -4565,6 +4805,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     )
                     hmc_kwargs = {
                         "log_density_fn": log_density,
+                        "proposal_log_density_fn": hmc_proposal_log_density,
                         "center": theta0_jax,
                         "parameter_names": parameter_subset,
                         "lower": device_array(lower),
@@ -4597,6 +4838,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                             "likelihood_runtime_mode": likelihood_runtime_mode,
                             "likelihood_qme_algorithm": likelihood_qme_algorithm,
                             "likelihood_static_rows_mode": likelihood_static_rows_mode,
+                            "hmc_gradient_mode": hmc_gradient_mode,
                         },
                     }
                     if hmc_runner is run_chain_batched_static_hmc_on_bounded_surrogate_log_density:
@@ -4605,6 +4847,10 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                     surrogate_hmc_result["runtime_mode"] = likelihood_runtime_mode
                     surrogate_hmc_result["qme_algorithm"] = likelihood_qme_algorithm
                     surrogate_hmc_result["static_rows_mode"] = likelihood_static_rows_mode
+                    surrogate_hmc_result["gradient_mode"] = hmc_gradient_mode
+                    surrogate_hmc_result["exact_endpoint_correction"] = (
+                        hmc_gradient_mode == "fixed-reference-corrected"
+                    )
                     _progress(
                         "finished static surrogate HMC "
                         f"elapsed={surrogate_hmc_result.get('elapsed_s')} "
@@ -4705,17 +4951,6 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         quality_issues.append("JAX-vs-Python surrogate log-density parity gate failed.")
     if bool(args.hlt_require_hmc) and surrogate_hmc_result.get("status") != "ok":
         quality_issues.append("HMC gate requested but surrogate HMC did not finish with status ok.")
-    kept_theta_index_set = {int(idx) for idx in kept_theta_indices}
-    steady_state_diagnostics_for_gate = [
-        row
-        for row in steady_state_diagnostics
-        if row.get("theta_index") is None or int(row["theta_index"]) in kept_theta_index_set
-    ]
-    steady_statuses_for_gate = [
-        str(row["steady_state_status"]) for row in steady_state_diagnostics_for_gate
-    ]
-    steady_fallback_count_for_gate = sum(status.startswith("fallback") for status in steady_statuses_for_gate)
-    steady_solved_count_for_gate = sum(status == "solved" for status in steady_statuses_for_gate)
     if bool(args.hlt_require_solved_steady_state):
         if steady_state_mode == "fixed-reference":
             quality_issues.append("Solved steady-state gate requested but steady_state_mode=fixed-reference.")
@@ -4813,10 +5048,13 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
 
     return {
         "status": status,
-        "kind": "actual_hlt_surrogate_pipeline",
+        "kind": result_kind,
         "backend": jax.default_backend(),
         "target_device": None if target_device is None else str(target_device),
+        "model_name": model_name,
         "model_source": str(model_source),
+        "equation_count": int(len(model.equations)),
+        "parameter_count": int(len(model.parameter_names)),
         "payload_case": str(case["name"]),
         "caveats": caveats,
         "parse_s": parse_s,
@@ -5354,6 +5592,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--hlt-surrogate-hmc-warmup", type=int, default=0)
     parser.add_argument("--hlt-surrogate-hmc-samples", type=int, default=0)
     parser.add_argument("--hlt-surrogate-hmc-chains", type=int, default=1)
+    parser.add_argument(
+        "--hlt-surrogate-hmc-gradient-mode",
+        choices=("target", "fixed-reference-corrected"),
+        default="target",
+        help=(
+            "'target' differentiates the selected likelihood during leapfrog. "
+            "'fixed-reference-corrected' uses the cheap fixed-reference likelihood "
+            "for trajectories and the selected likelihood for an exact endpoint "
+            "Metropolis correction."
+        ),
+    )
     parser.add_argument(
         "--hlt-surrogate-hmc-chain-batch-size",
         type=int,

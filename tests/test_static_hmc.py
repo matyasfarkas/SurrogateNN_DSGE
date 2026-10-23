@@ -9,6 +9,7 @@ from surrogatenn_dsge import (
     bounded_log_abs_det_jacobian,
     bounded_to_unconstrained,
     static_hmc_sample,
+    surrogate_trajectory_hmc_sample,
     unconstrained_to_bounded,
 )
 
@@ -99,3 +100,80 @@ def test_static_hmc_validates_static_inputs() -> None:
             step_size=0.1,
             num_leapfrog_steps=0,
         )
+
+
+def test_surrogate_trajectory_hmc_matches_static_hmc_when_densities_match() -> None:
+    def log_prob(position):
+        return -0.5 * jnp.sum(position * position)
+
+    initial = jnp.asarray(
+        [[0.1, -0.2], [0.3, 0.4]],
+        dtype=jnp.float64,
+    )
+    key = jax.random.PRNGKey(917)
+    kwargs = {
+        "num_warmup": 3,
+        "num_samples": 5,
+        "step_size": 0.08,
+        "num_leapfrog_steps": 3,
+        "adapt_step_size": False,
+    }
+
+    exact = jax.jit(lambda run_key: static_hmc_sample(log_prob, initial, run_key, **kwargs))(
+        key
+    )
+    corrected = jax.jit(
+        lambda run_key: surrogate_trajectory_hmc_sample(
+            log_prob,
+            log_prob,
+            initial,
+            run_key,
+            **kwargs,
+        )
+    )(key)
+
+    np.testing.assert_allclose(corrected.samples, exact.samples, rtol=1.0e-12, atol=1.0e-12)
+    np.testing.assert_allclose(corrected.log_prob, exact.log_prob, rtol=1.0e-12, atol=1.0e-12)
+    np.testing.assert_allclose(
+        corrected.accept_prob,
+        exact.accept_prob,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+    np.testing.assert_array_equal(corrected.accepted, exact.accepted)
+
+
+def test_surrogate_trajectory_hmc_uses_exact_target_for_acceptance() -> None:
+    def target_log_prob(position):
+        return -0.5 * jnp.sum(position * position)
+
+    def shifted_proposal_log_prob(position):
+        return -0.5 * jnp.sum((position - 1.5) ** 2)
+
+    initial = jnp.zeros((3, 1), dtype=jnp.float64)
+    sampler = jax.jit(
+        lambda run_key: surrogate_trajectory_hmc_sample(
+            target_log_prob,
+            shifted_proposal_log_prob,
+            initial,
+            run_key,
+            num_warmup=4,
+            num_samples=7,
+            step_size=0.1,
+            num_leapfrog_steps=2,
+        )
+    )
+
+    result = sampler(jax.random.PRNGKey(22))
+
+    assert result.samples.shape == (7, 3, 1)
+    assert result.log_prob.shape == (7, 3)
+    assert result.proposal_log_prob.shape == (7, 3)
+    assert result.final_grad_proposal_log_prob.shape == (3, 1)
+    assert bool(jnp.all(jnp.isfinite(result.samples)))
+    np.testing.assert_allclose(
+        result.log_prob,
+        -0.5 * jnp.sum(result.samples**2, axis=-1),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )

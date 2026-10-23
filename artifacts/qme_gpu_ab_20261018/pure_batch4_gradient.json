@@ -1,0 +1,106 @@
+{
+  "batches": {
+    "4": {
+      "failure_count": 0,
+      "gradient_draws_per_second_median": 35.65378123390483,
+      "gradient_failure_count": 0,
+      "gradient_first_call_s": 89.01798632927239,
+      "gradient_loglikelihood_max": -600.5180009530044,
+      "gradient_loglikelihood_min": -600.7474693170359,
+      "gradient_max_abs": 261.43151112986516,
+      "gradient_per_draw_steady_median_s": 0.028047516010701656,
+      "gradient_steady": {
+        "max_s": 0.11779139004647732,
+        "mean_s": 0.11295218206942081,
+        "median_s": 0.11219006404280663,
+        "min_s": 0.1118848156183958,
+        "reps": 7,
+        "std_s": 0.0021402785475360927
+      },
+      "loglikelihood_max": -600.5180009530044,
+      "loglikelihood_min": -600.7474693170359,
+      "value_draws_per_second_median": 97.67910620503798,
+      "value_first_call_s": 31.41492939554155,
+      "value_per_draw_steady_median_s": 0.010237603913992643,
+      "value_steady": {
+        "max_s": 0.04141442850232124,
+        "mean_s": 0.04037287198007107,
+        "median_s": 0.04095041565597057,
+        "min_s": 0.03774646669626236,
+        "reps": 5,
+        "std_s": 0.0015100775271080398
+      }
+    }
+  },
+  "benchmark": {
+    "batch_sizes": [
+      4
+    ],
+    "case": "medium_sw07_hlt",
+    "check_parameter_bounds": false,
+    "dtype": "float64",
+    "n_exo": 7,
+    "n_observables": 7,
+    "n_vars": 66,
+    "parameter_count": 15,
+    "parameter_names": [
+      "calfa",
+      "cg",
+      "cgy",
+      "cindw",
+      "crdy",
+      "crhob",
+      "crhoqs",
+      "crpi",
+      "crr",
+      "cry",
+      "csigl",
+      "z_ea",
+      "z_eg",
+      "z_em",
+      "z_ew"
+    ],
+    "parameters_are_resolved": true,
+    "periods": 80,
+    "preset": "sw07_hlt",
+    "qme_algorithm": "schur_gpu",
+    "resolved_parameter_max_abs_diff": 0.3333333333333329,
+    "static_equation_rows": [
+      19,
+      65,
+      23,
+      51,
+      48,
+      46,
+      25,
+      17,
+      13,
+      15,
+      27,
+      47,
+      49,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      44,
+      21
+    ]
+  },
+  "runtime": {
+    "jax_default_backend": "gpu",
+    "jax_devices": [
+      "cuda:0"
+    ],
+    "jax_enable_x64": true,
+    "jax_version": "0.11.1",
+    "numpyro_version": "0.21.0",
+    "nvidia_smi": "Mon Oct 19 07:04:22 2026       \n+-----------------------------------------------------------------------------------------+\n| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |\n+-----------------------------------------+------------------------+----------------------+\n| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |\n| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |\n|                                         |                        |               MIG M. |\n|=========================================+========================+======================|\n|   0  NVIDIA GeForce RTX 4080 ...    On  |   00000000:B2:00.0 Off |                  N/A |\n| 30%   36C    P2             58W /  320W |     564MiB /  32760MiB |     69%      Default |\n|                                         |                        |                  N/A |\n+-----------------------------------------+------------------------+----------------------+\n\n+-----------------------------------------------------------------------------------------+\n| Processes:                                                                              |\n|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |\n|        ID   ID                                                               Usage      |\n|=========================================================================================|\n|    0   N/A  N/A           13244      C   python                                  554MiB |\n+-----------------------------------------------------------------------------------------+",
+    "platform": "Linux-5.15.0-25-generic-x86_64-with-glibc2.35",
+    "processor": "x86_64",
+    "python": "3.12.3 | packaged by Anaconda, Inc. | (main, May  6 2024, 19:46:43) [GCC 11.2.0]"
+  }
+}

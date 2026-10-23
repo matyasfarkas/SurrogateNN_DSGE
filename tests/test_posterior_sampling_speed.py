@@ -159,6 +159,14 @@ def test_parse_args_accepts_gpu_schur_qme_algorithm() -> None:
     assert args.qme_algorithm == "schur_gpu"
 
 
+def test_gpu_posterior_defaults_to_determinacy_aware_qme_solver() -> None:
+    module = _load_module()
+
+    args = module._parse_args([])
+
+    assert args.qme_algorithm == "schur_gpu"
+
+
 def test_parse_args_accepts_cuda_platform_aliases() -> None:
     module = _load_module()
 

@@ -311,9 +311,12 @@ from .surrogate_training import (
 from .static_hmc import (
     StaticHMCResult,
     StaticHMCState,
+    SurrogateTrajectoryHMCResult,
+    SurrogateTrajectoryHMCState,
     bounded_log_abs_det_jacobian,
     bounded_to_unconstrained,
     static_hmc_sample,
+    surrogate_trajectory_hmc_sample,
     unconstrained_to_bounded,
 )
 from .switching import (
@@ -406,6 +409,8 @@ __all__ = [
     "StateSpaceSimulation",
     "StaticHMCResult",
     "StaticHMCState",
+    "SurrogateTrajectoryHMCResult",
+    "SurrogateTrajectoryHMCState",
     "SurrogateBundle",
     "SurrogateDataset",
     "SurrogatePipelineResult",
@@ -586,6 +591,7 @@ __all__ = [
     "split_surrogate_dataset",
     "standardize_xy",
     "static_hmc_sample",
+    "surrogate_trajectory_hmc_sample",
     "summarize_batched_surrogate_arrays",
     "summarize_surrogate_dataset",
     "summarize_adaptive_grid",

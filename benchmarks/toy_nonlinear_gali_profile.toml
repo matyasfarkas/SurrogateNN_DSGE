@@ -1,0 +1,40 @@
+[experiment]
+name = "gali_full_nonlinear_reduced_smoke"
+seed = 20261019
+parameter_names = ["ϕᵖⁱ", "ϕʸ"]
+parameter_lower = [1.30, 0.080]
+parameter_upper = [1.70, 0.170]
+target_draws = 8
+target_periods = 10
+validation_fraction = 0.25
+shock_scale = 0.12
+observables = ["log_y", "pi_ann", "i_ann"]
+
+[sep]
+branching_order = 0
+nnodes = 1
+max_iter = 50
+tol = 1.0e-8
+accept_tol = 1.0e-5
+
+[surrogate]
+hidden = 64
+blocks = 1
+epochs = 400
+learning_rate = 0.002
+batch_size = 32
+
+[likelihood]
+periods = 10
+theta_draws = 4
+finite_difference_step = [0.002, 0.0005]
+observation_sigma = [0.010, 0.010, 0.010]
+
+[hmc]
+chains = 1
+warmup = 25
+samples = 50
+step_size = 0.02
+leapfrog_steps = 3
+target_accept = 0.80
+exact_grid_points_per_dimension = 8

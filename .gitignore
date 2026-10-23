@@ -9,5 +9,6 @@ build/
 dist/
 .mypy_cache/
 .ruff_cache/
+artifacts/gpuhub/extracted/
 benchmarks/results/
 *.snn

@@ -1,302 +1,520 @@
-\documentclass[10pt]{article}
+\documentclass[11pt]{article}
 
-\usepackage[margin=0.65in]{geometry}
+\usepackage[margin=1in]{geometry}
 \usepackage{amsmath,amssymb,amsthm}
 \usepackage{booktabs}
-\usepackage{hyperref}
+\usepackage{float}
+\usepackage[hidelinks]{hyperref}
 \usepackage{microtype}
 
-\setlength{\parskip}{0.1em}
-\setlength{\parindent}{1.1em}
-\linespread{0.92}
-
-\newtheorem{proposition}{Proposition}
 \newtheorem{assumption}{Assumption}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
 
-\title{\vspace{-1.6em}Real Determinacy Tests for DSGE Estimation}
+\title{Real QZ Is Sufficient for DSGE Determinacy}
 \author{Matyas Farkas}
-\date{\vspace{-0.9em}\today}
+\date{\today}
 
 \begin{document}
 \maketitle
-\vspace{-1.1em}
 
 \begin{abstract}
-\noindent
-DSGE estimation usually rejects parameter draws for which the linearized model
-has no unique stable solution. This paper shows that one common rejection rule
-is too strict: a draw should not be rejected only because a complex-QZ
-calculation returns a complex-valued policy matrix. In a real linear
-rational-expectations model, stable complex roots come in conjugate pairs and
-describe damped cycles in real variables. If the stable-root count and the
-state-to-jump mapping condition hold, the policy rule is real. In one million
-loose-prior draws from the benchmark HLT model, the complex-QZ rule rejects
-464,685 draws that real QZ accepts with median residual
-$8.8\times10^{-14}$. A Cayley real-part rule matches real QZ in this audit;
-doubling accepts 84,606 draws that real QZ classifies as non-unique.
+Some DSGE solvers reject parameter values when complex-output QZ produces
+imaginary entries in the policy matrix. I show that this is not a determinacy
+condition. QZ gives a basis for the initial values of stable paths. Let $Z_x$
+be the part of this basis associated with predetermined variables. A unique
+stable solution exists if and only if the number of stable roots equals the
+number of predetermined variables and $Z_x$ is nonsingular. Real and complex
+QZ span the same stable subspace, so they give the same test and the same real
+solution in exact arithmetic. Complex roots occur in conjugate pairs and
+describe real damped cycles. In one million benchmark draws, an imaginary-part
+restriction rejects 464,685 draws accepted by real QZ.
 \end{abstract}
-\vspace{-0.4em}
-\noindent\textbf{Keywords:} DSGE estimation; determinacy; generalized Schur;
-Bayesian posterior support; GPU computing.
+
+\noindent\textbf{Keywords:} DSGE models; determinacy; generalized Schur
+decomposition; QZ decomposition; GPU computing.
 
 \section{Introduction}
 
-A dynamic stochastic general equilibrium (DSGE) model describes how economic
-variables move over time in response to shocks. In Bayesian DSGE estimation,
-each parameter draw must pass a solution test before its likelihood is used.
-The standard first-order test is determinacy: the linearized model must have
-one stable equilibrium path for each initial state. If the test is wrong, the
-posterior is wrong because valid parameter draws are either excluded or invalid
-draws are included.
+The QZ representation should not change which parameter values admit a unique
+stable solution. A numerical rule in the repository nevertheless makes the
+classification depend on that representation. In the Smets--Wouters
+benchmark, real QZ accepts 702,789 of one million prior draws. A rule based on
+complex-output QZ accepts only 238,104. Both routines count the same stable
+roots. The difference comes from a rule that rejects an imaginary entry larger
+than $10^{-9}$ in the recovered solution.
 
-Formally, the posterior density is proportional to
+\paragraph{Result.}
+Let $n_s$ be the number of stable roots. Let $Z_x$ contain the state rows of a
+basis for the stable initial values. I show that every predetermined initial
+state has exactly one stable path if and only if $n_s$ equals the number of
+predetermined variables and $Z_x$ is nonsingular. Real and complex QZ produce
+the same stable subspace. They therefore give the same root count, the same
+rank condition, and the same real first-order solution in exact arithmetic.
+An imaginary-part restriction is not part of the determinacy test.
+
+\paragraph{Intuition.}
+The predetermined state $x_0$ is inherited from the past. The jump variables
+$y_0$ adjust so that the economy follows a stable path. QZ collects the stable
+initial values in a subspace. If $c_0$ gives the coordinates of a point in
+that subspace, its state component must satisfy
 \[
-    p(\theta \mid Y) \propto L(Y \mid \theta)\pi(\theta)
-    \mathbf{1}\{\theta \in \Theta_D\},
+    x_0=Z_xc_0.
 \]
-where $\theta$ is the parameter vector, $Y$ is the data, $L(Y\mid\theta)$ is
-the likelihood, $\pi(\theta)$ is the prior, and $\Theta_D$ is the set of
-determinate parameter values. The indicator is not a harmless numerical detail.
-It defines the parameter region over which the posterior is computed.
+The model has a unique stable solution precisely when this equation has one
+solution $c_0$ for every $x_0$. With one state and one jump variable, the
+stable initial values form a line in the $(x,y)$ plane. A nonvertical line can
+be written as $y=Gx$, so each $x$ has one associated $y$. A vertical line does
+not have this property. In many dimensions, the stable subspace must likewise
+be the graph of a function from states to jumps. The root count matches the
+dimensions; nonsingularity of $Z_x$ makes the mapping one-to-one and onto.
 
-This paper proves a narrow point about that indicator. A complex-valued
-intermediate result from a complex-QZ calculation is not enough to reject a
-draw. QZ, also called the generalized Schur decomposition, is the standard
-algorithm for separating stable and unstable generalized eigenvalues in linear
-rational-expectations models (Blanchard and Kahn, 1980; Klein, 2000; Sims,
-2002). Complex arithmetic can appear inside that calculation even when the
-economic solution is real. The valid rejection criteria are the stable-root
-count, the ability to write jump variables as a function of states, and the
-residual of the recovered policy rule.
+\paragraph{Complex roots.}
+Complex roots do not change this geometry. The model matrices are real, so
+non-real roots occur in conjugate pairs. A pair describes a real cycle. Real
+QZ stores it in a real $2\times2$ block; complex QZ stores it in two complex
+columns. These are two bases for the same stable subspace. In exact arithmetic,
+both bases give the same real policy rule.
 
-The distinction matters for GPU code. Full generalized QZ is difficult to run
-efficiently in JAX on GPUs. Faster alternatives, such as Cayley transforms or
-doubling iterations, are useful only if they make the same accept/reject
-decision as real QZ on the parameter region used in estimation. The audit below
-shows that the old complex-QZ rule falsely rejects many valid draws in the HLT
-benchmark model. It also shows that doubling is too loose as a final
-determinacy test.
+\paragraph{Numerical issue.}
+In complex arithmetic, the imaginary parts from a conjugate pair must cancel.
+Roundoff can make the cancellation incomplete, especially when $Z_x$ is
+ill-conditioned. A remaining imaginary part is therefore a numerical
+diagnostic, not an economic restriction.
 
-\section{Objects and Definitions}
+The result follows from the Blanchard--Kahn dimension condition and the graph
+construction used in generalized-Schur solution methods
+\cite{bk1980,klein2000,sims2002}. Section 2 derives the determinacy condition.
+Section 3 explains complex roots and the numerical problem. Section 4 reports
+the benchmark evidence. The appendix gives the formal proof.
 
-After linearization, a DSGE model can be written as a generalized eigenvalue
-problem. Let $(D(\theta),E(\theta))$ be the real matrix pencil at parameter
-value $\theta$. Its generalized eigenvalues solve
-\[
-    \det(D(\theta)-\lambda E(\theta))=0.
-\]
-Finite roots with $|\lambda|<1$ are stable: repeated application of the
-linearized dynamics makes them decay. Infinite generalized roots can also
-appear when the denominator in the generalized eigenvalue ratio is zero. They
-are not counted as finite stable roots.
+\section{The determinacy condition}
 
-The variables are ordered into states and jumps. State variables are fixed when
-current choices are made, for example capital or lagged shocks. Jump variables
-can adjust immediately, for example prices or interest rates. Let $n_s$ be the
-number of state variables. A first-order solution is a matrix $G$ such that
-\[
-    y_t = Gx_t,
-\]
-where $x_t$ is the vector of states and $y_t$ is the vector of jump variables.
+\subsection{States, jumps, and stable paths}
 
-The stable generalized eigenvectors span the stable deflating subspace. Write
-one basis for that subspace as
-\[
-    Z =
-    \begin{bmatrix}
-        Z_x \\
-        Z_y
-    \end{bmatrix},
-\]
-where $Z_x$ corresponds to states and $Z_y$ corresponds to jumps. The graph
-condition says that $Z_x$ is nonsingular. In plain language, the stable
-subspace must give exactly one jump-vector choice for each state vector. When
-the graph condition holds, the policy matrix is $G=Z_yZ_x^{-1}$.
+Fix the model parameters and a path for the fundamental shocks. To study
+uniqueness, subtract any two candidate solutions. Their difference solves the
+homogeneous system
+\begin{equation}
+    D w_{t+1}=E w_t,
+    \qquad
+    w_t=\begin{bmatrix}x_t\\y_t\end{bmatrix}.
+    \label{eq:system}
+\end{equation}
+The vector $x_t\in\mathbb{R}^{n_x}$ contains the predetermined variables. Its
+initial value $x_0$ is fixed by the past. The vector $y_t$ contains jump
+variables. Its initial value can adjust to place the economy on a stable path.
+A stable path satisfies equation~\eqref{eq:system} and converges to zero.
+Throughout, uniqueness is conditional on the fundamental shocks and excludes
+additional sunspot shocks.
 
-The determinacy set used in estimation is therefore
-\[
-    \Theta_D =
-    \left\{
-        \theta :
-        \#\{\text{finite }\lambda_i(\theta):|\lambda_i(\theta)|<1\}=n_s,\;
-        Z_x(\theta)\text{ is nonsingular},\;
-        r(\theta)\leq \tau
-    \right\}.
-\]
-Here $r(\theta)$ is the relative residual of the recovered policy rule, and
-$\tau$ is the numerical tolerance. A rule for accepting or rejecting draws is
-valid on a parameter region only if it gives the same indicator as
-$\mathbf{1}\{\theta\in\Theta_D\}$ on that region.
-
-\begin{assumption}[real regular pencil]
-For the parameter vector under consideration, $D$ and $E$ are real, the pencil
-$(D,E)$ is regular, and no finite generalized eigenvalue lies on the unit
-circle.
+\begin{assumption}[Regularity]\label{ass:regularity}
+The generalized eigenvalue problem is regular, no finite root lies on the unit
+circle, and admissible initial values satisfy any algebraic restrictions
+implied by the model.
 \end{assumption}
 
-\begin{assumption}[state-to-jump graph]
-The stable deflating subspace has dimension $n_s$. For any full-rank basis
-$Z=(Z_x',Z_y')'$ of this subspace, the state block $Z_x$ is nonsingular.
-\end{assumption}
+Regularity means that $\det(E-\lambda D)$ is not identically zero. The
+unit-circle restriction separates stable roots from unstable roots. The last
+condition matters when $D$ is singular. In that case the system may contain
+static restrictions, represented by infinite generalized roots. These roots
+are not stable dynamic roots.
 
-\section{Claim and Proof}
-
-\begin{proposition}[complex stable roots imply real damped cycles]
-Under Assumptions 1 and 2, the first-order policy rule
+To see where the roots come from, consider a path of the form
+$w_t=\lambda^t v$. Substitution into equation~\eqref{eq:system} gives
 \[
-    y_t = Gx_t,\qquad G=Z_yZ_x^{-1},
+    (E-\lambda D)v=0.
 \]
-is real. Complex finite generalized eigenvalues with modulus below one do not
-imply instability. If a complex-QZ implementation returns a policy matrix with
-non-negligible imaginary entries despite the correct stable-root count and
-state-to-jump graph, the complex part is a numerical extraction problem, not by
-itself evidence that $\theta\notin\Theta_D$.
+Thus $\lambda$ is a transition root of the pencil $E-\lambda D$. The path
+converges when $|\lambda|<1$.
+
+The QZ decomposition sorts the system's dynamic directions by their roots.
+Real QZ writes
+\begin{equation}
+    Q^{\mathsf T}DZ=S,
+    \qquad
+    Q^{\mathsf T}EZ=T,
+    \label{eq:qz}
+\end{equation}
+where $Q$ and $Z$ are real orthogonal matrices. The repository records the
+transition roots as $\lambda_i=\beta_i/\alpha_i$. After QZ places the stable
+roots first, the first $n_s$ columns of $Z$ form a basis $Z_s$ for all stable
+initial values. This set is the stable subspace. Appendix A proves this
+statement, including the case of a singular $D$.
+
+\subsection{One equation determines existence and uniqueness}
+
+Partition the stable basis into rows for states and jumps:
+\begin{equation}
+    Z_s=\begin{bmatrix}Z_x\\Z_y\end{bmatrix}.
+    \label{eq:partition}
+\end{equation}
+Every stable initial value can be written as
+\[
+    \begin{bmatrix}x_0\\y_0\end{bmatrix}
+    =
+    \begin{bmatrix}Z_x\\Z_y\end{bmatrix}c_0.
+\]
+The vector $c_0\in\mathbb{R}^{n_s}$ gives the coordinates of the initial value
+within the stable subspace. Since $x_0$ is predetermined, the model must solve
+\begin{equation}
+    x_0=Z_xc_0.
+    \label{eq:key}
+\end{equation}
+Equation~\eqref{eq:key} is the source of the determinacy condition.
+
+\begin{proposition}[Existence and uniqueness]\label{prop:determinacy}
+Under Assumption~\ref{ass:regularity}, every initial state
+$x_0\in\mathbb{R}^{n_x}$ has exactly one stable path if and only if
+\[
+    n_s=n_x
+    \qquad\text{and}\qquad
+    \operatorname{rank}(Z_x)=n_x.
+\]
+Equivalently, $Z_x$ is square and nonsingular.
 \end{proposition}
 
-The key idea is that a real model maps real states into real choices. A complex
-root is a convenient way to describe a cycle. Its conjugate root appears with
-it. Together the two roots describe a real two-dimensional rotation that shrinks
-over time when their modulus is below one.
+\paragraph{Why the condition is sufficient.}
+Suppose $n_s=n_x$ and $Z_x$ has full rank. Then $Z_x$ is invertible. For any
+initial state, equation~\eqref{eq:key} has the unique solution
+$c_0=Z_x^{-1}x_0$. This coordinate vector selects one point in the stable
+subspace and therefore one stable path.
 
-\begin{proof}
-Because $D$ and $E$ are real, conjugation preserves generalized eigenpairs. If
-$Dv=\lambda Ev$, then $D\bar v=\bar\lambda E\bar v$. Thus non-real generalized
-eigenvalues and their eigenvectors occur in conjugate pairs. The stable set
-$\{\lambda:|\lambda|<1\}$ is closed under conjugation, so the stable deflating
-subspace is also closed under conjugation.
+\paragraph{Why the condition is necessary.}
+Now suppose every initial state has exactly one stable path. Existence for
+every $x_0$ means that the map $c_0\mapsto Z_xc_0$ is onto: it can reach every
+state. Uniqueness means that the map is one-to-one: two coordinate vectors
+cannot produce the same state. A linear map is both onto and one-to-one only
+when its domain and codomain have the same dimension and its matrix has full
+rank. Hence $n_s=n_x$ and $Z_x$ is nonsingular.
 
-Any conjugation-closed complex subspace has a real basis. For each non-real
-vector $v=a+ib$, replace the pair $(v,\bar v)$ with the real vectors
-$a=\operatorname{Re}v$ and $b=\operatorname{Im}v$. These two real vectors span
-the same plane as the complex pair. Repeating this replacement gives a real
-full-rank basis $Z=(Z_x',Z_y')'$ for the stable subspace.
+The failures also have simple interpretations. If $n_s<n_x$, there are too few
+stable directions, so some initial states have no stable path. If $n_s>n_x$,
+there are too many stable directions, so a feasible state has more than one
+stable path. If $n_s=n_x$ but $Z_x$ is singular, some states are infeasible
+and feasible states have multiple stable paths.
 
-Assumption 2 says that $Z_x$ is nonsingular. The stable subspace is therefore
-the graph of
-\[
+When the condition holds, the jump variables are a function of the states.
+Substituting $c_t=Z_x^{-1}x_t$ into $y_t=Z_yc_t$ gives the policy rule
+\begin{equation}
+    y_t=Gx_t,
+    \qquad
     G=Z_yZ_x^{-1}.
-\]
-Both matrices in this expression are real, so $G$ is real. The result does not
-depend on the particular basis. If $\tilde Z=ZT$ is another full-rank complex
-basis for the same subspace, then
+    \label{eq:policy}
+\end{equation}
+The stable subspace is therefore the graph of $G$. The appendix also derives
+the state-transition matrix.
+
+\section{Why complex roots are not a problem}
+
+\subsection{A complex pair is a real cycle}
+
+Because $D$ and $E$ are real, $\det(E-\lambda D)$ has real coefficients. A
+non-real root $\lambda$ must therefore appear with its conjugate
+$\bar\lambda$. The same is true of the associated generalized vectors.
+
+A two-variable example gives the intuition. Let
 \[
-    \tilde Z_y\tilde Z_x^{-1}
-    = Z_yT(Z_xT)^{-1}
-    = Z_yZ_x^{-1}.
+    M=\begin{bmatrix}a&-b\\b&a\end{bmatrix},
+    \qquad
+    a+ib=\rho e^{i\phi}.
 \]
-In exact arithmetic, every correct basis gives the same real policy matrix.
+The eigenvalues of $M$ are $a\pm ib$, but $M$ is real. Its powers are
+\begin{equation}
+    M^t
+    =\rho^t
+    \begin{bmatrix}
+        \cos(t\phi)&-\sin(t\phi)\\
+        \sin(t\phi)& \cos(t\phi)
+    \end{bmatrix}.
+    \label{eq:rotation}
+\end{equation}
+The angle $\phi$ determines the cycle, and $\rho$ determines its size. If
+$\rho<1$, the cycle shrinks over time. The roots are complex, but the path is
+real and stable.
 
-Finally, a complex stable root $\lambda=a+ib$ corresponds to a real $2\times2$
-block with eigenvalues $a\pm ib$. Powers of that block decay at rate
-$|\lambda|$. The path can oscillate, but it converges. This is stability in the
-real state space.
-\end{proof}
+\subsection{Real and complex QZ use different coordinates}
 
-\section{Audit on a Benchmark DSGE Model}
+Real and complex QZ span the same stable subspace. They only use different
+bases. Let $Z_s$ be the real basis and let
+\[
+    \widetilde Z_s=Z_sC
+\]
+be a complex basis for the same subspace, where $C$ is nonsingular. The state
+and jump blocks are then $\widetilde Z_x=Z_xC$ and
+$\widetilde Z_y=Z_yC$.
 
-The proof says that complex stable roots are not a valid rejection reason. The
-next question is numerical: how often does the old rejection rule matter? I
-answer this with one million loose-prior parameter draws from the HLT benchmark
-model. HLT is used here as the model label in the replication code; the proof
-above does not rely on special features of this model.
+If the solution is unique, the policy rule computed from the complex basis is
+\begin{equation}
+    \widetilde Z_y\widetilde Z_x^{-1}
+    =Z_yC(Z_xC)^{-1}
+    =Z_yZ_x^{-1}
+    =G.
+    \label{eq:basis_invariance}
+\end{equation}
+The change of basis cancels. Since the same policy rule can be computed from a
+real basis, the exact policy rule is real. Appendix C shows the same result for
+the state-transition matrix.
 
-Each draw is classified four ways. Real QZ is the reference calculation.
-Complex QZ is the old rule that rejects complex-valued extracted policy
-matrices. The Cayley real-part rule is a faster screen designed for batched
-linear algebra. Doubling is a fast iterative solver. The audit file is
-\texttt{benchmarks/results/qz\_real\_cayley\_hlt\_loose\_1m\_stream.json}.
+\begin{corollary}[Real and complex QZ]\label{cor:qz}
+Under Assumption~\ref{ass:regularity}, real and complex ordered QZ give the
+same stable-root count and the same rank condition in exact arithmetic. When
+the solution is unique, they give the same real first-order solution.
+\end{corollary}
 
-\begin{table}[h!]
+\subsection{Where the numerical problem enters}
+
+Complex-output QZ represents a conjugate pair with two complex columns. In
+exact arithmetic, their imaginary contributions cancel in
+equation~\eqref{eq:basis_invariance}. In floating-point arithmetic, the two
+columns need not be exact conjugates. Solving with an ill-conditioned $Z_x$
+can magnify the resulting error.
+
+This explains why a complex calculation can leave an imaginary part in a
+policy matrix that is real in theory. The imaginary part measures numerical
+error in the chosen representation. Rejecting the parameter draw on this basis
+changes the determinacy test. Real QZ avoids the cancellation because it keeps
+each conjugate pair in a real $2\times2$ block \cite{lapack1999}.
+
+\section{Evidence from the HLT benchmark}
+
+The audit draws one million parameter vectors from the independent bounded
+package priors for the 18 parameters in \texttt{phase1\_18params}. The model is
+\texttt{medium\_sw07\_hlt}. The script
+\path{benchmarks/qz_cayley_large_support_audit.py} produces
+\path{benchmarks/results/qz_real_cayley_hlt_loose_1m_stream.json}.
+
+Real QZ is the reference calculation. It checks the stable-root count, the
+rank of $Z_x$, and the relative residual of the quadratic matrix equation
+\[
+    AX^2+BX+C=0.
+\]
+The tolerance for the residual is $10^{-8}$. The old complex-output rule adds
+a bound of $10^{-9}$ on the largest imaginary entry in $X$.
+
+\begin{table}[H]
 \centering
-\caption{Accept/reject decisions in one million loose-prior HLT draws}
+\caption{Determinacy classifications for one million benchmark prior draws}
 \label{tab:audit}
+\small
 \begin{tabular}{lrr}
 \toprule
-Classification event & Count & Share \\
+Event & Count & Share \\
 \midrule
-Real QZ accepts: unique stable solution & 702,789 & 70.3\% \\
-Real QZ rejects: indeterminate & 256,850 & 25.7\% \\
-Real QZ rejects: no stable solution & 40,361 & 4.0\% \\
-Complex-QZ accepts: unique stable solution & 238,104 & 23.8\% \\
-Complex-QZ rejects as ``complex solution'' & 464,685 & 46.5\% \\
-Real QZ accepts those ``complex'' cases & 464,685 & 46.5\% \\
-Cayley real-part disagrees with real QZ & 0 & 0.0\% \\
-Doubling accepts a real-QZ non-unique case & 84,606 & 8.5\% \\
+Real QZ: unique stable solution & 702,789 & 70.3\% \\
+Real QZ: indeterminate & 256,850 & 25.7\% \\
+Real QZ: no stable solution & 40,361 & 4.0\% \\
+Complex-output QZ: unique stable solution & 238,104 & 23.8\% \\
+Real QZ accepts, complex-output rule rejects & 464,685 & 46.5\% \\
+Complex-output rule accepts, real QZ rejects & 0 & 0.0\% \\
+Cayley real-part rule disagrees with real QZ & 0 & 0.0\% \\
+Doubling accepts, real QZ rejects & 84,606 & 8.5\% \\
 \bottomrule
 \end{tabular}
-\vspace{0.25em}
 
+\vspace{0.4em}
+\begin{minipage}{0.92\textwidth}
 \footnotesize
-Notes: The median real-QZ residual among accepted draws is
-$8.8\times10^{-14}$; the maximum is $1.0\times10^{-11}$. The Cayley
-real-part rule matches real QZ in this audit. This is evidence on the tested
-HLT support, not a theorem for every DSGE pencil.
+\textit{Notes:} Shares use all 1,000,000 draws as the denominator. Among draws
+accepted by real QZ, the median relative residual is
+$8.82\times10^{-14}$ and the maximum is $1.04\times10^{-11}$. The acceptance
+tolerance is $10^{-8}$. The rows after the first three are comparisons and do
+not form a partition of the sample.
+\end{minipage}
 \end{table}
 
-Table \ref{tab:audit} shows that the old complex-QZ rule changes the accepted
-parameter region. It rejects 464,685 draws because the extracted policy matrix
-is complex. Real QZ accepts all of these draws and rejects none of the draws
-that complex QZ labels unique. The old rule therefore removes many real,
-stable, unique solutions.
+Table~\ref{tab:audit} shows that the two QZ routines agree on the stable-root
+count. All 464,685 disagreements come from the imaginary-part restriction.
+Real QZ produces a real solution for these draws, with residuals below the
+acceptance tolerance.
 
-The table also shows why fast solvers still need verification. Doubling finds
-all real-QZ unique cases, but it also accepts 84,606 cases that real QZ
-classifies as non-unique. Doubling can be useful as a fast intermediate step,
-but it should not be the final determinacy test. In this audit, the Cayley
-real-part rule agrees with real QZ on the accept/reject decision.
+The Cayley real-part rule agrees with real QZ on all one million draws. This is
+evidence for the tested model and prior region, not a proof for every pencil.
+Doubling solves the matrix equation for every draw accepted by real QZ, but it
+also accepts 84,606 draws that fail the stable-root count. A small equation
+residual verifies a candidate matrix root. It does not prove that the stable
+solution is unique.
 
-\section{Implications for Estimation}
+\subsection{Implication for GPU computation}
 
-The practical rule is simple. First, count the finite stable roots. Second,
-check that the stable subspace defines one jump vector for each state vector.
-Third, recover a real policy matrix and verify the residual. A complex
-intermediate matrix should trigger a real reconstruction or a fallback to real
-QZ. It should not by itself reject the parameter draw.
+The determinacy result requires a stable subspace, not a particular QZ routine.
+This distinction gives a real GPU algorithm that does not compute eigenvectors.
+Define
+\[
+    H=(D-E)^{-1}(D+E).
+\]
+If $\lambda$ is a model root, the corresponding root of $H$ is
+$\mu=(1+\lambda)/(1-\lambda)$. Moreover,
+\[
+    \operatorname{Re}(\mu)
+    =\frac{1-|\lambda|^2}{|1-\lambda|^2}.
+\]
+Thus $|\lambda|<1$ if and only if $\operatorname{Re}(\mu)>0$.
 
-This rule is useful for GPU estimation. JAX can run Cayley-style screens and
-batched residual checks on the GPU. Real QZ should remain the reference
-validator until a reliable GPU implementation of generalized QZ is available.
-Doubling can still speed up the pipeline, but only behind a verification step.
+The matrix sign maps the roots of $H$ in the right half-plane to $+1$ and the
+roots in the left half-plane to $-1$. Therefore
+\[
+    P_s=\frac{I+\operatorname{sign}(H)}{2}
+\]
+is the projector onto the stable subspace. Its dimension is
+$(m+\operatorname{tr}(\operatorname{sign}(H)))/2$, where $m$ is the order of
+the pencil. This gives the stable-root count and a basis for the stable
+subspace using real arithmetic only.
+
+The implementation computes the matrix sign by the scaled Newton iteration
+\[
+    X_{k+1}=\frac{1}{2}
+    \left(\gamma_kX_k+\gamma_k^{-1}X_k^{-1}\right),
+    \qquad X_0=H,
+\]
+where $\gamma_k$ balances the norms of $X_k$ and $X_k^{-1}$. This standard
+iteration converges to the matrix sign when $H$ has no root on the imaginary
+axis \cite{byers1997}. The code uses real matrix products and linear solves,
+then checks the sign residual, the stable-root count, and the QME residual.
+
+The matrix-sign method does not compute a generalized QZ decomposition. It
+computes only the stable subspace needed for the first-order solution. CPU real
+QZ remains the reference for numerical audits, especially near the unit circle
+or when the state block of the stable subspace is poorly conditioned.
 
 \section{Conclusion}
 
-Complex roots in a real DSGE model describe damped cycles, not complex-valued
-economic choices. The valid determinacy test is the stable-root count, the
-state-to-jump mapping condition, and the residual of the recovered policy
-rule. In the HLT audit, replacing the old complex-QZ rejection rule with real
-QZ changes the number of accepted draws from 238,104 to 702,789. This change is
-large enough to alter posterior estimates.
+The determinacy test is simple. The stable subspace must contain exactly one
+point for each predetermined state. This holds if and only if the number of
+stable roots equals the number of predetermined variables and $Z_x$ is
+nonsingular.
+
+Complex roots do not add another condition. They describe real cycles and can
+be represented by either real or complex coordinates. Real QZ is therefore
+sufficient for the determinacy test and the first-order solution.
+
+\appendix
+
+\section{Why the stable subspace contains all stable paths}
+
+Order the QZ decomposition so that the stable finite blocks appear first:
+\[
+    S=\begin{bmatrix}S_s&S_{su}\\0&S_u\end{bmatrix},
+    \qquad
+    T=\begin{bmatrix}T_s&T_{su}\\0&T_u\end{bmatrix},
+    \qquad
+    Z=\begin{bmatrix}Z_s&Z_u\end{bmatrix}.
+\]
+Write $w_t=Zc_t$ and partition $c_t=(c_{s,t}',c_{u,t}')'$. The lower block of
+$Sc_{t+1}=Tc_t$ evolves independently of $c_{s,t}$. Its finite transition
+roots have modulus greater than one. A path that converges to zero must
+therefore have zero coordinates on these blocks. Assumption~\ref{ass:regularity}
+removes the coordinates associated with infinite roots through the model's
+algebraic restrictions.
+
+The stable block satisfies
+\[
+    S_sc_{s,t+1}=T_sc_{s,t}.
+\]
+The roots in this block are finite, so $S_s$ is nonsingular. Define
+$A_s=S_s^{-1}T_s$. Every eigenvalue of $A_s$ has modulus below one, which
+implies $A_s^t\rightarrow0$. Hence every $Z_sc_{s,0}$ generates a stable path,
+and every stable path starts in $\operatorname{range}(Z_s)$.
+
+\section{Proof of Proposition~\ref{prop:determinacy}}
+
+Let $P_x$ project an initial value onto its predetermined variables. On the
+stable subspace,
+\[
+    P_x(Z_sc_0)=Z_xc_0.
+\]
+Thus a stable path exists for $x_0$ if and only if $Z_xc_0=x_0$ has a
+solution. Existence for every $x_0$ is equivalent to $Z_x$ being onto.
+
+Suppose $Z_xh=0$ for some $h\ne0$. If $c_0$ gives a stable path for $x_0$,
+then $c_0+h$ gives a second stable path with the same $x_0$. The two initial
+values differ because $Z_s$ has full column rank. Thus uniqueness requires
+$Z_x$ to be one-to-one.
+
+Conversely, if $Z_x$ is one-to-one, two stable paths with the same $x_0$ must
+have the same $c_0$. Their later values are also equal because
+$c_{s,t+1}=A_sc_{s,t}$. Hence existence and uniqueness for every $x_0$ are
+equivalent to $Z_x$ being both onto and one-to-one.
+
+The domain of $Z_x$ has dimension $n_s$, and its codomain has dimension
+$n_x$. The map is onto and one-to-one if and only if $n_s=n_x$ and
+$\operatorname{rank}(Z_x)=n_x$. This proves the proposition. \qed
+
+\section{Proof of Corollary~\ref{cor:qz}}
+
+The generalized eigenvalues are roots of the pencil, so they do not depend on
+a QZ basis. Since $D$ and $E$ are real, non-real roots occur in conjugate
+pairs. The stable set is closed under conjugation. Real and complex ordered QZ
+therefore select the same stable subspace and the same number $n_s$ of stable
+roots.
+
+Let $Z_s$ and $\widetilde Z_s$ be real and complex bases for this subspace.
+There is a nonsingular matrix $C$ such that
+$\widetilde Z_s=Z_sC$. It follows that
+\[
+    \operatorname{rank}(\widetilde Z_x)
+    =\operatorname{rank}(Z_xC)
+    =\operatorname{rank}(Z_x).
+\]
+The two decompositions give the same determinacy test.
+
+When the solution is unique, equation~\eqref{eq:basis_invariance} shows that
+both bases give the same policy matrix. The state transition is also
+basis-invariant. In the real stable coordinates it is
+\[
+    L=Z_xA_sZ_x^{-1}.
+\]
+In the complex coordinates,
+$\widetilde A_s=C^{-1}A_sC$. Therefore
+\[
+    \widetilde Z_x\widetilde A_s\widetilde Z_x^{-1}
+    =Z_xC(C^{-1}A_sC)(Z_xC)^{-1}
+    =Z_xA_sZ_x^{-1}
+    =L.
+\]
+The real basis produces real $G$ and $L$. The complex basis produces the same
+matrices in exact arithmetic. This proves the corollary. \qed
 
 \section*{Acknowledgments and AI Use Disclosure}
 
-The author credits OpenAI's language models for drafting assistance, editing
-suggestions, and help converting computational audit results into manuscript
-text. The author remains responsible for all claims, proofs, numerical
-interpretations, and citations.
+OpenAI language models assisted with drafting and editing. The author is
+responsible for the mathematical claims, numerical results, and citations.
 
 \begin{thebibliography}{9}
-\setlength{\itemsep}{0pt}
-\small
 
 \bibitem{bk1980}
 Olivier Jean Blanchard and Charles M. Kahn. 1980.
 The solution of linear difference models under rational expectations.
 \emph{Econometrica} 48(5): 1305--1311.
+\href{https://doi.org/10.2307/1912186}{doi:10.2307/1912186}.
+
+\bibitem{byers1997}
+Ralph Byers, Chunyang He, and Volker Mehrmann. 1997.
+The matrix sign function method and the computation of invariant subspaces.
+\emph{SIAM Journal on Matrix Analysis and Applications} 18(3): 615--632.
+\href{https://doi.org/10.1137/S0895479894277454}
+{doi:10.1137/S0895479894277454}.
 
 \bibitem{klein2000}
 Paul Klein. 2000.
 Using the generalized Schur form to solve a multivariate linear rational
 expectations model.
 \emph{Journal of Economic Dynamics and Control} 24(10): 1405--1423.
+\href{https://doi.org/10.1016/S0165-1889(99)00045-7}
+{doi:10.1016/S0165-1889(99)00045-7}.
+
+\bibitem{lapack1999}
+Edward Anderson, Zhaojun Bai, Christian Bischof, Susan Blackford,
+James Demmel, Jack Dongarra, Jeremy Du Croz, Anne Greenbaum,
+Sven Hammarling, Alan McKenney, and Danny Sorensen. 1999.
+\emph{LAPACK Users' Guide}. Third edition. SIAM.
 
 \bibitem{sims2002}
 Christopher A. Sims. 2002.
 Solving linear rational expectations models.
-\emph{Computational Economics} 20: 1--20.
-
-\bibitem{lapack1999}
-LAPACK Working Group. 1999.
-\emph{LAPACK Users' Guide}. Third edition. SIAM.
+\emph{Computational Economics} 20(1--2): 1--20.
+\href{https://doi.org/10.1023/A:1020517101123}
+{doi:10.1023/A:1020517101123}.
 
 \end{thebibliography}
 

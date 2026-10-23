@@ -1081,9 +1081,9 @@ Python/JAX status:
 ## Explicit gaps
 
 - The Julia `:bartels_stewart` Sylvester variant is not ported yet, and `:dqgmres` is currently provided as a compatibility alias to the SciPy GMRES backend rather than as a distinct implementation.
-- The Julia QME `:schur` variant is now ported, but the JAX-facing primal solve is not fully GPU-native yet; until JAX exposes generalized `qz` / `ordqz`, the ordered-QZ step runs through SciPy on the host and only the reverse-mode derivative is native JAX.
+- The Julia QME `:schur` variant is ported through SciPy real `ordqz` for exact Julia parity. The separate `schur_gpu` path is fully JAX-native: it applies a real Cayley transform, computes the stable projector with a scaled matrix-sign iteration, checks its dimension from the trace, and validates the policy matrix by its QME residual. It does not call the nonsymmetric eigensolver.
 - The host-backed Schur path now explicitly guards empty/degenerate generalized pencils before calling SciPy `ordqz`, so static zero-state cases fail or short-circuit normally instead of risking a low-level interpreter crash.
-- The Python port now defaults public first-order workflows to `schur` for Julia parity, which means the default compiled JAX likelihood path also uses the host-callback ordered-QZ branch unless `qme_algorithm="doubling"` is requested explicitly.
+- The Python port defaults public first-order workflows to `schur` for Julia parity. GPU estimation must request `qme_algorithm="schur_gpu"`; unlike `doubling`, this path also checks the stable-root count.
 - The current dense Sylvester fallback is a direct Kronecker solve, not a Bartels-Stewart implementation.
 - The current `algorithm="direct"` Lyapunov fallback is still a direct Kronecker solve even though the separate `algorithm="bartels_stewart"` path is now implemented.
 - Ambiguous calibration equations that mix more than one indexed family still raise instead of inferring a broadcast pattern.

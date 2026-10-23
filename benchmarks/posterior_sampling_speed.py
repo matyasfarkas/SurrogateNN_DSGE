@@ -1131,7 +1131,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--qme-algorithm",
         choices=("schur", "schur_gpu", "doubling"),
-        default="doubling",
+        default="schur_gpu",
     )
     parser.add_argument("--target-accept-prob", type=float, default=0.8)
     parser.add_argument("--max-tree-depth", type=int, default=8)

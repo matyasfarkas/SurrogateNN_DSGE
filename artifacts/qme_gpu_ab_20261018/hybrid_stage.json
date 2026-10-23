@@ -1,0 +1,138 @@
+{
+  "benchmark": {
+    "case": "medium_sw07_hlt",
+    "check_parameter_bounds": false,
+    "dtype": "float64",
+    "n_exo": 7,
+    "n_observables": 7,
+    "n_vars": 66,
+    "parameters_are_resolved": true,
+    "periods": 80,
+    "preset": "sw07_hlt",
+    "qme_algorithm": "schur_gpu",
+    "resolved_parameter_max_abs_diff": 0.3333333333333329,
+    "static_equation_rows": [
+      19,
+      65,
+      23,
+      51,
+      48,
+      46,
+      25,
+      17,
+      13,
+      15,
+      27,
+      47,
+      49,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      44,
+      21
+    ]
+  },
+  "runtime": {
+    "jax_default_backend": "gpu",
+    "jax_devices": [
+      "cuda:0"
+    ],
+    "jax_enable_x64": true,
+    "jax_version": "0.11.1",
+    "numpyro_version": "0.21.0",
+    "nvidia_smi": "Mon Oct 19 06:49:39 2026       \n+-----------------------------------------------------------------------------------------+\n| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |\n+-----------------------------------------+------------------------+----------------------+\n| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |\n| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |\n|                                         |                        |               MIG M. |\n|=========================================+========================+======================|\n|   0  NVIDIA GeForce RTX 4080 ...    On  |   00000000:B2:00.0 Off |                  N/A |\n| 30%   34C    P2             42W /  320W |     620MiB /  32760MiB |     53%      Default |\n|                                         |                        |                  N/A |\n+-----------------------------------------+------------------------+----------------------+\n\n+-----------------------------------------------------------------------------------------+\n| Processes:                                                                              |\n|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |\n|        ID   ID                                                               Usage      |\n|=========================================================================================|\n|    0   N/A  N/A            1038      C   python                                  610MiB |\n+-----------------------------------------------------------------------------------------+",
+    "platform": "Linux-5.15.0-25-generic-x86_64-with-glibc2.35",
+    "processor": "x86_64",
+    "python": "3.12.3 | packaged by Anaconda, Inc. | (main, May  6 2024, 19:46:43) [GCC 11.2.0]"
+  },
+  "timings": {
+    "dynamic_jacobian": {
+      "first_call_s": 7.288035474717617,
+      "steady": {
+        "max_s": 0.0005434788763523102,
+        "mean_s": 0.0003703312948346138,
+        "median_s": 0.0003549056127667427,
+        "min_s": 0.00029981136322021484,
+        "reps": 20,
+        "std_s": 7.062046490605617e-05
+      }
+    },
+    "first_order_solution": {
+      "first_call_s": 7.639878511428833,
+      "steady": {
+        "max_s": 0.008211225271224976,
+        "mean_s": 0.0078185579739511,
+        "median_s": 0.0078107696026563644,
+        "min_s": 0.007598651573061943,
+        "reps": 20,
+        "std_s": 0.00013927136496815043
+      }
+    },
+    "full_loglikelihood": {
+      "first_call_s": 11.700200462713838,
+      "steady": {
+        "max_s": 0.02696983516216278,
+        "mean_s": 0.025250666495412587,
+        "median_s": 0.02492760494351387,
+        "min_s": 0.024428026750683784,
+        "reps": 20,
+        "std_s": 0.0008381313600237535
+      }
+    },
+    "full_loglikelihood_gradient": {
+      "first_call_s": 116.35061502829194,
+      "steady": {
+        "max_s": 0.0708570908755064,
+        "mean_s": 0.06897798962891102,
+        "median_s": 0.06849180441349745,
+        "min_s": 0.06799219734966755,
+        "reps": 10,
+        "std_s": 0.0011103849561626246
+      }
+    },
+    "kalman_loglikelihood_only": {
+      "first_call_s": 3.5464957151561975,
+      "steady": {
+        "max_s": 0.012301551178097725,
+        "mean_s": 0.011993808764964342,
+        "median_s": 0.011941946111619473,
+        "min_s": 0.011798569932579994,
+        "reps": 20,
+        "std_s": 0.00013427794394030664
+      }
+    },
+    "resolve_parameters": {
+      "first_call_s": 0.01444784551858902,
+      "steady": {
+        "max_s": 0.00014970451593399048,
+        "mean_s": 9.807627648115159e-05,
+        "median_s": 9.468477219343185e-05,
+        "min_s": 8.100643754005432e-05,
+        "reps": 20,
+        "std_s": 1.4699190989974066e-05
+      }
+    },
+    "state_space_and_initial_covariance": {
+      "first_call_s": 1.4845757205039263,
+      "steady": {
+        "max_s": 0.0073163509368896484,
+        "mean_s": 0.007225428242236376,
+        "median_s": 0.007222192361950874,
+        "min_s": 0.007117040455341339,
+        "reps": 20,
+        "std_s": 4.624703675258236e-05
+      }
+    }
+  },
+  "values": {
+    "first_order_converged": true,
+    "full_loglikelihood": -600.6439360715109,
+    "full_loglikelihood_gradient_max_abs": 574.9753165137028,
+    "loglikelihood": -600.6439360715109,
+    "qme_solution_max_abs": 201.0822350866014
+  }
+}

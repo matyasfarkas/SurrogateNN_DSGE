@@ -95,6 +95,7 @@ def test_hlt_estimation_pilot_dry_run_resolves_parallel_defaults(tmp_path: Path)
     assert lines["TRAIN_DTYPE"] == "float32"
     assert lines["JAX_LOG_DENSITY_BATCH_SIZE"] == "2048"
     assert lines["HMC_CHAINS"] == "64"
+    assert lines["HMC_CHAIN_BATCH_SIZE"] == "8"
     assert lines["HMC_SAMPLES"] == "512"
     assert lines["RUN_ROM1_COMPARISON"] == "0"
 
@@ -170,7 +171,47 @@ def test_hlt_final_nonlinear_dry_run_enables_correctness_gates(tmp_path: Path) -
     assert lines["LIKELIHOOD_QME_ALGORITHM"] == "schur_gpu"
     assert lines["JAX_LOG_DENSITY_BATCH_SIZE"] == "0"
     assert lines["JAX_LOG_DENSITY_BATCH_REPEAT_EVALS"] == "0"
+    assert lines["HMC_CHAIN_BATCH_SIZE"] == "1"
     assert lines["TRAIN_DTYPE"] == "float32"
+    assert lines["FAIL_ON_QUALITY_GATE"] == "1"
+
+
+def test_full_jax_hmc_resource_pilot_is_memory_bounded(tmp_path: Path) -> None:
+    script = _ROOT / "benchmarks" / "run_full_jax_hmc_resource_pilot.sh"
+    bundle = tmp_path / "surrogate_bundle.snn.npz"
+    bundle.write_bytes(b"dry-run placeholder")
+    result_root = tmp_path / "pilot"
+    result = subprocess.run(
+        ["bash", str(script)],
+        cwd=_ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "DRY_RUN": "1",
+            "RESULT_ROOT": str(result_root),
+            "HLT_SURROGATE_BUNDLE_PATH": str(bundle),
+        },
+    )
+
+    lines = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+    assert lines["MODE"] == "final_nonlinear"
+    assert lines["HLT_SURROGATE_BUNDLE_PATH"] == str(bundle)
+    assert lines["HLT_REUSE_SURROGATE_BUNDLE"] == "1"
+    assert lines["HLT_REQUIRE_FULL_TARGET_SUCCESS"] == "0"
+    assert lines["HLT_REQUIRE_JAX_PARITY"] == "1"
+    assert lines["HLT_REQUIRE_HMC"] == "1"
+    assert lines["JAX_LOG_DENSITY_GRADIENT"] == "0"
+    assert lines["JAX_LOG_DENSITY_REPEAT_EVALS"] == "1"
+    assert lines["HMC_CHAINS"] == "2"
+    assert lines["HMC_CHAIN_BATCH_SIZE"] == "1"
+    assert lines["HMC_GRADIENT_MODE"] == "fixed-reference-corrected"
+    assert lines["HMC_WARMUP"] == "1"
+    assert lines["HMC_SAMPLES"] == "2"
+    assert lines["HMC_LEAPFROG_STEPS"] == "1"
+    assert lines["HMC_MAX_RETRIES"] == "0"
     assert lines["FAIL_ON_QUALITY_GATE"] == "1"
 
 

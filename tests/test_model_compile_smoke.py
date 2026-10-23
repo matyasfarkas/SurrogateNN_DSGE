@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from surrogatenn_dsge import (
+    analyze_first_order_model_determinacy,
     estimate_observed_shocks_matrix,
     estimate_observed_variables_matrix,
     kalman_loglikelihood_from_model,
@@ -364,6 +365,46 @@ def test_hlt_schur_gpu_static_rows_are_numerically_full_rank() -> None:
     assert len(rows) == model.timings.nPresent_only
     assert np.linalg.matrix_rank(static_present) == model.timings.nPresent_only
     assert np.linalg.matrix_rank(symbolic_static_present) < model.timings.nPresent_only
+
+
+def test_hlt_real_qz_accepts_real_solution_without_imaginary_cutoff() -> None:
+    case = _hlt_case()
+    model = parse_macro_model(Path(case["model_path"]).read_text())
+    steady_state = np.asarray(case["reference_steady_state"], dtype=np.float64)
+    parameter_values = np.asarray(model.parameter_values, dtype=np.float64).copy()
+    parameter_index = {name: idx for idx, name in enumerate(model.parameter_names)}
+    draw = {
+        "cindp": 0.9888135203157484,
+        "cprobp": 0.9499994177618096,
+        "cprobw": 0.9499839216312961,
+        "crhoa": 0.035729904060172714,
+        "crhob": 0.9748465203929942,
+        "crhog": 0.9117892045932491,
+        "crhoms": 0.9817569125989384,
+        "crhopinf": 0.9896850264686898,
+        "crhoqs": 0.9896497034933148,
+        "crhow": 0.9899731410901036,
+        "curvp": 61.773275790000696,
+        "z_ea": 0.038606029369485095,
+        "z_eb": 0.03917774657362741,
+        "z_eg": 1.8050338145874214,
+        "z_em": 0.09127604417485108,
+        "z_epinf": 0.3020460256898893,
+        "z_eqs": 0.08111129384667122,
+        "z_ew": 0.04136901661041252,
+    }
+    for name, value in draw.items():
+        parameter_values[parameter_index[name]] = value
+
+    result = analyze_first_order_model_determinacy(
+        model,
+        parameter_values=parameter_values,
+        steady_state=steady_state,
+    )
+
+    assert result.determinacy.unique_stable_solution
+    assert result.determinacy.classification == "unique_stable_solution"
+    assert result.determinacy.qme_diagnostics.relative_residual < 1.0e-8
 
 
 def test_hlt_compiled_kalman_loglikelihood_schur_gpu_matches_schur() -> None:

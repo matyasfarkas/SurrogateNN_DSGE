@@ -1,0 +1,142 @@
+{
+  "batches": {
+    "1": {
+      "failure_count": 0,
+      "loglikelihood_max": -600.6439360715109,
+      "loglikelihood_min": -600.6439360715109,
+      "value_draws_per_second_median": 40.79035399078957,
+      "value_first_call_s": 19.41708878800273,
+      "value_per_draw_steady_median_s": 0.024515599943697453,
+      "value_steady": {
+        "max_s": 0.024822130799293518,
+        "mean_s": 0.024530461058020592,
+        "median_s": 0.024515599943697453,
+        "min_s": 0.024341685697436333,
+        "reps": 10,
+        "std_s": 0.0001361794836432205
+      }
+    },
+    "16": {
+      "failure_count": 0,
+      "loglikelihood_max": -600.5180009529981,
+      "loglikelihood_min": -600.747469317016,
+      "value_draws_per_second_median": 83.96341038295822,
+      "value_first_call_s": 28.34496814571321,
+      "value_per_draw_steady_median_s": 0.011909949767868966,
+      "value_steady": {
+        "max_s": 0.20036764070391655,
+        "mean_s": 0.19179670251905917,
+        "median_s": 0.19055919628590345,
+        "min_s": 0.18820130452513695,
+        "reps": 10,
+        "std_s": 0.003989505726677168
+      }
+    },
+    "4": {
+      "failure_count": 0,
+      "loglikelihood_max": -600.5180009530201,
+      "loglikelihood_min": -600.7474693170138,
+      "value_draws_per_second_median": 72.41710818395765,
+      "value_first_call_s": 27.054631246253848,
+      "value_per_draw_steady_median_s": 0.013808891642838717,
+      "value_steady": {
+        "max_s": 0.05916395224630833,
+        "mean_s": 0.05568008814007044,
+        "median_s": 0.055235566571354866,
+        "min_s": 0.05512305535376072,
+        "reps": 10,
+        "std_s": 0.00124167316553076
+      }
+    },
+    "64": {
+      "failure_count": 0,
+      "loglikelihood_max": -600.5180009530037,
+      "loglikelihood_min": -600.7795848029732,
+      "value_draws_per_second_median": 156.5628087246392,
+      "value_first_call_s": 29.140298014506698,
+      "value_per_draw_steady_median_s": 0.006387212953995913,
+      "value_steady": {
+        "max_s": 0.44267209246754646,
+        "mean_s": 0.4195447195321321,
+        "median_s": 0.40878162905573845,
+        "min_s": 0.40265990421175957,
+        "reps": 10,
+        "std_s": 0.01795023744550232
+      }
+    }
+  },
+  "benchmark": {
+    "batch_sizes": [
+      1,
+      4,
+      16,
+      64
+    ],
+    "case": "medium_sw07_hlt",
+    "check_parameter_bounds": false,
+    "dtype": "float64",
+    "n_exo": 7,
+    "n_observables": 7,
+    "n_vars": 66,
+    "parameter_count": 15,
+    "parameter_names": [
+      "calfa",
+      "cg",
+      "cgy",
+      "cindw",
+      "crdy",
+      "crhob",
+      "crhoqs",
+      "crpi",
+      "crr",
+      "cry",
+      "csigl",
+      "z_ea",
+      "z_eg",
+      "z_em",
+      "z_ew"
+    ],
+    "parameters_are_resolved": true,
+    "periods": 80,
+    "preset": "sw07_hlt",
+    "qme_algorithm": "schur_gpu",
+    "resolved_parameter_max_abs_diff": 0.3333333333333329,
+    "static_equation_rows": [
+      19,
+      65,
+      23,
+      51,
+      48,
+      46,
+      25,
+      17,
+      13,
+      15,
+      27,
+      47,
+      49,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      44,
+      21
+    ]
+  },
+  "runtime": {
+    "jax_default_backend": "gpu",
+    "jax_devices": [
+      "cuda:0"
+    ],
+    "jax_enable_x64": true,
+    "jax_version": "0.11.1",
+    "numpyro_version": "0.21.0",
+    "nvidia_smi": "Mon Oct 19 06:57:05 2026       \n+-----------------------------------------------------------------------------------------+\n| NVIDIA-SMI 595.71.05              Driver Version: 595.71.05      CUDA Version: 13.2     |\n+-----------------------------------------+------------------------+----------------------+\n| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |\n| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |\n|                                         |                        |               MIG M. |\n|=========================================+========================+======================|\n|   0  NVIDIA GeForce RTX 4080 ...    On  |   00000000:B2:00.0 Off |                  N/A |\n| 30%   41C    P2             91W /  320W |    3418MiB /  32760MiB |     59%      Default |\n|                                         |                        |                  N/A |\n+-----------------------------------------+------------------------+----------------------+\n\n+-----------------------------------------------------------------------------------------+\n| Processes:                                                                              |\n|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |\n|        ID   ID                                                               Usage      |\n|=========================================================================================|\n|    0   N/A  N/A            7343      C   python                                 3408MiB |\n+-----------------------------------------------------------------------------------------+",
+    "platform": "Linux-5.15.0-25-generic-x86_64-with-glibc2.35",
+    "processor": "x86_64",
+    "python": "3.12.3 | packaged by Anaconda, Inc. | (main, May  6 2024, 19:46:43) [GCC 11.2.0]"
+  }
+}

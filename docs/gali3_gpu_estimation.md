@@ -36,7 +36,7 @@ python benchmarks/posterior_sampling_speed.py \
   --samples 8 \
   --chains 2 \
   --chain-method vectorized \
-  --qme-algorithm doubling \
+  --qme-algorithm schur_gpu \
   --preflight \
   --preflight-reps 2 \
   --schur-support-draws 8 \
@@ -63,7 +63,7 @@ python benchmarks/posterior_sampling_speed.py \
   --dtype float64 \
   --platform cuda \
   --force-gpu \
-  --qme-algorithm doubling \
+  --qme-algorithm schur_gpu \
   --preflight \
   --preflight-reps 5 \
   --schur-support-draws 64 \
@@ -71,9 +71,12 @@ python benchmarks/posterior_sampling_speed.py \
   --verbose
 ```
 
-Use `--qme-algorithm doubling` for the fully JAX-native fast path. Keep
-`--schur-support-draws` positive so the output reports whether any doubling
-draws are accepted outside Schur/QZ unique-stable support.
+Use `--qme-algorithm schur_gpu` for the fully JAX-native, determinacy-aware
+path. It uses a real Cayley transform and a scaled matrix-sign iteration. The
+matrix sign gives the stable projector without a nonsymmetric eigendecomposition.
+The solver accepts a draw when the stable-root count is correct and the policy
+matrix satisfies the quadratic matrix equation. Keep `--schur-support-draws`
+positive to audit a sample of posterior draws against CPU real QZ.
 
 The Gali smoke currently defaults to float64 on GPU because the synthetic data
 are generated from a Schur-certified first-order solve. Float32 can be used for

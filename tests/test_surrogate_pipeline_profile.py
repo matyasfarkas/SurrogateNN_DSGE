@@ -102,6 +102,28 @@ def test_hlt_theta_design_prior_includes_reference_column() -> None:
     assert np.isfinite(theta).all()
 
 
+def test_perturbation_design_can_reserve_reference_column() -> None:
+    mod = _load_profile_module()
+    base = np.asarray([1.5, 0.125], dtype=np.float64)
+
+    theta, subset_idx, diagnostics = mod._make_hlt_theta_design(
+        base_parameters=base,
+        parameter_names=("ϕᵖⁱ", "ϕʸ"),
+        subset_names=("ϕᵖⁱ", "ϕʸ"),
+        draws=4,
+        perturbation=0.1,
+        design="perturbation",
+        seed=7,
+        include_reference=True,
+    )
+
+    assert subset_idx == [0, 1]
+    assert diagnostics["include_reference"] is True
+    np.testing.assert_allclose(theta[:, 0], base, rtol=0, atol=0)
+    assert theta.shape == (2, 4)
+    assert np.any(theta[:, 1:] != base[:, None])
+
+
 def test_hlt_runtime_uses_steady_state_resolved_calibration_parameters() -> None:
     mod = _load_profile_module()
     root = Path(__file__).resolve().parents[1]
@@ -604,6 +626,8 @@ def test_parse_args_accepts_surrogate_hmc_draw_export_path() -> None:
             "2",
             "--hlt-surrogate-hmc-chain-batch-size",
             "8",
+            "--hlt-surrogate-hmc-gradient-mode",
+            "fixed-reference-corrected",
             "--hlt-surrogate-hmc-draws-output",
             "surrogate_draws.npz",
         ]
@@ -611,6 +635,7 @@ def test_parse_args_accepts_surrogate_hmc_draw_export_path() -> None:
 
     assert args.hlt_surrogate_hmc_samples == 2
     assert args.hlt_surrogate_hmc_chain_batch_size == 8
+    assert args.hlt_surrogate_hmc_gradient_mode == "fixed-reference-corrected"
     assert args.hlt_surrogate_hmc_draws_output == Path("surrogate_draws.npz")
 
 
@@ -718,6 +743,44 @@ def test_chain_batched_static_hmc_concatenates_draws(tmp_path: Path) -> None:
     assert draws_output.exists()
 
 
+def test_chain_batched_corrected_hmc_uses_separate_trajectory_density() -> None:
+    mod = _load_profile_module()
+    center = mod.jnp.asarray([0.25, 0.75], dtype=mod.jnp.float64)
+
+    def target_log_density(theta):
+        return -0.5 * mod.jnp.sum((theta - center) ** 2)
+
+    def proposal_log_density(theta):
+        return -0.5 * mod.jnp.sum((theta - (center + 0.01)) ** 2)
+
+    result = mod.run_chain_batched_static_hmc_on_bounded_surrogate_log_density(
+        log_density_fn=target_log_density,
+        proposal_log_density_fn=proposal_log_density,
+        center=center,
+        parameter_names=("calfa", "crhob"),
+        lower=mod.jnp.asarray([0.1, 0.5], dtype=mod.jnp.float64),
+        upper=mod.jnp.asarray([0.4, 0.95], dtype=mod.jnp.float64),
+        chains=3,
+        chain_batch_size=1,
+        warmup=1,
+        samples=2,
+        leapfrog_steps=2,
+        step_size=0.01,
+        target_accept_prob=0.8,
+        adapt_step_size=True,
+        initial_jitter=0.01,
+        seed=124,
+    )
+
+    assert result["status"] == "ok"
+    assert result["kind"] == "exact_corrected_surrogate_trajectory_hmc_chain_batched"
+    assert result["samples_shape"] == [2, 3, 2]
+    assert result["proposal_log_density"] == "separate_surrogate"
+    assert result["target_gradient_evaluated"] is False
+    assert result["target_evaluations_per_transition"] == 1
+    assert result["target_evaluations"] == 12
+
+
 def test_scale_aware_parity_metrics_allow_large_loglikelihood_tiny_relative_error() -> None:
     mod = _load_profile_module()
 
@@ -765,7 +828,11 @@ def test_static_hmc_retries_low_acceptance_with_smaller_step_size() -> None:
     assert result["retry_count"] >= 1
     assert result["retry_history"][0]["accepted_share"] == 0.0
     assert result["initial_step_size"] < result["requested_initial_step_size"]
-    assert result["accepted_share"] >= 0.01
+    assert result["retained_run_independent_of_tuning"] is True
+    assert result["tuning_run_count"] == len(result["retry_history"])
+    assert result["sampler_run_count"] == len(result["retry_history"]) + 1
+    assert result["sampling_elapsed_s"] > 0.0
+    assert result["tuning_elapsed_s"] > 0.0
 
 
 def test_static_hmc_retries_high_acceptance_with_larger_step_size() -> None:
@@ -799,6 +866,19 @@ def test_static_hmc_retries_high_acceptance_with_larger_step_size() -> None:
     assert result["retry_count"] == 2
     assert result["retry_history"][0]["retry_reason"] == "high_acceptance"
     assert result["initial_step_size"] > result["requested_initial_step_size"]
+    assert result["retained_run_independent_of_tuning"] is True
+
+
+def test_hmc_retry_and_retained_keys_are_disjoint() -> None:
+    mod = _load_profile_module()
+
+    keys = [
+        np.asarray(mod._hmc_retry_run_key(123, 0)),
+        np.asarray(mod._hmc_retry_run_key(123, 1)),
+        np.asarray(mod._hmc_retry_run_key(123, None)),
+    ]
+
+    assert len({tuple(key.tolist()) for key in keys}) == len(keys)
 
 
 def test_hlt_adaptive_sep_attempt_specs_auto_ladder() -> None:

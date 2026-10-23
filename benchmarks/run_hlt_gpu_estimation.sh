@@ -125,17 +125,17 @@ case "$MODE" in
     HMC_WARMUP="${HMC_WARMUP:-256}"
     HMC_SAMPLES="${HMC_SAMPLES:-512}"
     HMC_CHAINS="${HMC_CHAINS:-64}"
+    HMC_CHAIN_BATCH_SIZE="${HMC_CHAIN_BATCH_SIZE:-8}"
     HMC_LEAPFROG_STEPS="${HMC_LEAPFROG_STEPS:-6}"
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.0005}"
     HMC_MAX_RETRIES="${HMC_MAX_RETRIES:-4}"
     HMC_RETRY_STEP_SIZE_FACTOR="${HMC_RETRY_STEP_SIZE_FACTOR:-0.25}"
     ;;
   first_estimation)
-    # First full nonlinear-estimation run that is meant to finish on current
-    # GPUs. It uses the trained SEP/ResNN likelihood with fixed reference ROM1
-    # matrices inside HMC and keeps expensive Schur/SS verification outside the
-    # HMC transition. This is the efficient path until full-JAX Schur/SS
-    # differentiation is replaced by a custom implicit derivative.
+    # Throughput-oriented nonlinear-estimation run for current GPUs. It uses
+    # the trained SEP/ResNN likelihood with fixed reference ROM1 matrices inside
+    # HMC. Use final_nonlinear for the parameter-specific, fully JAX-native
+    # steady-state and first-order solution inside each HMC transition.
     DEFAULT_HLT_TARGET_BUILDER="${DEFAULT_HLT_TARGET_BUILDER:-batched-sep}"
     DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE="${DEFAULT_HLT_SEP_BATCH_CHUNK_SIZE:-16}"
     HLT_PARAMETER_SET="${HLT_PARAMETER_SET:-phase1_18params_narrow}"
@@ -255,6 +255,10 @@ case "$MODE" in
     HMC_WARMUP="${HMC_WARMUP:-500}"
     HMC_SAMPLES="${HMC_SAMPLES:-1000}"
     HMC_CHAINS="${HMC_CHAINS:-64}"
+    # The full-JAX log density has a large reverse-mode working set.  Compile
+    # one chain at a time by default; larger batches must be justified by a
+    # successful resource pilot on the target GPU.
+    HMC_CHAIN_BATCH_SIZE="${HMC_CHAIN_BATCH_SIZE:-1}"
     HMC_LEAPFROG_STEPS="${HMC_LEAPFROG_STEPS:-6}"
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.003}"
     HMC_MAX_RETRIES="${HMC_MAX_RETRIES:-4}"
@@ -312,6 +316,7 @@ case "$MODE" in
     HMC_WARMUP="${HMC_WARMUP:-500}"
     HMC_SAMPLES="${HMC_SAMPLES:-1000}"
     HMC_CHAINS="${HMC_CHAINS:-64}"
+    HMC_CHAIN_BATCH_SIZE="${HMC_CHAIN_BATCH_SIZE:-1}"
     HMC_LEAPFROG_STEPS="${HMC_LEAPFROG_STEPS:-6}"
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.003}"
     HMC_MAX_RETRIES="${HMC_MAX_RETRIES:-4}"
@@ -336,6 +341,7 @@ case "$MODE" in
     HMC_WARMUP="${HMC_WARMUP:-500}"
     HMC_SAMPLES="${HMC_SAMPLES:-1000}"
     HMC_CHAINS="${HMC_CHAINS:-32}"
+    HMC_CHAIN_BATCH_SIZE="${HMC_CHAIN_BATCH_SIZE:-4}"
     HMC_LEAPFROG_STEPS="${HMC_LEAPFROG_STEPS:-6}"
     HMC_STEP_SIZE="${HMC_STEP_SIZE:-0.003}"
     ;;
@@ -521,12 +527,14 @@ LIKELIHOOD_QME_ALGORITHM=${LIKELIHOOD_QME_ALGORITHM:-schur}
 LIKELIHOOD_STATIC_ROWS_MODE=${LIKELIHOOD_STATIC_ROWS_MODE:-reference}
 JAX_LOG_DENSITY_REPEAT_EVALS=${JAX_LOG_DENSITY_REPEAT_EVALS:-0}
 JAX_LOG_DENSITY_SMOKE=${JAX_LOG_DENSITY_SMOKE:-1}
+JAX_LOG_DENSITY_GRADIENT=${JAX_LOG_DENSITY_GRADIENT:-1}
 JAX_LOG_DENSITY_BATCH_SIZE=${JAX_LOG_DENSITY_BATCH_SIZE:-0}
 JAX_LOG_DENSITY_BATCH_REPEAT_EVALS=${JAX_LOG_DENSITY_BATCH_REPEAT_EVALS:-0}
 HMC_WARMUP=$HMC_WARMUP
 HMC_SAMPLES=$HMC_SAMPLES
 HMC_CHAINS=$HMC_CHAINS
 HMC_CHAIN_BATCH_SIZE=${HMC_CHAIN_BATCH_SIZE:-0}
+HMC_GRADIENT_MODE=${HMC_GRADIENT_MODE:-target}
 HMC_LEAPFROG_STEPS=$HMC_LEAPFROG_STEPS
 HMC_STEP_SIZE=$HMC_STEP_SIZE
 HMC_MAX_ACCEPTED_SHARE=${HMC_MAX_ACCEPTED_SHARE:-}
@@ -632,6 +640,7 @@ echo "Running HLT GPU estimation MODE=$MODE into $RESULT_ROOT"
   --hlt-surrogate-hmc-samples "$HMC_SAMPLES" \
   --hlt-surrogate-hmc-chains "$HMC_CHAINS" \
   --hlt-surrogate-hmc-chain-batch-size "${HMC_CHAIN_BATCH_SIZE:-0}" \
+  --hlt-surrogate-hmc-gradient-mode "${HMC_GRADIENT_MODE:-target}" \
   --hlt-surrogate-hmc-leapfrog-steps "$HMC_LEAPFROG_STEPS" \
   --hlt-surrogate-hmc-step-size "$HMC_STEP_SIZE" \
   --hlt-surrogate-hmc-target-accept-prob "${HMC_TARGET_ACCEPT:-0.8}" \

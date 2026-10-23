@@ -15,6 +15,86 @@ parsed HLT parameter vector, an 8-period SEP horizon, GPU Schur, strict quality
 gates, and a smoke-first staged launch. Use it only after `final_nonlinear`
 passes or when you explicitly want to test the full HLT envelope.
 
+## First-Order Solver Decision
+
+Use `LIKELIHOOD_QME_ALGORITHM=schur_gpu` inside GPU estimation. This path forms
+the real generalized eigenvalue pencil and applies a real Cayley transform. A
+scaled Newton iteration computes the matrix sign. Its positive spectral
+projector spans the stable subspace, and its trace gives the stable-root count.
+A draw is accepted when this count equals the number of predetermined variables
+and the recovered policy matrix has a small QME residual.
+
+Use CPU real ordered QZ as an audit, not inside an HMC transition. In the
+one-million-draw HLT support audit, real QZ and the device-compatible,
+residual-based Cayley rule classified every draw identically. The saved audit is
+`benchmarks/results/qz_real_cayley_hlt_loose_1m_stream.json`.
+
+The production path does not call a Schur routine or the nonsymmetric
+eigensolver. Its runtime operations are real matrix products, reductions, and
+linear solves inside the compiled JAX graph. This removes both the SciPy QZ
+callback and the hybrid `geev` computation. CPU real QZ remains the reference
+used by the support audit.
+
+This settles the first-order solution stage. It does not settle nonlinear-path
+coverage or posterior sampling. In the October 2026 full run, 69 of 74 prepared
+parameter draws completed every SEP period. The scalar full-JAX likelihood
+matched the Python reference, but the monolithic 64-chain HMC graph requested
+about 378.5 GiB and did not run. These are separate failures: the five SEP paths
+require numerical diagnosis, while HMC requires a bounded chain batch.
+
+## Full-JAX HMC Resource Pilot
+
+Do not repeat target generation or training to test the HMC memory fix. Copy
+the saved final-nonlinear surrogate bundle to the GPU host and run:
+
+```bash
+HLT_SURROGATE_BUNDLE_PATH=/path/to/hlt_final_nonlinear_surrogate_bundle.snn.npz \
+  bash benchmarks/run_full_jax_hmc_resource_pilot.sh
+```
+
+The pilot reproduces the final-nonlinear parameter design, loads the saved
+surrogate, checks scalar JAX/Python parity, and runs two chains in sequential
+one-chain batches. Each chain has one warmup transition and two retained draws,
+with one leapfrog step. The leapfrog trajectory uses gradients of the cheaper
+fixed-reference likelihood. Each proposal is then accepted or rejected using
+the full-JAX target Hamiltonian. The leapfrog map is reversible and
+volume-preserving, so this endpoint correction preserves the full-JAX target
+posterior while never differentiating the expensive target. Its full-JAX cost
+is one new target evaluation per transition rather than a reverse-mode target
+evaluation at every leapfrog step.
+
+This is enough to test compilation, peak memory, exact endpoint correction,
+PRNG separation, and draw export. It is not enough for posterior inference or
+convergence diagnostics.
+
+A successful pilot must report `parity_ok=true`, a chain-batched HMC status of
+`ok`, finite draws with shape `[2, 2, 18]`, and no XLA resource-exhaustion
+error. Use its second batch timing as the post-compilation scalar-chain timing.
+Only then increase the chain batch to 2 and 4. Keep the largest batch that fits
+with a memory margin; increase warmup and retained draws only after the batch
+size has been fixed.
+
+For example, retain two sequential batches at each step:
+
+```bash
+HMC_CHAINS=4 HMC_CHAIN_BATCH_SIZE=2 \
+HLT_SURROGATE_BUNDLE_PATH=/path/to/hlt_final_nonlinear_surrogate_bundle.snn.npz \
+  bash benchmarks/run_full_jax_hmc_resource_pilot.sh
+
+HMC_CHAINS=8 HMC_CHAIN_BATCH_SIZE=4 \
+HLT_SURROGATE_BUNDLE_PATH=/path/to/hlt_final_nonlinear_surrogate_bundle.snn.npz \
+  bash benchmarks/run_full_jax_hmc_resource_pilot.sh
+```
+
+The production `final_nonlinear` and `full_hlt` modes now default to one-chain
+batches. The generic runner keeps exact target-gradient HMC as its default;
+set `HMC_GRADIENT_MODE=fixed-reference-corrected` to use the corrected
+surrogate-trajectory kernel. This prevents the earlier 64-chain reverse-mode
+graph, but it does not make the full-JAX target cheap. The measured scalar
+likelihood time and corrected acceptance rate determine whether the method is
+computationally useful or should remain an audit for the fixed-reference
+surrogate posterior.
+
 ## First Command After Restart
 
 Run this in SSH or a GPUHUB JupyterLab terminal:

@@ -1,0 +1,24 @@
+\begin{table}[t]
+\centering
+\caption{Hard gates for a credible reduced-model methods submission}
+\label{tab:submission-gates}
+\small
+\begin{threeparttable}
+\begin{tabular}{p{0.20\textwidth}p{0.70\textwidth}}
+\toprule
+Evidence family & Required result \\
+\midrule
+Scope and provenance & Full 23-equation source verified by content hash and upstream revision; clean repository revision; complete environment, data, command, seed, and artifact manifests. \\
+Nonlinear solution & Positive-order stochastic SEP with multiple nodes and all shocks active; raw attempted and successful counts; scaled residuals; regular, posterior, and boundary-stress strata. \\
+Independent parity & Common case identifiers evaluated in Python and MacroModelling.jl; both failures retained in the denominator; QZ, trajectory, and likelihood errors reported on common successful cases. \\
+Surrogate accuracy & Disjoint parameter, shock, and trajectory holdouts; per-output and tail errors; paired improvement over ROM with a 95 percent interval; learning-curve and out-of-distribution results. \\
+Posterior fidelity & Two-parameter full nonlinear grid with resolution-doubling convergence; posterior moments, intervals, and distribution compared with the surrogate and corrected samplers using numerical or Monte Carlo uncertainty. \\
+Sampling & Four tuned chains for the scaling experiment; rank-normalized split $\widehat R$, bulk and tail ESS, failures, ESS per gradient evaluation, and ESS per second. \\
+Timing & Same-work, same-precision comparison; synchronized warm calls and independent end-to-end processes; compilation, transfers, training, host callbacks, and peak memory reported separately. \\
+\bottomrule
+\end{tabular}
+\begin{tablenotes}\footnotesize
+\item \textit{Notes:} These are claim-specific design requirements. Prespecified thresholds and case lists must be frozen before confirmatory execution. Passing them supports the reduced Gal\'i experiment only; it does not establish universal accuracy across DSGE models.
+\end{tablenotes}
+\end{threeparttable}
+\end{table}

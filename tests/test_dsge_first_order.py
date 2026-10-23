@@ -316,6 +316,7 @@ def test_jax_gpu_schur_quadratic_matrix_equation_matches_scipy_schur() -> None:
     )
 
     assert bool(np.asarray(result.converged))
+    assert 0 < int(np.asarray(result.iterations)) < 32
     np.testing.assert_allclose(result.solution, expected.solution, rtol=1e-8, atol=1e-8)
 
 
@@ -408,7 +409,7 @@ def test_cayley_gpu_qz_screen_supports_vmap() -> None:
         )
 
 
-def test_jax_gpu_schur_quadratic_matrix_equation_avoids_host_callback() -> None:
+def test_jax_gpu_schur_quadratic_matrix_equation_avoids_callback_and_geev() -> None:
     timings, a_tilde_plus, a_tilde_zero, a_tilde_minus = _rbc_cme_qme_fixture()
 
     jaxpr = str(
@@ -423,6 +424,17 @@ def test_jax_gpu_schur_quadratic_matrix_equation_avoids_host_callback() -> None:
     )
 
     assert "pure_callback" not in jaxpr
+    assert "eig" not in jaxpr.lower()
+
+    lowered = jax.jit(
+        lambda shifted_zero: solve_quadratic_matrix_equation_schur_gpu_jax(
+            a_tilde_plus,
+            shifted_zero,
+            a_tilde_minus,
+            timings,
+        ).solution
+    ).lower(a_tilde_zero)
+    assert "geev" not in lowered.as_text().lower()
 
 
 def test_jax_gpu_schur_quadratic_matrix_equation_supports_reverse_mode_autodiff() -> None:

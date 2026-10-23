@@ -105,6 +105,7 @@ Implemented:
 - compiled first-order switching likelihoods and NumPyro wrappers with automatic filter-derived gates, so the first-order switching-order estimation path can now run inside JAX/NumPyro without supplying gate probabilities by hand
 - quadratic matrix equation doubling solver plus a generalized Schur / ordered-QZ solver for the Julia `:schur` path
 - explicit Schur / ordered-QZ determinacy diagnostics for first-order models, including stable-root counts, unique/indeterminate/no-stable classification, and parsed-model wrappers to inspect the Schur branch directly
+- a fully JAX-native `schur_gpu` first-order path based on a real Cayley transform and a scaled matrix-sign iteration; it obtains the stable projector without a nonsymmetric eigendecomposition, checks the stable-root count, and validates the recovered policy matrix by its QME residual
 - parsed-model state-space, likelihood, filtering, gate-stat, and concrete/compiled NumPyro helpers now expose `qme_algorithm` so first-order workflows can explicitly choose between the doubling and Schur/QZ solution branches
 - MacroModelling-style `@model` / `@parameters` source parsing for the first-order path
 - parsed model and parameter block options for common upstream directives, including `max_obc_horizon`, `simplify`, `verbose`, `silent`, `symbolic`, and `perturbation_order`
@@ -163,9 +164,9 @@ Not implemented yet:
 - the hard remaining raw-source bottleneck is now clearly the largest nonlinear steady states rather than OBC syntax support alone; on a manual upstream spot-check, the new hybrid rescue reduced the raw `Guerrieri_Iacoviello_2017.jl` steady-state residual from about `4.3e-1` to about `1.2e-2` at the default budget, but did not yet fully converge it automatically
 - the broader Julia runtime selection surface is still narrower here than upstream, even though grouped nested name inputs and the main selector tokens like `:all_excluding_obc` and `:all_excluding_auxiliary_and_obc` are now supported
 - the remaining sparse-tree-specific Jacobian/runtime optimizations and the broader OBC-specific SEP machinery beyond the new subgradient / finite-difference Jacobian safeguards; the new parsed-model SEP shock-reinjection loop currently reuses the linear OBC shock recovery path rather than a full nonlinear subdifferential Newton / nonlinear shock optimizer
-- fully GPU-native generalized QZ / ordered-QZ primitives; the current JAX-facing `schur` QME path uses a SciPy host callback in the primal solve because JAX does not yet expose generalized `qz` / `ordqz`
-- the public first-order default now matches Julia and uses `schur`; request `qme_algorithm=\"doubling\"` explicitly if you want to stay on the fully JAX-native doubling path
-- the new determinacy diagnostics are currently tied to the Schur/QZ path; the doubling path still solves the QME but does not provide a comparable stable-root decomposition report
+- a GPU generalized-QZ primitive matching LAPACK `ordqz`; the Julia-compatible `schur` path still uses a SciPy host callback, while the fully JAX-native `schur_gpu` path extracts the same stable subspace with a real Cayley transform and matrix-sign iteration
+- the public first-order default remains `schur` for Julia parity; GPU estimation commands should request `qme_algorithm=\"schur_gpu\"`
+- the doubling path still solves the QME without a stable-root determinacy report; `schur_gpu` is the determinacy-aware GPU path
 - fully JAX-traceable parsed-model structural likelihoods beyond the first-order path, including higher-order estimation edges for compiled NumPyro kernels like `NUTS` and `HMC`
 - the older high-level parsed-model switching/filter bridge in `model.py` still exists for concrete NumPy-oriented use, but the first-order switching-order estimation path now has compiled JAX counterparts end to end; the remaining gaps are mainly higher-order and nonlinear switching surfaces rather than the first-order filter gate path
 - the broader regime-switching estimation harness beyond the currently ported likelihood mixer and gate/regime utilities

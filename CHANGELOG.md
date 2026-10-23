@@ -6,6 +6,10 @@
   diagnostics.
 - Added build/Twine validation and release-oriented install instructions.
 - Added Schur/QZ support auditing for fast doubling-based HMC benchmarks.
+- Switched the CPU Schur reference to real ordered QZ and replaced the
+  production `schur_gpu` eigendecomposition with a real, scaled matrix-sign
+  iteration. The GPU path now extracts the stable projector without `geev` and
+  accepts draws by the stable-root count and the QME residual.
 - Added the Gali three-equation MacroModelling-style GPU estimation smoke
   benchmark.
 - Verified the local release candidate with the full Python test suite,
