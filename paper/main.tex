@@ -200,6 +200,26 @@ every model equation. Reducing the parameter dimension makes a numerical
 posterior reference feasible; it does not replace the model with the familiar
 three-equation linearization.
 
+\subsection{Pilot data and parameter design}
+
+The preserved software fixture contains ten synthetic observations of log
+output, annualized inflation, and the annualized nominal interest rate. The
+measurement standard deviation is 0.01 for each observable. The three declared
+structural shocks are technology, monetary-policy, and preference shocks, with
+model innovation scales 0.01, 0.0025, and 0.05. These observations are useful
+for testing the inversion and sampling stack; they are not an empirical data
+application. The confirmatory experiment freezes a documented data-generating
+parameter, simulation seed, burn-in, initial condition, and shock path before
+training or posterior evaluation.
+
+The deterministic default pilot contains eight parameter vectors and ten
+periods per vector. The reference calibration is included, and the two estimated
+policy coefficients are perturbed by the fixed design while the remaining 14
+parameters stay at their declared calibration. Two complete parameter groups
+form the calibration block. The positive-order pilot uses the same reduced
+parameter design so that its purpose remains solver feasibility rather than a
+claim about broad parameter-space coverage.
+
 \section{Residual-surrogate construction}
 
 For training case $i$, let $u_i=(z_i,\theta_i)$ and
@@ -219,6 +239,12 @@ clipping. The network embeds states and shocks, conditions hidden activations
 on the full estimated parameter vector through feature-wise affine modulation,
 and uses residual blocks with SiLU activations. Deployment restores the original
 units and adds the predicted discrepancy to the ROM.
+
+The preserved default configuration uses one residual block, 64 hidden units,
+400 epochs, batches of 32, and 64-bit training arithmetic. These choices are
+engineering settings, not selected hyperparameters. Confirmatory learning curves
+vary target count and network capacity using only training and calibration data;
+the untouched test partition is evaluated once for the frozen specification.
 
 The implementation can fit an additional per-output shrinkage coefficient in
 $[0,1]$ after network training. In the preserved pilots, those coefficients
@@ -497,7 +523,10 @@ tests, and edit the working draft. Every numerical claim in the paper is linked
 to a machine-readable source file and must be verified by the authors. The final
 submission will follow the target journal's disclosure policy.
 
+\begingroup
+\small
 \bibliographystyle{plainnat}
 \bibliography{references}
+\endgroup
 
 \end{document}

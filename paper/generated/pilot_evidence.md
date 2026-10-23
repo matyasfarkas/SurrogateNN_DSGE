@@ -21,6 +21,7 @@ Schema: `surrogatenn-dsge-methods-paper-evidence/v1`
 
 ## Hard blockers
 
+- A frozen, reproducible synthetic-data generator with recorded seed, burn-in, initial condition, and data-generating parameters.
 - Independent MacroModelling.jl trajectory and likelihood comparisons.
 - Positive-order stochastic SEP with multiple quadrature nodes and all shocks active.
 - An untouched test split; residual-shrinkage calibration must use a separate partition or be disabled.
