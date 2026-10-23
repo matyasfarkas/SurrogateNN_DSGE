@@ -15,6 +15,14 @@ objective. No manuscript text may call that run an exact nonlinear posterior.
 
 ## Critical path
 
+Every new Gal\'i pilot is launched from a clean revision through
+`benchmarks/run_nonlinear_gali_pilot.sh`. The launcher defaults to stochastic
+SEP order one with three quadrature nodes, records the exact argv and independent
+design/HMC seeds, hashes the model, payload, launcher, and benchmark source before
+execution, and hashes declared outputs afterward in `run_manifest.json`. Setting
+`ALLOW_DIRTY_MANIFEST=1` is permitted only for local debugging; an evidence or
+publication run with that flag cannot satisfy the clean-revision gate.
+
 ### Experiment A: two-parameter correctness reference
 
 1. Freeze the priors, synthetic data, observables, shock scaling, SEP

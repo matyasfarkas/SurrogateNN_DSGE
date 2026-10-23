@@ -42,3 +42,19 @@ results table, limitations section, and generated claim ledger.
 The confirmatory plan is in `../docs/submission_readiness_plan.md`. The paper
 should be promoted to a submission draft only when every hard gate is backed by
 raw artifacts and a frozen protocol.
+
+## Run a provenance-captured stochastic pilot
+
+From a clean commit, the reduced full-equation Gal\'i launcher now defaults to
+stochastic SEP order one and three quadrature nodes:
+
+```bash
+DEVICE=gpu PYTHON=.venv/bin/python \
+  bash benchmarks/run_nonlinear_gali_pilot.sh
+```
+
+The launcher refuses a dirty worktree, records the exact command, Git revision,
+allowlisted numerical environment, design and HMC seeds, and input hashes before
+execution, then records the exit code and output hashes in
+`run_manifest.json`. Budgets remain intentionally small; a successful pilot is
+still not confirmatory evidence.
