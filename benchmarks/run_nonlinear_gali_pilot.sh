@@ -11,6 +11,7 @@ DEVICE="${DEVICE:-cpu}"
 RUN_LABEL="${RUN_LABEL:-gali_full_nonlinear_pilot_$(date -u +%Y%m%dT%H%M%SZ)}"
 RESULT_ROOT="${RESULT_ROOT:-benchmarks/results/$RUN_LABEL}"
 mkdir -p "$RESULT_ROOT"
+export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
 GALI_SEP_ORDER="${GALI_SEP_ORDER:-1}"
 GALI_SEP_NNODES="${GALI_SEP_NNODES:-3}"
 GALI_SEED="${GALI_SEED:-20261019}"
@@ -92,6 +93,7 @@ fi
 COMMAND=("${PYTHON:-python}" benchmarks/profile_surrogate_pipeline_gpu.py "${ARGS[@]}")
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  printf 'JAX_ENABLE_X64=%q ' "$JAX_ENABLE_X64"
   printf '%q ' "${COMMAND[@]}"
   printf '\n'
   exit 0
