@@ -31,6 +31,8 @@ class SEPSolution(NamedTuple):
     iterations: int
     group_counts: tuple[int, ...]
     jacobian_method: str
+    max_residual_index: Optional[int] = None
+    max_residual_value: Optional[float] = None
 
 
 class BatchedSEPSolution(NamedTuple):
@@ -51,6 +53,8 @@ class BatchedSEPSolution(NamedTuple):
     initial_residual_norm: Optional[jax.Array] = None
     final_lambda: Optional[jax.Array] = None
     termination_code: Optional[jax.Array] = None
+    max_residual_index: Optional[jax.Array] = None
+    max_residual_value: Optional[jax.Array] = None
 
 
 class _SEPTreeMetadata(NamedTuple):
@@ -1451,6 +1455,12 @@ def solve_batched_stochastic_extended_path_residual_expectation(
 
     final_residual = eval_residual(current)
     residual_norm = jnp.max(jnp.abs(final_residual), axis=1)
+    max_residual_index = jnp.argmax(jnp.abs(final_residual), axis=1).astype(jnp.int32)
+    max_residual_value = jnp.take_along_axis(
+        final_residual,
+        max_residual_index[:, None],
+        axis=1,
+    )[:, 0]
     converged = residual_norm < float(config.tol)
     accepted = jnp.isfinite(residual_norm) & (residual_norm <= float(accept_threshold))
     termination_code = jnp.where(
@@ -1478,6 +1488,8 @@ def solve_batched_stochastic_extended_path_residual_expectation(
         initial_residual_norm=selected_residual_norm,
         final_lambda=current_lambda,
         termination_code=termination_code,
+        max_residual_index=max_residual_index,
+        max_residual_value=max_residual_value,
     )
 
 
@@ -2139,7 +2151,9 @@ def _solve_stochastic_extended_path_impl(
             stall_count = 0
 
     final_residual = residual_eval(current)
+    final_residual_np = np.asarray(final_residual, dtype=np.float64)
     residual_norm = float(np.asarray(jnp.linalg.norm(final_residual, ord=jnp.inf)))
+    max_residual_index = int(np.argmax(np.abs(final_residual_np)))
     converged = residual_norm < config.tol
     accepted = bool(np.isfinite(residual_norm) and residual_norm <= accept_threshold)
 
@@ -2158,6 +2172,8 @@ def _solve_stochastic_extended_path_impl(
         iterations=iterations,
         group_counts=counts,
         jacobian_method=jacobian_method_used,
+        max_residual_index=max_residual_index,
+        max_residual_value=float(final_residual_np[max_residual_index]),
     )
 
 

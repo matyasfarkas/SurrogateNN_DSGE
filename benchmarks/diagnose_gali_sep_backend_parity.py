@@ -141,7 +141,48 @@ def _base_solution_summary(solution: Any, elapsed_s: float) -> dict[str, Any]:
         "mean_path_shape": list(mean_path.shape),
         "mean_path_sha256": _sha256_array(mean_path),
         "mean_path_finite": bool(np.isfinite(mean_path).all()),
+        "max_residual_index": _jsonable(
+            np.asarray(solution.max_residual_index, dtype=np.int64)
+        ),
+        "max_residual_value": _jsonable(
+            np.asarray(solution.max_residual_value, dtype=np.float64)
+        ),
     }
+
+
+def _residual_location(
+    flat_index: int,
+    *,
+    group_counts: list[int],
+    state_dim: int,
+    equation_names: tuple[str, ...],
+) -> dict[str, Any]:
+    offset = 0
+    for period in range(1, len(group_counts)):
+        block_size = int(group_counts[period]) * state_dim
+        if flat_index < offset + block_size:
+            within = flat_index - offset
+            equation_index = int(within % state_dim)
+            return {
+                "period": int(period),
+                "group": int(within // state_dim),
+                "equation_index": equation_index,
+                "equation_name": equation_names[equation_index],
+            }
+        offset += block_size
+    return {"error": f"flat residual index {flat_index} exceeds residual size {offset}."}
+
+
+def _attach_residual_location(summary: dict[str, Any], model: Any) -> None:
+    raw_index = np.asarray(summary["max_residual_index"], dtype=np.int64).reshape(-1)
+    if raw_index.size != 1:
+        return
+    summary["max_residual_location"] = _residual_location(
+        int(raw_index[0]),
+        group_counts=[int(value) for value in summary["group_counts"]],
+        state_dim=int(model.timings.nVars),
+        equation_names=tuple(str(value) for value in model.timings.var),
+    )
 
 
 def _run_sequential(
@@ -400,6 +441,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     device=device,
                 )
                 summary["stochastic_shock_scale"] = float(scale)
+                _attach_residual_location(summary, model)
                 sequential_steps.append(summary)
                 draw["sequential"] = summary
                 draw["sequential_continuation"] = sequential_steps
@@ -432,6 +474,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     device=device,
                 )
                 summary["stochastic_shock_scale"] = float(scale)
+                _attach_residual_location(summary, model)
                 batched_steps.append(summary)
                 draw["batched"] = summary
                 draw["batched_continuation"] = batched_steps

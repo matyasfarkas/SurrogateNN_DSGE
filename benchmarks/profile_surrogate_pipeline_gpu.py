@@ -3239,6 +3239,8 @@ def _build_batched_hlt_sep_dataset(
         iterations = np.zeros((n_theta,), dtype=np.int32)
         final_lambda = np.full((n_theta,), math.nan, dtype=np.float64)
         termination_code = np.zeros((n_theta,), dtype=np.int8)
+        max_residual_index = np.full((n_theta,), -1, dtype=np.int32)
+        max_residual_value = np.full((n_theta,), math.nan, dtype=np.float64)
         next_states = current_states.copy()
         solve_elapsed = 0.0
         period_chunk_calls = 0
@@ -3312,6 +3314,16 @@ def _build_batched_hlt_sep_dataset(
                 termination_code[chunk] = np.asarray(
                     batched_sep.solution.termination_code,
                     dtype=np.int8,
+                )
+            if batched_sep.solution.max_residual_index is not None:
+                max_residual_index[chunk] = np.asarray(
+                    batched_sep.solution.max_residual_index,
+                    dtype=np.int32,
+                )
+            if batched_sep.solution.max_residual_value is not None:
+                max_residual_value[chunk] = np.asarray(
+                    batched_sep.solution.max_residual_value,
+                    dtype=np.float64,
                 )
             next_states[chunk] = np.asarray(batched_sep.solution.mean_path[:, :, 1], dtype=np.float64)
             previous_stacked_states[chunk] = np.asarray(
@@ -3397,6 +3409,10 @@ def _build_batched_hlt_sep_dataset(
                         ),
                         "residual_norm": _finite_float_or_none(residual_value),
                         "final_lambda": _finite_float_or_none(final_lambda[theta_idx]),
+                        "max_residual_index": int(max_residual_index[theta_idx]),
+                        "max_residual_value": _finite_float_or_none(
+                            max_residual_value[theta_idx]
+                        ),
                         "termination": {
                             0: "max_iterations",
                             1: "converged",

@@ -816,6 +816,16 @@ def test_batched_sep_records_unrecoverable_line_search_failure() -> None:
         np.asarray(solution.iterations, dtype=np.int32),
         np.asarray([0], dtype=np.int32),
     )
+    np.testing.assert_array_equal(
+        np.asarray(solution.max_residual_index, dtype=np.int32),
+        np.asarray([0], dtype=np.int32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(solution.max_residual_value, dtype=np.float64),
+        np.asarray([1.0], dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
 
 
 def test_batched_sep_selects_lowest_residual_initial_guess_per_draw() -> None:
