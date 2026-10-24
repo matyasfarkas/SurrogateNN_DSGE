@@ -26,14 +26,20 @@ Use the project environment if it is already installed:
 PYTHON=.venv/bin/python bash benchmarks/run_nonlinear_gali_pilot.sh
 ```
 
-The defaults use CPU, eight parameter vectors, ten periods, 400 training
-epochs, one chain, 25 warmup draws, and 50 retained draws. A fast integration
-check is:
+The defaults use CPU, eight parameter vectors, ten observed periods, a
+15-period SEP terminal horizon, 400 training epochs, one chain, 25 warmup
+draws, and 50 retained draws. The longer SEP horizon is deliberate: controlled
+CPU/GPU parity experiments showed that a ten-period terminal horizon truncates
+the persistent price-dispersion response, whereas the otherwise identical
+15-period solve reaches the strict residual tolerance. Change it independently
+with `GALI_SEP_PERIODS`; do not infer it from the data horizon. A fast
+integration check is:
 
 ```bash
 PYTHON=.venv/bin/python \
 GALI_THETA_DRAWS=4 \
 GALI_PERIODS=4 \
+GALI_SEP_PERIODS=6 \
 GALI_EPOCHS=5 \
 GALI_HMC_WARMUP=1 \
 GALI_HMC_SAMPLES=2 \

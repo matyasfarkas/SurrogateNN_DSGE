@@ -14,6 +14,7 @@ mkdir -p "$RESULT_ROOT"
 export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
 GALI_SEP_ORDER="${GALI_SEP_ORDER:-1}"
 GALI_SEP_NNODES="${GALI_SEP_NNODES:-3}"
+GALI_SEP_PERIODS="${GALI_SEP_PERIODS:-15}"
 GALI_SEED="${GALI_SEED:-20261019}"
 GALI_HMC_SEED="${GALI_HMC_SEED:-20261023}"
 GALI_PAYLOAD="${GALI_PAYLOAD:-benchmarks/gali_nonlinear_pilot_payload.json}"
@@ -42,7 +43,7 @@ ARGS=(
   --hlt-min-runtime-successful-theta "${GALI_THETA_DRAWS:-8}"
   --hlt-min-full-success-share 1.0
   --hlt-min-accepted-samples "${GALI_THETA_DRAWS:-8}"
-  --sep-periods "${GALI_PERIODS:-10}"
+  --sep-periods "$GALI_SEP_PERIODS"
   --sep-order "$GALI_SEP_ORDER"
   --sep-nnodes "$GALI_SEP_NNODES"
   --sep-max-iter 50
