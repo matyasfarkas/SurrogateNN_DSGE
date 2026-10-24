@@ -270,6 +270,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         accept_tol=args.accept_tol,
         linear_solver=args.linear_solver,
         line_search=True,
+        newton_regularization=args.newton_regularization,
+        lm_lambda_min=args.lm_lambda_min,
     )
     output: dict[str, Any] = {
         "started_utc": _utc_now(),
@@ -300,6 +302,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "tol": args.tol,
             "accept_tol": args.accept_tol,
             "linear_solver": args.linear_solver,
+            "newton_regularization": args.newton_regularization,
+            "lm_lambda_min": args.lm_lambda_min,
             "deterministic_first_shock": args.deterministic_shock,
             "stochastic_shock_scale": args.stochastic_shock_scale,
         },
@@ -433,6 +437,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tol", type=float, default=1e-8)
     parser.add_argument("--accept-tol", type=float, default=1e-5)
     parser.add_argument("--linear-solver", choices=("qr", "normal_equations"), default="qr")
+    parser.add_argument("--newton-regularization", type=float, default=1e-8)
+    parser.add_argument("--lm-lambda-min", type=float, default=1e-12)
     parser.add_argument("--deterministic-shock", type=float, default=0.12)
     parser.add_argument("--stochastic-shock-scale", type=float, default=1.0)
     parser.add_argument(
