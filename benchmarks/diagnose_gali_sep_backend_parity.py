@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 from argparse import Namespace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -112,6 +113,15 @@ def _parse_indices(raw: str, *, upper_bound: int) -> tuple[int, ...]:
         raise ValueError(
             f"theta indices {invalid} fall outside the generated design [0, {upper_bound - 1}]."
         )
+    return values
+
+
+def _parse_scale_ladder(raw: str, *, default: float) -> tuple[float, ...]:
+    if not raw.strip():
+        return (float(default),)
+    values = tuple(dict.fromkeys(float(part.strip()) for part in raw.split(",") if part.strip()))
+    if not values or any((not np.isfinite(value)) or value <= 0.0 for value in values):
+        raise ValueError("--stochastic-scale-ladder must contain positive finite values.")
     return values
 
 
@@ -259,11 +269,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         include_reference=True,
     )
     selected_indices = _parse_indices(args.theta_indices, upper_bound=theta.shape[1])
+    scale_ladder = _parse_scale_ladder(
+        args.stochastic_scale_ladder,
+        default=args.stochastic_shock_scale,
+    )
     config = SEPConfig(
         periods=args.periods,
         branching_order=args.order,
         nnodes=args.nnodes,
-        shock_scale=args.stochastic_shock_scale,
+        shock_scale=scale_ladder[0],
         sparse_tree=args.sparse_tree,
         max_iter=args.max_iter,
         tol=args.tol,
@@ -306,6 +320,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "lm_lambda_min": args.lm_lambda_min,
             "deterministic_first_shock": args.deterministic_shock,
             "stochastic_shock_scale": args.stochastic_shock_scale,
+            "stochastic_scale_ladder": scale_ladder,
         },
         "draws": [],
     }
@@ -370,42 +385,66 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         sequential_arrays: tuple[np.ndarray, np.ndarray] | None = None
         batched_arrays: tuple[np.ndarray, np.ndarray] | None = None
         if args.solver in {"sequential", "both"}:
-            _log(f"theta={theta_index} starting sequential SEP")
-            summary, stacked, mean_path = _run_sequential(
-                model=model,
-                parameters=parameters,
-                steady_state=steady_state,
-                deterministic=deterministic,
-                initial_guess=initial_guess,
-                config=config,
-                device=device,
-            )
-            draw["sequential"] = summary
-            sequential_arrays = (stacked, mean_path)
-            _log(
-                f"theta={theta_index} sequential residual={summary['residual_norm']} "
-                f"accepted={summary['accepted']} elapsed_s={summary['elapsed_s']:.3f}"
-            )
-            write_partial()
+            sequential_steps = []
+            sequential_guess = initial_guess
+            for scale in scale_ladder:
+                step_config = replace(config, shock_scale=float(scale))
+                _log(f"theta={theta_index} starting sequential SEP scale={scale}")
+                summary, stacked, mean_path = _run_sequential(
+                    model=model,
+                    parameters=parameters,
+                    steady_state=steady_state,
+                    deterministic=deterministic,
+                    initial_guess=sequential_guess,
+                    config=step_config,
+                    device=device,
+                )
+                summary["stochastic_shock_scale"] = float(scale)
+                sequential_steps.append(summary)
+                draw["sequential"] = summary
+                draw["sequential_continuation"] = sequential_steps
+                sequential_arrays = (stacked, mean_path)
+                _log(
+                    f"theta={theta_index} sequential scale={scale} "
+                    f"residual={summary['residual_norm']} accepted={summary['accepted']} "
+                    f"elapsed_s={summary['elapsed_s']:.3f}"
+                )
+                write_partial()
+                if not bool(np.asarray(summary["accepted"]).all()):
+                    break
+                sequential_guess = stacked
         if args.solver in {"batched", "both"}:
-            _log(f"theta={theta_index} starting batched SEP with batch_size=1")
-            summary, stacked, mean_path = _run_batched(
-                model=model,
-                parameters=parameters,
-                steady_state=steady_state,
-                deterministic=deterministic,
-                initial_guess=initial_guess,
-                config=config,
-                device=device,
-            )
-            draw["batched"] = summary
-            batched_arrays = (stacked, mean_path)
-            _log(
-                f"theta={theta_index} batched residual={summary['residual_norm']} "
-                f"accepted={summary['accepted']} termination={summary['termination']} "
-                f"elapsed_s={summary['elapsed_s']:.3f}"
-            )
-            write_partial()
+            batched_steps = []
+            batched_guess = initial_guess
+            for scale in scale_ladder:
+                step_config = replace(config, shock_scale=float(scale))
+                _log(
+                    f"theta={theta_index} starting batched SEP "
+                    f"with batch_size=1 scale={scale}"
+                )
+                summary, stacked, mean_path = _run_batched(
+                    model=model,
+                    parameters=parameters,
+                    steady_state=steady_state,
+                    deterministic=deterministic,
+                    initial_guess=batched_guess,
+                    config=step_config,
+                    device=device,
+                )
+                summary["stochastic_shock_scale"] = float(scale)
+                batched_steps.append(summary)
+                draw["batched"] = summary
+                draw["batched_continuation"] = batched_steps
+                batched_arrays = (stacked, mean_path)
+                _log(
+                    f"theta={theta_index} batched scale={scale} "
+                    f"residual={summary['residual_norm']} accepted={summary['accepted']} "
+                    f"termination={summary['termination']} elapsed_s={summary['elapsed_s']:.3f}"
+                )
+                write_partial()
+                if not bool(np.asarray(summary["accepted"]).all()):
+                    break
+                batched_guess = stacked
         if sequential_arrays is not None and batched_arrays is not None:
             draw["sequential_batched_difference"] = _difference_summary(
                 sequential_arrays[0],
@@ -441,6 +480,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--lm-lambda-min", type=float, default=1e-12)
     parser.add_argument("--deterministic-shock", type=float, default=0.12)
     parser.add_argument("--stochastic-shock-scale", type=float, default=1.0)
+    parser.add_argument(
+        "--stochastic-scale-ladder",
+        default="",
+        help="Optional comma-separated continuation ladder ending at the target scale.",
+    )
     parser.add_argument(
         "--output",
         type=Path,
