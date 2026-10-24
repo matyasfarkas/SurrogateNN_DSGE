@@ -3216,6 +3216,14 @@ def _build_batched_hlt_sep_dataset(
     failure_log: list[dict[str, Any]] = []
     residual_values: list[float] = []
     attempted_residual_values: list[float] = []
+    initial_residual_values: list[float] = []
+    iteration_values: list[int] = []
+    final_lambda_values: list[float] = []
+    termination_code_counts = {
+        "max_iterations": 0,
+        "converged": 0,
+        "line_search_failed": 0,
+    }
     batched_calls = 0
     total_chunks = int(math.ceil(n_theta / effective_chunk_size))
     progress_interval = max(1, int(progress_chunk_interval))
@@ -3227,6 +3235,10 @@ def _build_batched_hlt_sep_dataset(
     for period in range(periods):
         accepted = np.zeros((n_theta,), dtype=bool)
         residual_norm = np.full((n_theta,), math.inf, dtype=np.float64)
+        initial_residual_norm = np.full((n_theta,), math.inf, dtype=np.float64)
+        iterations = np.zeros((n_theta,), dtype=np.int32)
+        final_lambda = np.full((n_theta,), math.nan, dtype=np.float64)
+        termination_code = np.zeros((n_theta,), dtype=np.int8)
         next_states = current_states.copy()
         solve_elapsed = 0.0
         period_chunk_calls = 0
@@ -3282,6 +3294,25 @@ def _build_batched_hlt_sep_dataset(
 
             accepted[chunk] = np.asarray(batched_sep.solution.accepted, dtype=bool)
             residual_norm[chunk] = np.asarray(batched_sep.solution.residual_norm, dtype=np.float64)
+            if batched_sep.solution.initial_residual_norm is not None:
+                initial_residual_norm[chunk] = np.asarray(
+                    batched_sep.solution.initial_residual_norm,
+                    dtype=np.float64,
+                )
+            iterations[chunk] = np.asarray(
+                batched_sep.solution.iterations,
+                dtype=np.int32,
+            )
+            if batched_sep.solution.final_lambda is not None:
+                final_lambda[chunk] = np.asarray(
+                    batched_sep.solution.final_lambda,
+                    dtype=np.float64,
+                )
+            if batched_sep.solution.termination_code is not None:
+                termination_code[chunk] = np.asarray(
+                    batched_sep.solution.termination_code,
+                    dtype=np.int8,
+                )
             next_states[chunk] = np.asarray(batched_sep.solution.mean_path[:, :, 1], dtype=np.float64)
             previous_stacked_states[chunk] = np.asarray(
                 batched_sep.solution.stacked_states,
@@ -3320,6 +3351,22 @@ def _build_batched_hlt_sep_dataset(
         period_attempted_residuals = residual_norm[active & np.isfinite(residual_norm)]
         if period_attempted_residuals.size:
             attempted_residual_values.extend(float(value) for value in period_attempted_residuals)
+        initial_residual_values.extend(
+            float(value)
+            for value in initial_residual_norm[active & np.isfinite(initial_residual_norm)]
+        )
+        iteration_values.extend(int(value) for value in iterations[active])
+        final_lambda_values.extend(
+            float(value) for value in final_lambda[active & np.isfinite(final_lambda)]
+        )
+        for code, label in (
+            (0, "max_iterations"),
+            (1, "converged"),
+            (2, "line_search_failed"),
+        ):
+            termination_code_counts[label] += int(
+                np.count_nonzero(active & (termination_code == code))
+            )
 
         shocks_t = shock_array[:, :, period]
         state_dev = current_states[:, state_index] - steady_matrix[:, state_index]
@@ -3344,7 +3391,17 @@ def _build_batched_hlt_sep_dataset(
                         "branching_order": int(config.branching_order),
                         "shock_scale": float(config.shock_scale),
                         "max_iter": int(config.max_iter),
+                        "iterations": int(iterations[theta_idx]),
+                        "initial_residual_norm": _finite_float_or_none(
+                            initial_residual_norm[theta_idx]
+                        ),
                         "residual_norm": _finite_float_or_none(residual_value),
+                        "final_lambda": _finite_float_or_none(final_lambda[theta_idx]),
+                        "termination": {
+                            0: "max_iterations",
+                            1: "converged",
+                            2: "line_search_failed",
+                        }.get(int(termination_code[theta_idx]), "unknown"),
                         "accepted": bool(accepted[theta_idx]),
                         "finite_next_state": bool(finite_next[theta_idx]),
                         "finite_rom_state": bool(rom_finite[theta_idx]),
@@ -3412,6 +3469,10 @@ def _build_batched_hlt_sep_dataset(
                 "terminal_selected_draws": int(terminal_guess_selected_draws),
             },
             "attempted_residual_summary": _finite_quantile_summary(attempted_residual_values),
+            "initial_residual_summary": _finite_quantile_summary(initial_residual_values),
+            "iteration_summary": _finite_quantile_summary(iteration_values),
+            "final_lambda_summary": _finite_quantile_summary(final_lambda_values),
+            "termination_code_counts": termination_code_counts,
             "sep_config": {
                 "periods": int(config.periods),
                 "branching_order": int(config.branching_order),
@@ -3461,6 +3522,10 @@ def _build_batched_hlt_sep_dataset(
         "residual_norm_mean": _finite_float_or_none(np.nanmean(residual_array)) if residual_array.size else None,
         "residual_norm_max": _finite_float_or_none(np.nanmax(residual_array)) if residual_array.size else None,
         "attempted_residual_summary": _finite_quantile_summary(attempted_residual_values),
+        "initial_residual_summary": _finite_quantile_summary(initial_residual_values),
+        "iteration_summary": _finite_quantile_summary(iteration_values),
+        "final_lambda_summary": _finite_quantile_summary(final_lambda_values),
+        "termination_code_counts": termination_code_counts,
         "failure_log": failure_log,
         "shifted_path_warm_start": {
             "requested": bool(shifted_path_warm_start),

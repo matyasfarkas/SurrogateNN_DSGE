@@ -1169,6 +1169,14 @@ def test_batched_hlt_sep_dataset_matches_single_config_adaptive_builder() -> Non
     assert batched_diag["builder"] == "batched_sep"
     assert batched_diag["batched_calls"] == shocks.shape[2]
     assert batched_diag["memory_estimate"]["stacked_unknowns"] == 6
+    assert batched_diag["initial_residual_summary"]["count"] == 4
+    assert batched_diag["iteration_summary"]["count"] == 4
+    assert batched_diag["final_lambda_summary"]["count"] == 4
+    assert batched_diag["termination_code_counts"] == {
+        "max_iterations": 0,
+        "converged": 4,
+        "line_search_failed": 0,
+    }
     assert chunked_diag["batch_chunk_size"] == 1
     assert chunked_diag["batched_calls"] == shocks.shape[2] * theta.shape[1]
     assert chunked_diag["memory_estimate"]["chunk_size"] == 1

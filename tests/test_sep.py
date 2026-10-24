@@ -736,6 +736,88 @@ def test_batched_sep_retries_lm_damping_within_outer_iteration() -> None:
     assert np.asarray(solution.residual_norm, dtype=np.float64)[0] < 3.98
 
 
+def test_batched_qr_damping_matches_sequential_iterations() -> None:
+    deterministic = jnp.zeros((1, 1), dtype=jnp.float64)
+
+    def residual(y_prev, y_curr, y_next, shock, params):
+        del y_prev, y_next, shock, params
+        return y_curr**2 - 4.0
+
+    config = SEPConfig(
+        periods=1,
+        branching_order=0,
+        nnodes=1,
+        max_iter=2,
+        tol=1e-14,
+        accept_tol=10.0,
+        linear_solver="qr",
+        newton_regularization=1.0,
+        line_search=True,
+    )
+    sequential = solve_stochastic_extended_path_residual_expectation(
+        residual,
+        initial_state=jnp.zeros((1,), dtype=jnp.float64),
+        terminal_state=jnp.zeros((1,), dtype=jnp.float64),
+        shock_dim=1,
+        deterministic_shocks=deterministic,
+        initial_guess=jnp.asarray([[0.1]], dtype=jnp.float64),
+        config=config,
+    )
+    batched = solve_batched_stochastic_extended_path_residual_expectation(
+        residual,
+        initial_state=jnp.zeros((1, 1), dtype=jnp.float64),
+        terminal_state=jnp.zeros((1,), dtype=jnp.float64),
+        shock_dim=1,
+        deterministic_shocks=deterministic[None, ...],
+        initial_guess=jnp.asarray([[[0.1]]], dtype=jnp.float64),
+        config=config,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(batched.stacked_states[0], dtype=np.float64),
+        np.asarray(sequential.stacked_states, dtype=np.float64),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(batched.final_lambda, dtype=np.float64),
+        np.asarray([config.newton_regularization], dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_batched_sep_records_unrecoverable_line_search_failure() -> None:
+    def constant_residual(y_prev, y_curr, y_next, shock, params):
+        del y_prev, y_curr, y_next, shock, params
+        return jnp.ones((1,), dtype=jnp.float64)
+
+    solution = solve_batched_stochastic_extended_path_residual_expectation(
+        constant_residual,
+        initial_state=jnp.zeros((1, 1), dtype=jnp.float64),
+        terminal_state=jnp.zeros((1,), dtype=jnp.float64),
+        shock_dim=1,
+        deterministic_shocks=jnp.zeros((1, 1, 1), dtype=jnp.float64),
+        config=SEPConfig(
+            periods=1,
+            branching_order=0,
+            nnodes=1,
+            max_iter=5,
+            tol=1e-12,
+            accept_tol=1e-8,
+        ),
+    )
+
+    np.testing.assert_array_equal(
+        np.asarray(solution.termination_code, dtype=np.int8),
+        np.asarray([2], dtype=np.int8),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(solution.iterations, dtype=np.int32),
+        np.asarray([0], dtype=np.int32),
+    )
+
+
 def test_batched_sep_selects_lowest_residual_initial_guess_per_draw() -> None:
     deterministic_shocks = jnp.zeros((3, 1, 1), dtype=jnp.float64)
 
@@ -769,6 +851,12 @@ def test_batched_sep_selects_lowest_residual_initial_guess_per_draw() -> None:
     np.testing.assert_array_equal(
         np.asarray(solution.iterations, dtype=np.int32),
         np.asarray([0, 0, 0], dtype=np.int32),
+    )
+    np.testing.assert_allclose(
+        np.asarray(solution.initial_residual_norm, dtype=np.float64),
+        np.zeros((3,), dtype=np.float64),
+        rtol=0.0,
+        atol=0.0,
     )
     np.testing.assert_allclose(
         np.asarray(solution.stacked_states, dtype=np.float64),

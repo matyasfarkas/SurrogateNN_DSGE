@@ -46,6 +46,11 @@ class BatchedSEPSolution(NamedTuple):
     # 2 = fallback_initial_guess.  None is retained for compatibility with
     # externally constructed fixtures that predate initial-guess diagnostics.
     initial_guess_source: Optional[jax.Array] = None
+    # Per-draw diagnostics. termination_code uses 0=max iterations,
+    # 1=converged, and 2=no finite improving LM/line-search step.
+    initial_residual_norm: Optional[jax.Array] = None
+    final_lambda: Optional[jax.Array] = None
+    termination_code: Optional[jax.Array] = None
 
 
 class _SEPTreeMetadata(NamedTuple):
@@ -1312,6 +1317,11 @@ def solve_batched_stochastic_extended_path_residual_expectation(
             primary_residual_norm <= selected_residual_norm
         )
         guess = jnp.where(use_primary_guess[:, None], primary_guess, guess)
+        selected_residual_norm = jnp.where(
+            use_primary_guess,
+            primary_residual_norm,
+            selected_residual_norm,
+        )
         initial_guess_source = jnp.where(
             use_primary_guess,
             jnp.asarray(1, dtype=jnp.int8),
@@ -1333,6 +1343,8 @@ def solve_batched_stochastic_extended_path_residual_expectation(
     current = guess
     current_lambda = jnp.full((batch_size,), float(config.newton_regularization), dtype=jnp.float64)
     iterations = jnp.zeros((batch_size,), dtype=jnp.int32)
+    solver_active = jnp.ones((batch_size,), dtype=bool)
+    termination_code = jnp.zeros((batch_size,), dtype=jnp.int8)
     accept_threshold = config.tol if config.accept_tol is None else float(config.accept_tol)
     lambda_retry_count = max(
         1,
@@ -1351,7 +1363,16 @@ def solve_batched_stochastic_extended_path_residual_expectation(
     for _ in range(1, config.max_iter + 1):
         residual = eval_residual(current)
         residual_norm = jnp.max(jnp.abs(residual), axis=1)
-        active = residual_norm >= float(config.tol)
+        converged_now = solver_active & (residual_norm < float(config.tol))
+        termination_code = jnp.where(
+            converged_now,
+            jnp.asarray(1, dtype=jnp.int8),
+            termination_code,
+        )
+        solver_active = solver_active & (~converged_now)
+        active = solver_active
+        if not bool(np.any(np.asarray(active))):
+            break
         jacobian = eval_jacobian(current)
 
         candidate = current
@@ -1379,6 +1400,8 @@ def solve_batched_stochastic_extended_path_residual_expectation(
                     candidate_norm = jnp.where(improving, trial_norm, candidate_norm)
                     accepted_lambda = jnp.where(improving, trial_lambda, accepted_lambda)
                     accepted_step = accepted_step | improving
+                    if not bool(np.any(np.asarray(active & (~accepted_step)))):
+                        break
             else:
                 trial = current + step
                 trial_residual = eval_residual(trial)
@@ -1392,6 +1415,8 @@ def solve_batched_stochastic_extended_path_residual_expectation(
                 candidate_norm = jnp.where(accepted_now, trial_norm, candidate_norm)
                 accepted_lambda = jnp.where(accepted_now, trial_lambda, accepted_lambda)
                 accepted_step = accepted_step | accepted_now
+            if not bool(np.any(np.asarray(active & (~accepted_step)))):
+                break
             trial_lambda = jnp.where(
                 pending & (~accepted_step),
                 jnp.minimum(trial_lambda * float(config.lm_lambda_scale), float(config.lm_lambda_max)),
@@ -1400,21 +1425,39 @@ def solve_batched_stochastic_extended_path_residual_expectation(
 
         current = jnp.where(active[:, None], candidate, current)
         iterations = iterations + (active & accepted_step).astype(jnp.int32)
-        current_lambda = jnp.where(
-            active & accepted_step & (candidate_norm < residual_norm),
-            jnp.maximum(accepted_lambda / float(config.lm_lambda_scale), float(config.lm_lambda_min)),
-            current_lambda,
-        )
+        if config.linear_solver == "normal_equations":
+            current_lambda = jnp.where(
+                active & accepted_step & (candidate_norm < residual_norm),
+                jnp.maximum(
+                    accepted_lambda / float(config.lm_lambda_scale),
+                    float(config.lm_lambda_min),
+                ),
+                current_lambda,
+            )
         current_lambda = jnp.where(
             active & (~accepted_step),
             trial_lambda,
             current_lambda,
         )
+        line_search_failed = active & (~accepted_step)
+        termination_code = jnp.where(
+            line_search_failed,
+            jnp.asarray(2, dtype=jnp.int8),
+            termination_code,
+        )
+        solver_active = solver_active & (~line_search_failed)
+        if not bool(np.any(np.asarray(solver_active))):
+            break
 
     final_residual = eval_residual(current)
     residual_norm = jnp.max(jnp.abs(final_residual), axis=1)
     converged = residual_norm < float(config.tol)
     accepted = jnp.isfinite(residual_norm) & (residual_norm <= float(accept_threshold))
+    termination_code = jnp.where(
+        converged,
+        jnp.asarray(1, dtype=jnp.int8),
+        termination_code,
+    )
 
     states_by_time_batch = unflatten_batch(current)
     mean_path_blocks = [initial_state_arr]
@@ -1432,6 +1475,9 @@ def solve_batched_stochastic_extended_path_residual_expectation(
         group_counts=counts,
         jacobian_method="autodiff",
         initial_guess_source=initial_guess_source,
+        initial_residual_norm=selected_residual_norm,
+        final_lambda=current_lambda,
+        termination_code=termination_code,
     )
 
 
