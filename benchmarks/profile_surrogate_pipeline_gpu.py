@@ -3231,6 +3231,10 @@ def _build_batched_hlt_sep_dataset(
     def log_failure(row: dict[str, Any]) -> None:
         if len(failure_log) < int(max_logged_failures):
             failure_log.append(row)
+            _progress(
+                "batched HLT SEP failure "
+                + json.dumps(_jsonable(row), sort_keys=True)
+            )
 
     for period in range(periods):
         accepted = np.zeros((n_theta,), dtype=bool)
