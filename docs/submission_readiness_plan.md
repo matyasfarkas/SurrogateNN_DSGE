@@ -26,7 +26,12 @@ publication run with that flag cannot satisfy the clean-revision gate.
 ### Experiment A: two-parameter correctness reference
 
 1. Freeze the priors, synthetic data, observables, shock scaling, SEP
-   configuration, training design, and case identifiers.
+   configuration, training design, and case identifiers. Generate the data from
+   a clean revision with `benchmarks/generate_gali_synthetic_data.py`; the
+   artifact records the two random seeds, burn-in, initial condition, complete
+   shock and measurement-error paths, resolved parameters, solver diagnostics,
+   and content hashes. The `eps_*` innovations have unit variance because the
+   model equations already apply `std_a`, `std_nu`, and `std_z`.
 2. Generate positive-order stochastic-SEP targets with multiple quadrature
    nodes and nonzero variation in every shock dimension.
 3. Keep an untouched parameter-group test partition. Disable residual-shrinkage

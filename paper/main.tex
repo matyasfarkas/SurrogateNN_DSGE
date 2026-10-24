@@ -31,8 +31,12 @@ the complete 23-equation Gal\'i model, preserved deterministic pilots solve 80
 targets with maximum residual $9.92\times10^{-9}$, improve calibration-set
 error over the first-order model by 53.9 percent, and match Python and JAX
 evaluations within $1.71\times10^{-13}$. These results establish software
-feasibility, not posterior fidelity or speed. The paper therefore couples the
-method with frozen gates for stochastic-solution accuracy, independent parity,
+feasibility, not posterior fidelity or speed. A separate provenance-captured
+order-one, three-node stochastic pilot completed only three of eight parameter
+paths; five designs, including the reference calibration, failed at the first
+simulated period. This negative result identifies nonlinear-solver robustness
+and dense-QR cost as binding constraints. The paper therefore couples the method
+with frozen gates for stochastic-solution accuracy, independent parity,
 untouched test performance, posterior agreement, multichain sampling, and
 same-work timing.
 \end{abstract}
@@ -67,6 +71,14 @@ state error relative to the ROM after per-output shrinkage is fitted on that
 same block. The last number is not an untouched test result, the HMC budgets are
 not convergence evidence, and no preserved run yet establishes a nonlinear
 posterior speed advantage.
+
+The first stochastic positive-order pilot is deliberately retained despite
+failing its hard gate. Only three of eight parameter paths completed a
+ten-period, order-one, three-node calculation, while five paths failed at the
+initial simulated period. Because those failures include the reference
+calibration, the result rules out scaling directly to a long posterior run. It
+also illustrates why failure denominators and negative runs are part of the
+method rather than incidental logging.
 
 The paper makes three contributions. First, it separates three objects often
 conflated in surrogate estimation: nonlinear trajectories used as labels, a
@@ -206,7 +218,8 @@ The preserved software fixture contains ten synthetic observations of log
 output, annualized inflation, and the annualized nominal interest rate. The
 measurement standard deviation is 0.01 for each observable. The three declared
 structural shocks are technology, monetary-policy, and preference shocks, with
-model innovation scales 0.01, 0.0025, and 0.05. These observations are useful
+model innovation scales 0.01, 0.0025, and 0.05 multiplying unit-variance
+innovations inside the equilibrium equations. These observations are useful
 for testing the inversion and sampling stack; they are not an empirical data
 application. The confirmatory experiment freezes a documented data-generating
 parameter, simulation seed, burn-in, initial condition, and shock path before
@@ -450,6 +463,8 @@ source of manuscript tables; hand-entered numerical cells are not permitted.
 
 \input{generated/pilot_results.tex}
 
+\input{generated/stochastic_pilot_results.tex}
+
 The pilot establishes three narrow facts. The parser, parameter-specific
 preflight, nonlinear equation solver, residual network, likelihood, and sampler
 compose on the full model. The order-zero extended-path targets satisfy a strict
@@ -464,6 +479,18 @@ possible under a tiny budget. It retained four draws in total, achieved 100
 percent acceptance, and processed 0.0267 draws per second. Those numbers are not
 convergence evidence and are not a speed advantage. The acceptance rate instead
 suggests that the static-HMC tuning is far from an efficient production regime.
+
+The first provenance-captured positive-order run is a useful negative result.
+With branching order one, three quadrature nodes, and a ten-period planning
+horizon, only three of eight parameter designs completed all ten periods. Five
+designs---including the reference calibration---failed the nonlinear solve at
+the first simulated period. The 30 accepted targets satisfied the residual
+tolerance, but the strict full-path gate correctly failed. The run took 119.6
+minutes, roughly 12 minutes per simulated period, on an RTX 4080 SUPER. This
+combination of localized first-period failures and high dense-QR cost rejects a
+simple ``more GPU memory is sufficient'' interpretation. It instead motivates
+continuation methods, solver-level early stopping, and a frozen correctness
+study before any large posterior exercise.
 
 \section{Claim-specific decision rules}
 
@@ -482,13 +509,18 @@ a missing observation or silently omitted path.
 
 \section{Limitations and interpretation}
 
-The preserved evidence is an engineering pilot. Its nonlinear targets use
-branching order zero and one node, so it does not validate stochastic
-expectations. Most likelihood calls hold the reference steady state and ROM
-fixed. Its reported surrogate RMSE is calibration-adjusted rather than measured
-on an untouched test partition. The parameter-dependent full-JAX run still targets the surrogate profile
+The preserved evidence is an engineering pilot. The earlier nonlinear targets
+use branching order zero and one node, so they do not validate stochastic
+expectations. The later order-one, three-node run fails its strict full-path
+gate and therefore supplies a numerical failure diagnosis, not a replacement
+validation result. Most likelihood calls hold the reference steady state and
+ROM fixed. The reported surrogate RMSE values are calibration-adjusted rather
+than measured on an untouched test partition. The parameter-dependent full-JAX run still targets the surrogate profile
 inversion objective, assigns a finite $-10^{12}$ sentinel to failed solves, and
-uses a host-callback Schur solve. An exact structural posterior instead requires
+uses a host-callback Schur solve. Its archived payload also duplicated the
+equation-level innovation scales in the inversion prior; this was corrected to
+unit-variance standardized innovations for future evidence runs. An exact
+structural posterior instead requires
 explicit support handling and an economically defined likelihood. The sampler
 budgets are too small for convergence diagnostics, the data are synthetic and short,
 and no independent Julia trajectory or likelihood comparison is yet archived.
@@ -509,8 +541,10 @@ first-order model provides a disciplined baseline and the network concentrates
 on the nonlinear discrepancy. Target-corrected HMC can remove error from the
 trajectory force, but only relative to the density actually evaluated at the
 Metropolis endpoints. The preserved Gal\'i pilot shows that the software path is
-feasible and reveals where apparently favorable diagnostics can overstate the
-evidence. Publication readiness depends on stochastic-SEP validation, an
+feasible, while the failed positive-order pilot reveals where nonlinear-solver
+robustness and dense linear algebra prevent escalation. Together the runs show
+how apparently favorable diagnostics can overstate the evidence. Publication
+readiness depends on stochastic-SEP validation, an
 untouched test design, an independently converged nonlinear posterior reference,
 cross-language parity, efficient multi-chain sampling, and same-work timing.
 The accompanying protocol makes those requirements falsifiable and preserves

@@ -1,0 +1,115 @@
+{
+  "diagnostics": {
+    "hmc_acceptance": 1.0,
+    "hmc_chains": 1,
+    "hmc_draws_per_second": 7.244153911270005,
+    "hmc_retained_draws": 50,
+    "hmc_warmup": 25,
+    "reported_validation_improvement": 0.923693519234094,
+    "reported_validation_rmse": 0.00037970144008490735,
+    "same_object_python_jax_parity_abs_diff": 3.097966327914037e-12,
+    "steady_state_fallbacks": 0,
+    "steady_states_solved": 8,
+    "validation_is_untouched": false
+  },
+  "evidence_level": "engineering_pilot_negative_result",
+  "interpretation": {
+    "not_supported": [
+      "publication-ready estimation evidence",
+      "an exact nonlinear posterior",
+      "out-of-sample surrogate accuracy",
+      "HMC convergence or efficiency",
+      "the claim that additional GPU memory alone resolves the bottleneck"
+    ],
+    "supported": [
+      "The full equation source, nonlinear steady states, stochastic SEP target builder, surrogate, likelihood implementation, and HMC smoke path compose on a GPU.",
+      "All eight parameter-specific steady states solved without fallback.",
+      "The strict full-path gate exposed a localized nonlinear-solver robustness failure rather than silently dropping failed parameter paths."
+    ]
+  },
+  "known_design_defects": [
+    {
+      "effect": "The archived likelihood payload applied innovation-scale parameters both inside the model equations and again as shock-prior standard deviations.",
+      "id": "double_scaled_innovation_prior"
+    },
+    {
+      "effect": "Per-output residual shrinkage was calibrated on the reported validation block, so its RMSE and improvement are calibration diagnostics only.",
+      "id": "validation_shrinkage_leakage"
+    }
+  ],
+  "model": {
+    "equations": 23,
+    "estimated_parameters": [
+      "\u03d5\u1d56\u2071",
+      "\u03d5\u02b8"
+    ],
+    "name": "Gali_2015_chapter_3_nonlinear",
+    "parameters": 16
+  },
+  "provenance": {
+    "clean_worktree": true,
+    "commit": "4a06f14dc7bc15d65e80c5698191602e2db8bab2",
+    "completed_at_utc": "2026-10-23T23:55:14.688967+00:00",
+    "exit_code": 1,
+    "gpu": "NVIDIA GeForce RTX 4080 SUPER, GPU-abfdab81-0332-e8ce-3ef9-26e370f68fd9, 595.71.05, 32760",
+    "manifest_status": "failed",
+    "prepared_at_utc": "2026-10-23T21:55:04.304829+00:00",
+    "sources": [
+      {
+        "name": "run_manifest.json",
+        "sha256": "76c13240f5c08c73385f0c62dd15e50f8e6c8ed8bd2d9293e2ce03d22e678f86"
+      },
+      {
+        "name": "result.json",
+        "sha256": "12b2b03d16a069aae3fecb31aa0dbe3642cbcc4ee2b17780f1be541c7b7140f8",
+        "size_bytes": 24236
+      },
+      {
+        "name": "posterior_draws.npz",
+        "sha256": "735b58a9f99655299fc0ddf165ccbc71a7ebd6475094be81825390d5751783f2",
+        "size_bytes": 2112
+      },
+      {
+        "name": "surrogate_bundle.snn.npz",
+        "sha256": "0d414dcb21b3c86874e1a7a1cc62bb5b0eef099037ae3d8f47a392b8fc4e3c4f",
+        "size_bytes": 102319
+      },
+      {
+        "name": "run.log",
+        "sha256": "3574e99b675b0bbacaa1296f35a95b55d276e3a28fdddf3419b15a6eb4a824b7",
+        "size_bytes": 28913
+      },
+      {
+        "name": "gali_stochastic_sep_pilot_20261023T215504Z.tar.gz",
+        "sha256": "af66ecdf3ecaab16e28babe78f03ef617d2e523841aaebd811c38514f319fff3",
+        "size_bytes": 118586
+      }
+    ]
+  },
+  "publication_ready": false,
+  "quality_gate": {
+    "issues": [
+      "Not all runtime-prepared theta draws generated full SEP paths (3/8).",
+      "Full-path theta share below gate: 0.375 < 1."
+    ],
+    "status": "failed"
+  },
+  "schema_version": "surrogatenn-dsge-stochastic-pilot-evidence/v1",
+  "solver": {
+    "accepted_residual_max": 9.41018285516293e-09,
+    "accepted_targets": 30,
+    "branching_order": 1,
+    "expected_targets": 80,
+    "first_period_failures": 5,
+    "full_path_share": 0.375,
+    "full_paths": 3,
+    "pipeline_seconds": 7178.9517588522285,
+    "planning_horizon": 10,
+    "quadrature_nodes": 3,
+    "reference_path_failed": true,
+    "rough_dense_workspace_gib": 2.544161796569824,
+    "shifted_path_warm_start_supported": false,
+    "stacked_unknowns": 1886,
+    "theta_draws": 8
+  }
+}

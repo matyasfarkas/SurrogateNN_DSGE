@@ -49,9 +49,15 @@
       },
       "shock_names": ["eps_a", "eps_nu", "eps_z"],
       "shock_sigmas": {
-        "eps_a": 0.01,
-        "eps_nu": 0.0025,
-        "eps_z": 0.05
+        "eps_a": 1.0,
+        "eps_nu": 1.0,
+        "eps_z": 1.0
+      },
+      "shock_scale_convention": "standard_normal_innovations_scaled_in_model_equations",
+      "model_innovation_scale_parameters": {
+        "eps_a": "std_a",
+        "eps_nu": "std_nu",
+        "eps_z": "std_z"
       },
       "parameter_subset": ["ϕᵖⁱ", "ϕʸ"],
       "reference_steady_state": [

@@ -58,6 +58,36 @@ The runner then requires JAX to expose a GPU. Batched SEP is the principal
 accelerated workload; its theta chunk can be controlled in the underlying
 profile command if device memory is limited.
 
+## Freeze confirmatory synthetic data
+
+The original pilot payload duplicated the equation-level `std_a`, `std_nu`,
+and `std_z` scales in the inversion prior. The corrected payload treats
+`eps_a`, `eps_nu`, and `eps_z` as unit-variance innovations because the full
+nonlinear equations already apply those scale parameters. Archived pilots
+remain useful only for software feasibility and Python/JAX parity of the same
+mis-scaled objective.
+
+Generate the confirmatory synthetic-data artifact only from a clean revision:
+
+```bash
+.venv/bin/python benchmarks/generate_gali_synthetic_data.py \
+  --periods 100 \
+  --burn-in 50 \
+  --output benchmarks/data/gali_full_nonlinear_confirmatory_v1.json
+```
+
+The generator records the exact parameter vector, steady state, independent
+shock and measurement seeds, all latent innovations, burn-in states, retained
+observations, SEP diagnostics, Git revision, dirty-worktree state, and content
+hashes. Use the frozen artifact without editing it:
+
+```bash
+GALI_PAYLOAD=benchmarks/data/gali_full_nonlinear_confirmatory_v1.json \
+GALI_CASE_NAME=gali_full_nonlinear_confirmatory_v1 \
+DEVICE=gpu PYTHON=.venv/bin/python \
+bash benchmarks/run_nonlinear_gali_pilot.sh
+```
+
 ## What the first pilot does and does not establish
 
 The default likelihood and HMC stage uses a fixed steady state and fixed

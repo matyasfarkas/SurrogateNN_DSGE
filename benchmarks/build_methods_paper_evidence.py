@@ -295,6 +295,7 @@ def build_evidence(suite_root: Path) -> dict[str, Any]:
         "claim_ledger": claims,
         "hard_blockers": [
             "A frozen, reproducible synthetic-data generator with recorded seed, burn-in, initial condition, and data-generating parameters.",
+            "Standardized innovation variances consistent with the model equations; archived pilots duplicated equation-level shock scales in the inversion prior.",
             "Independent MacroModelling.jl trajectory and likelihood comparisons.",
             "Positive-order stochastic SEP with multiple quadrature nodes and all shocks active.",
             "An untouched test split; residual-shrinkage calibration must use a separate partition or be disabled.",
@@ -367,7 +368,7 @@ Run & Target runtime & $N_\theta \times T$ & Max. residual & Calib. RMSE & Corre
 \end{{tabular}}
 
 \vspace{{0.4em}}
-\parbox{{0.98\textwidth}}{{\footnotesize\textit{{Notes:}} All runs use the complete 23-equation nonlinear Galí source but estimate only two policy-rule parameters. $N_\theta$ is the number of parameter vectors and $T$ is the observation horizon. Target construction used branching order zero and one node, so these are deterministic nonlinear extended-path pilots, not stochastic-expectations SEP validation. The reported calibration RMSE is computed on the parameter block also used to fit per-output residual-shrinkage factors; it is not an untouched test error. ``Full-JAX'' recomputes the parameter-dependent steady state and first-order ROM inside the surrogate profile inversion objective. It does not evaluate a full nonlinear SEP likelihood inside HMC. Correction therefore targets the declared surrogate objective, not an exact full-nonlinear posterior. The quick, corrected-resource, and default runs use respectively 1, 2, and 1 chains with 2, 2, and 50 post-warmup draws per chain. These runs establish execution and resource feasibility only.}}
+\parbox{{0.98\textwidth}}{{\footnotesize\textit{{Notes:}} All runs use the complete 23-equation nonlinear Galí source but estimate only two policy-rule parameters. $N_\theta$ is the number of parameter vectors and $T$ is the observation horizon. Target construction used branching order zero and one node, so these are deterministic nonlinear extended-path pilots, not stochastic-expectations SEP validation. The reported calibration RMSE is computed on the parameter block also used to fit per-output residual-shrinkage factors; it is not an untouched test error. The archived likelihood payload also duplicated equation-level innovation scales in the shock prior. ``Full-JAX'' recomputes the parameter-dependent steady state and first-order ROM inside the surrogate profile inversion objective. It does not evaluate a full nonlinear SEP likelihood inside HMC. Correction therefore targets the declared surrogate objective, not an exact full-nonlinear posterior. The quick, corrected-resource, and default runs use respectively 1, 2, and 1 chains with 2, 2, and 50 post-warmup draws per chain. These runs establish execution and resource feasibility only.}}
 \end{{table}}
 """
 

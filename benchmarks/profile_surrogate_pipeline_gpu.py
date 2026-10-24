@@ -190,6 +190,58 @@ def _hlt_runtime_parameters_from_steady_state_result(
     return candidate, True, max_delta
 
 
+def _validate_gali_standardized_innovations(model: Any, case: Mapping[str, Any]) -> None:
+    """Reject a Galí payload that applies equation-level shock scales twice.
+
+    The nonlinear Galí source writes, for example, ``std_a * eps_a[x]``.  The
+    exogenous ``eps_*`` values are therefore standardized innovations.  The
+    inversion likelihood's ``shock_sigmas`` field describes those innovations,
+    not the already-embedded ``std_*`` parameters.
+    """
+
+    if str(getattr(model, "name", "")) != "Gali_2015_chapter_3_nonlinear":
+        return
+    expected_convention = "standard_normal_innovations_scaled_in_model_equations"
+    convention = str(case.get("shock_scale_convention", ""))
+    if convention != expected_convention:
+        raise ValueError(
+            "The nonlinear Galí payload must declare shock_scale_convention="
+            f"{expected_convention!r}; got {convention!r}."
+        )
+    shock_names = tuple(str(name) for name in case.get("shock_names", ()))
+    model_shocks = tuple(str(name) for name in model.timings.exo)
+    if shock_names != model_shocks:
+        raise ValueError(
+            "The nonlinear Galí payload shock_names must match model exogenous "
+            f"innovations in order: payload={shock_names}, model={model_shocks}."
+        )
+    shock_sigmas = {str(name): float(value) for name, value in dict(case["shock_sigmas"]).items()}
+    nonstandard = {
+        name: shock_sigmas.get(name)
+        for name in shock_names
+        if name not in shock_sigmas or not math.isclose(shock_sigmas[name], 1.0, rel_tol=0.0, abs_tol=0.0)
+    }
+    if nonstandard:
+        raise ValueError(
+            "The nonlinear Galí equations already apply std_a/std_nu/std_z; "
+            "shock_sigmas must be 1.0 for standardized eps innovations. "
+            f"Invalid values: {nonstandard}."
+        )
+    scale_parameters = {
+        str(shock): str(parameter)
+        for shock, parameter in dict(case.get("model_innovation_scale_parameters", {})).items()
+    }
+    if set(scale_parameters) != set(shock_names):
+        raise ValueError(
+            "model_innovation_scale_parameters must map every Galí shock exactly once."
+        )
+    missing_parameters = sorted(set(scale_parameters.values()) - set(model.parameter_names))
+    if missing_parameters:
+        raise ValueError(
+            "Unknown Galí model innovation-scale parameters: " + ", ".join(missing_parameters)
+        )
+
+
 def _finite_quantile_summary(values: Sequence[float]) -> dict[str, float | None]:
     array = np.asarray(values, dtype=np.float64).reshape(-1)
     array = array[np.isfinite(array)]
@@ -3652,6 +3704,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
     parse_s = time.perf_counter() - started
     _progress(f"parsed HLT model in {parse_s:.3f}s")
     model_name = str(model.name)
+    _validate_gali_standardized_innovations(model, case)
     result_kind = (
         "actual_nonlinear_gali_surrogate_pipeline"
         if model_name == "Gali_2015_chapter_3_nonlinear"

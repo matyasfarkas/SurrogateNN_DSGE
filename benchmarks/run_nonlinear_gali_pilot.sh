@@ -16,13 +16,15 @@ GALI_SEP_ORDER="${GALI_SEP_ORDER:-1}"
 GALI_SEP_NNODES="${GALI_SEP_NNODES:-3}"
 GALI_SEED="${GALI_SEED:-20261019}"
 GALI_HMC_SEED="${GALI_HMC_SEED:-20261023}"
+GALI_PAYLOAD="${GALI_PAYLOAD:-benchmarks/gali_nonlinear_pilot_payload.json}"
+GALI_CASE_NAME="${GALI_CASE_NAME:-gali_full_nonlinear_reduced_pilot}"
 
 ARGS=(
   --mode hlt-fixed-ss-smoke
   --device "$DEVICE"
   --hlt-model-source benchmarks/model_sources/Gali_2015_chapter_3_nonlinear.jl
-  --hlt-payload benchmarks/gali_nonlinear_pilot_payload.json
-  --hlt-case-name gali_full_nonlinear_reduced_pilot
+  --hlt-payload "$GALI_PAYLOAD"
+  --hlt-case-name "$GALI_CASE_NAME"
   --hlt-parameter-set payload
   --hlt-theta-design perturbation
   --hlt-theta-include-reference
@@ -108,7 +110,7 @@ MANIFEST_PRE_ARGS=(
   --input benchmarks/run_nonlinear_gali_pilot.sh
   --input benchmarks/profile_surrogate_pipeline_gpu.py
   --input benchmarks/model_sources/Gali_2015_chapter_3_nonlinear.jl
-  --input benchmarks/gali_nonlinear_pilot_payload.json
+  --input "$GALI_PAYLOAD"
   --seed "design=$GALI_SEED"
   --seed "hmc=$GALI_HMC_SEED"
 )

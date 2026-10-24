@@ -204,6 +204,28 @@ def test_residual_shrinkage_calibration_can_be_disabled_for_honest_holdout() -> 
     assert evidence_args.calibrate_residual_shrinkage is False
 
 
+def test_gali_payload_uses_standardized_innovations_without_double_scaling() -> None:
+    mod = _load_profile_module()
+    root = Path(__file__).resolve().parents[1]
+    case = mod._load_hlt_payload_case(
+        SimpleNamespace(
+            hlt_payload=root / "benchmarks" / "gali_nonlinear_pilot_payload.json",
+            hlt_case_name="gali_full_nonlinear_reduced_pilot",
+        )
+    )
+    model = mod.parse_macro_model(
+        (root / "benchmarks" / "model_sources" / "Gali_2015_chapter_3_nonlinear.jl").read_text()
+    )
+
+    mod._validate_gali_standardized_innovations(model, case)
+    assert set(case["shock_sigmas"].values()) == {1.0}
+
+    invalid = dict(case)
+    invalid["shock_sigmas"] = {**case["shock_sigmas"], "eps_a": 0.01}
+    with pytest.raises(ValueError, match="already apply std_a"):
+        mod._validate_gali_standardized_innovations(model, invalid)
+
+
 def test_hlt_surrogate_bundle_path_defaults_to_output_stem(tmp_path) -> None:
     mod = _load_profile_module()
     output = tmp_path / "hlt_debug.json"
