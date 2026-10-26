@@ -975,6 +975,168 @@ def test_hlt_batched_sep_dense_memory_estimate_matches_hlt_shape() -> None:
     assert estimate["rough_chunk_workspace_gib"] > 30.0
 
 
+def test_batched_sep_continuation_scale_validation() -> None:
+    mod = _load_profile_module()
+
+    assert mod._validate_batched_sep_continuation_scales("", target_scale=1.0) == ()
+    assert mod._validate_batched_sep_continuation_scales((), target_scale=1.0) == ()
+    assert mod._validate_batched_sep_continuation_scales("1.0", target_scale=1.0) == ()
+    assert mod._validate_batched_sep_continuation_scales(
+        "0.25,0.5,1.0",
+        target_scale=1.0,
+    ) == (0.25, 0.5, 1.0)
+    with pytest.raises(ValueError, match="strictly increasing"):
+        mod._validate_batched_sep_continuation_scales("0.5,0.25,1.0", target_scale=1.0)
+    with pytest.raises(ValueError, match="must end"):
+        mod._validate_batched_sep_continuation_scales("0.25,0.5", target_scale=1.0)
+
+
+def test_batched_sep_continuation_retries_only_failed_draws(monkeypatch) -> None:
+    mod = _load_profile_module()
+    model = mod.parse_macro_model(
+        """
+        @model continuation_retry begin
+            y[0] = rho * y[-1] + u[x]
+        end
+
+        @parameters continuation_retry begin
+            rho = 0.25
+        end
+        """
+    )
+    call_history = []
+    converge_intermediate = [True]
+
+    def fake_solve(
+        _model,
+        *,
+        parameter_values,
+        steady_state,
+        initial_state,
+        terminal_state,
+        config,
+        deterministic_shocks,
+        initial_guess,
+        fallback_to_default_initial_guess,
+    ):
+        del _model, parameter_values, steady_state, terminal_state, initial_guess
+        del fallback_to_default_initial_guess
+        batch = int(np.asarray(initial_state).shape[0])
+        scale = float(config.shock_scale)
+        call_history.append((batch, scale))
+        accepted = np.ones((batch,), dtype=bool)
+        if batch == 2 and np.isclose(scale, 1.0):
+            accepted[1] = False
+        converged = accepted.copy()
+        if batch == 1 and np.isclose(scale, 0.5) and not converge_intermediate[0]:
+            converged[0] = False
+        next_state = np.asarray(initial_state, dtype=np.float64) + np.asarray(
+            deterministic_shocks[:, 0, :],
+            dtype=np.float64,
+        )
+        mean_path = np.stack(
+            [np.asarray(initial_state, dtype=np.float64), next_state],
+            axis=2,
+        )
+        residual = np.where(accepted, 1.0e-10, 1.0e-3)
+        solution = SimpleNamespace(
+            accepted=accepted,
+            converged=converged,
+            residual_norm=residual,
+            initial_residual_norm=np.full((batch,), 0.1),
+            iterations=np.where(accepted, 2, 5).astype(np.int32),
+            final_lambda=np.full((batch,), 1.0e-8),
+            termination_code=np.where(accepted, 1, 0).astype(np.int8),
+            max_residual_index=np.zeros((batch,), dtype=np.int32),
+            max_residual_value=residual,
+            mean_path=mean_path,
+            stacked_states=next_state,
+            initial_guess_source=np.zeros((batch,), dtype=np.int8),
+        )
+        return SimpleNamespace(solution=solution)
+
+    monkeypatch.setattr(mod, "solve_batched_stochastic_extended_path_model", fake_solve)
+    parameter_values = np.asarray([[0.2], [0.3]], dtype=np.float64)
+    dataset, diagnostics = mod._build_batched_hlt_sep_dataset(
+        model=model,
+        parameter_values_by_theta=parameter_values,
+        theta_features_by_theta=parameter_values,
+        steady_states_by_theta=np.zeros((2, 1), dtype=np.float64),
+        state_transition_by_theta=np.zeros((2, 1, 1), dtype=np.float64),
+        shock_impact_by_theta=np.ones((2, 1, 1), dtype=np.float64),
+        initial_states=np.zeros((1, 2), dtype=np.float64),
+        shocks=np.asarray([[[0.1]], [[0.2]]], dtype=np.float64),
+        config=mod.SEPConfig(
+            periods=1,
+            branching_order=0,
+            nnodes=1,
+            shock_scale=1.0,
+            max_iter=5,
+        ),
+        target_mode="fom_full",
+        min_stable_periods=1,
+        observable_idx=(0,),
+        state_idx=(0,),
+        input_names=("y", "u", "rho"),
+        output_names=("y_obs", "y[1]"),
+        target_device=None,
+        max_logged_failures=10,
+        continuation_scales=(0.5, 1.0),
+    )
+
+    assert call_history == [(2, 1.0), (1, 0.5), (1, 1.0)]
+    assert dataset.n_samples == 2
+    np.testing.assert_array_equal(dataset.theta_success, np.asarray([True, True]))
+    assert diagnostics["batched_calls"] == 3
+    assert diagnostics["failure_log"] == []
+    assert diagnostics["continuation"] == {
+        "enabled": True,
+        "unit": "theta_period",
+        "scales": [0.5, 1.0],
+        "attempted_draws": 1,
+        "rescued_draws": 1,
+        "calls": 2,
+        "attempts_by_scale": {"0.5": 1, "1.0": 1},
+        "accepted_by_scale": {"0.5": 1, "1.0": 1},
+        "converged_by_scale": {"0.5": 1, "1.0": 1},
+    }
+
+    call_history.clear()
+    converge_intermediate[0] = False
+    dataset, diagnostics = mod._build_batched_hlt_sep_dataset(
+        model=model,
+        parameter_values_by_theta=parameter_values,
+        theta_features_by_theta=parameter_values,
+        steady_states_by_theta=np.zeros((2, 1), dtype=np.float64),
+        state_transition_by_theta=np.zeros((2, 1, 1), dtype=np.float64),
+        shock_impact_by_theta=np.ones((2, 1, 1), dtype=np.float64),
+        initial_states=np.zeros((1, 2), dtype=np.float64),
+        shocks=np.asarray([[[0.1]], [[0.2]]], dtype=np.float64),
+        config=mod.SEPConfig(
+            periods=1,
+            branching_order=0,
+            nnodes=1,
+            shock_scale=1.0,
+            max_iter=5,
+        ),
+        target_mode="fom_full",
+        min_stable_periods=1,
+        observable_idx=(0,),
+        state_idx=(0,),
+        input_names=("y", "u", "rho"),
+        output_names=("y_obs", "y[1]"),
+        target_device=None,
+        max_logged_failures=10,
+        continuation_scales=(0.5, 1.0),
+    )
+
+    assert call_history == [(2, 1.0), (1, 0.5)]
+    np.testing.assert_array_equal(dataset.theta_success, np.asarray([True, False]))
+    assert diagnostics["continuation"]["rescued_draws"] == 0
+    assert diagnostics["continuation"]["accepted_by_scale"] == {"0.5": 1, "1.0": 0}
+    assert diagnostics["continuation"]["converged_by_scale"] == {"0.5": 0, "1.0": 0}
+
+
 def test_adaptive_hlt_sep_dataset_keeps_multi_theta_fallback_targets() -> None:
     mod = _load_profile_module()
     theta = np.asarray([[1.0, 2.0]], dtype=np.float64)

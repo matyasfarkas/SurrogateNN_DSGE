@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 import os
@@ -584,6 +584,38 @@ def _parse_float_ladder(spec: str) -> tuple[float, ...]:
     if any(not math.isfinite(value) for value in values):
         raise ValueError(f"float ladder contains non-finite values: {values}.")
     return tuple(float(x) for x in _unique_preserve_order(values))
+
+
+def _validate_batched_sep_continuation_scales(
+    spec: str | Sequence[float] | None,
+    *,
+    target_scale: float,
+) -> tuple[float, ...]:
+    """Validate an optional strictly increasing homotopy ending at the target."""
+
+    if spec is None or (isinstance(spec, str) and not spec.strip()):
+        return ()
+    values = _parse_float_ladder(spec) if isinstance(spec, str) else tuple(float(x) for x in spec)
+    if not values:
+        return ()
+    if any((not math.isfinite(value)) or value <= 0.0 for value in values):
+        raise ValueError(
+            "batched SEP continuation scales must be positive and finite, "
+            f"got {values}."
+        )
+    if any(right <= left for left, right in zip(values, values[1:])):
+        raise ValueError(
+            "batched SEP continuation scales must be strictly increasing, "
+            f"got {values}."
+        )
+    if not math.isclose(values[-1], float(target_scale), rel_tol=0.0, abs_tol=1.0e-12):
+        raise ValueError(
+            "batched SEP continuation must end at the configured stochastic scale "
+            f"{float(target_scale)}, got {values[-1]}."
+        )
+    if len(values) == 1:
+        return ()
+    return values
 
 
 def _hlt_uniform_prior_interval(
@@ -3111,6 +3143,7 @@ def _build_batched_hlt_sep_dataset(
     verbose_progress: bool = False,
     progress_chunk_interval: int = 1,
     shifted_path_warm_start: bool = True,
+    continuation_scales: Sequence[float] | None = None,
 ) -> tuple[SurrogateDataset, dict[str, Any]]:
     """Build HLT targets with parsed-model batched SEP solves.
 
@@ -3227,6 +3260,16 @@ def _build_batched_hlt_sep_dataset(
     batched_calls = 0
     total_chunks = int(math.ceil(n_theta / effective_chunk_size))
     progress_interval = max(1, int(progress_chunk_interval))
+    retry_scales = _validate_batched_sep_continuation_scales(
+        continuation_scales,
+        target_scale=float(config.shock_scale),
+    )
+    continuation_attempted_draws = 0
+    continuation_rescued_draws = 0
+    continuation_calls = 0
+    continuation_scale_attempts = {str(float(scale)): 0 for scale in retry_scales}
+    continuation_scale_accepts = {str(float(scale)): 0 for scale in retry_scales}
+    continuation_scale_converged = {str(float(scale)): 0 for scale in retry_scales}
 
     def log_failure(row: dict[str, Any]) -> None:
         if len(failure_log) < int(max_logged_failures):
@@ -3329,11 +3372,135 @@ def _build_batched_hlt_sep_dataset(
                     batched_sep.solution.max_residual_value,
                     dtype=np.float64,
                 )
-            next_states[chunk] = np.asarray(batched_sep.solution.mean_path[:, :, 1], dtype=np.float64)
+            direct_next_states = np.asarray(
+                batched_sep.solution.mean_path[:, :, 1],
+                dtype=np.float64,
+            )
+            next_states[chunk] = direct_next_states
             previous_stacked_states[chunk] = np.asarray(
                 batched_sep.solution.stacked_states,
                 dtype=np.float64,
             ).reshape((end - start, -1))
+            failed_local = np.flatnonzero(
+                chunk_active
+                & (
+                    ~np.asarray(batched_sep.solution.accepted, dtype=bool)
+                    | ~np.isfinite(direct_next_states).all(axis=1)
+                )
+            )
+            if retry_scales and failed_local.size:
+                continuation_attempted_draws += int(failed_local.size)
+                retry_local = failed_local
+                retry_guess = None
+                for retry_scale in retry_scales:
+                    if retry_local.size == 0:
+                        break
+                    retry_absolute = start + retry_local
+                    retry_key = str(float(retry_scale))
+                    continuation_scale_attempts[retry_key] += int(retry_local.size)
+                    retry_started = time.perf_counter()
+                    with solve_context:
+                        retry_sep = solve_batched_stochastic_extended_path_model(
+                            model,
+                            parameter_values=theta_parameter_matrix[retry_absolute],
+                            steady_state=steady_matrix[retry_absolute],
+                            initial_state=current_states[retry_absolute],
+                            terminal_state=steady_matrix[retry_absolute],
+                            config=replace(config, shock_scale=float(retry_scale)),
+                            deterministic_shocks=deterministic[retry_local],
+                            initial_guess=retry_guess,
+                            fallback_to_default_initial_guess=retry_guess is not None,
+                        )
+                    _block_until_ready_tree(retry_sep)
+                    retry_elapsed = time.perf_counter() - retry_started
+                    solve_elapsed += retry_elapsed
+                    batched_calls += 1
+                    period_chunk_calls += 1
+                    continuation_calls += 1
+
+                    retry_accepted = np.asarray(retry_sep.solution.accepted, dtype=bool)
+                    retry_converged = np.asarray(retry_sep.solution.converged, dtype=bool)
+                    retry_next = np.asarray(
+                        retry_sep.solution.mean_path[:, :, 1],
+                        dtype=np.float64,
+                    )
+                    retry_stacked = np.asarray(
+                        retry_sep.solution.stacked_states,
+                        dtype=np.float64,
+                    ).reshape((retry_local.size, -1))
+                    retry_finite = np.isfinite(retry_next).all(axis=1)
+                    retry_accepted_finite = retry_accepted & retry_finite
+                    retry_converged_finite = retry_converged & retry_finite
+                    continuation_scale_accepts[retry_key] += int(
+                        np.count_nonzero(retry_accepted_finite)
+                    )
+                    continuation_scale_converged[retry_key] += int(
+                        np.count_nonzero(retry_converged_finite)
+                    )
+                    final_retry_scale = math.isclose(
+                        float(retry_scale),
+                        float(config.shock_scale),
+                        rel_tol=0.0,
+                        abs_tol=1.0e-12,
+                    )
+                    retry_ok = (
+                        retry_accepted_finite
+                        if final_retry_scale
+                        else retry_converged_finite
+                    )
+                    _progress(
+                        f"batched HLT SEP continuation period {period}/{periods - 1} "
+                        f"chunk {chunk_number}/{total_chunks} scale={float(retry_scale)} "
+                        f"accepted={int(np.count_nonzero(retry_accepted_finite))}/{retry_local.size} "
+                        f"converged={int(np.count_nonzero(retry_converged_finite))}/{retry_local.size} "
+                        f"elapsed={retry_elapsed:.3f}s"
+                    )
+
+                    if final_retry_scale:
+                        rescued_absolute = retry_absolute[retry_ok]
+                        rescued_rows = np.flatnonzero(retry_ok)
+                        continuation_rescued_draws += int(rescued_rows.size)
+                        if rescued_rows.size:
+                            accepted[rescued_absolute] = True
+                            residual_norm[rescued_absolute] = np.asarray(
+                                retry_sep.solution.residual_norm,
+                                dtype=np.float64,
+                            )[rescued_rows]
+                            if retry_sep.solution.initial_residual_norm is not None:
+                                initial_residual_norm[rescued_absolute] = np.asarray(
+                                    retry_sep.solution.initial_residual_norm,
+                                    dtype=np.float64,
+                                )[rescued_rows]
+                            iterations[rescued_absolute] = np.asarray(
+                                retry_sep.solution.iterations,
+                                dtype=np.int32,
+                            )[rescued_rows]
+                            if retry_sep.solution.final_lambda is not None:
+                                final_lambda[rescued_absolute] = np.asarray(
+                                    retry_sep.solution.final_lambda,
+                                    dtype=np.float64,
+                                )[rescued_rows]
+                            if retry_sep.solution.termination_code is not None:
+                                termination_code[rescued_absolute] = np.asarray(
+                                    retry_sep.solution.termination_code,
+                                    dtype=np.int8,
+                                )[rescued_rows]
+                            if retry_sep.solution.max_residual_index is not None:
+                                max_residual_index[rescued_absolute] = np.asarray(
+                                    retry_sep.solution.max_residual_index,
+                                    dtype=np.int32,
+                                )[rescued_rows]
+                            if retry_sep.solution.max_residual_value is not None:
+                                max_residual_value[rescued_absolute] = np.asarray(
+                                    retry_sep.solution.max_residual_value,
+                                    dtype=np.float64,
+                                )[rescued_rows]
+                            next_states[rescued_absolute] = retry_next[rescued_rows]
+                            previous_stacked_states[rescued_absolute] = retry_stacked[rescued_rows]
+                        break
+
+                    retry_local = retry_local[retry_ok]
+                    retry_guess = retry_stacked[retry_ok]
             if shifted_initial_guess is not None:
                 guess_source = np.asarray(
                     batched_sep.solution.initial_guess_source,
@@ -3479,6 +3646,17 @@ def _build_batched_hlt_sep_dataset(
             "batch_chunk_size": int(effective_chunk_size),
             "memory_estimate": memory_estimate,
             "failure_log": failure_log,
+            "continuation": {
+                "enabled": bool(retry_scales),
+                "unit": "theta_period",
+                "scales": [float(scale) for scale in retry_scales],
+                "attempted_draws": int(continuation_attempted_draws),
+                "rescued_draws": int(continuation_rescued_draws),
+                "calls": int(continuation_calls),
+                "attempts_by_scale": continuation_scale_attempts,
+                "accepted_by_scale": continuation_scale_accepts,
+                "converged_by_scale": continuation_scale_converged,
+            },
             "shifted_path_warm_start": {
                 "requested": bool(shifted_path_warm_start),
                 "supported": bool(shifted_warm_start_supported),
@@ -3547,6 +3725,17 @@ def _build_batched_hlt_sep_dataset(
         "final_lambda_summary": _finite_quantile_summary(final_lambda_values),
         "termination_code_counts": termination_code_counts,
         "failure_log": failure_log,
+        "continuation": {
+            "enabled": bool(retry_scales),
+            "unit": "theta_period",
+            "scales": [float(scale) for scale in retry_scales],
+            "attempted_draws": int(continuation_attempted_draws),
+            "rescued_draws": int(continuation_rescued_draws),
+            "calls": int(continuation_calls),
+            "attempts_by_scale": continuation_scale_attempts,
+            "accepted_by_scale": continuation_scale_accepts,
+            "converged_by_scale": continuation_scale_converged,
+        },
         "shifted_path_warm_start": {
             "requested": bool(shifted_path_warm_start),
             "supported": bool(shifted_warm_start_supported),
@@ -4372,6 +4561,7 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             batch_chunk_size=int(args.hlt_sep_batch_chunk_size),
             verbose_progress=bool(args.verbose_progress),
             progress_chunk_interval=int(args.progress_chunk_interval),
+            continuation_scales=str(args.hlt_batched_sep_continuation_scales),
         )
         dataset_summary = summarize_surrogate_dataset(dataset)
         successful_groups = np.unique(dataset.theta_ids).size
@@ -5692,6 +5882,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "For --hlt-target-builder batched-sep or grid-batched-sep, split "
             "theta/grid draws into GPU microbatches of this size before forming "
             "dense SEP Jacobians. Use 0 to solve all draws in one batch."
+        ),
+    )
+    parser.add_argument(
+        "--hlt-batched-sep-continuation-scales",
+        default="",
+        help=(
+            "Optional strictly increasing stochastic-scale homotopy used only to retry "
+            "draws that fail the direct batched SEP solve. The final value must equal "
+            "--sep-shock-scale; an empty value disables retries."
         ),
     )
     parser.add_argument(

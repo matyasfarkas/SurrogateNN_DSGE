@@ -15,10 +15,20 @@ export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
 GALI_SEP_ORDER="${GALI_SEP_ORDER:-1}"
 GALI_SEP_NNODES="${GALI_SEP_NNODES:-3}"
 GALI_SEP_PERIODS="${GALI_SEP_PERIODS:-15}"
+GALI_SEP_ACCEPT_TOL="${GALI_SEP_ACCEPT_TOL:-1e-8}"
+GALI_SEP_CONTINUATION_SCALES="${GALI_SEP_CONTINUATION_SCALES:-}"
 GALI_SEED="${GALI_SEED:-20261019}"
 GALI_HMC_SEED="${GALI_HMC_SEED:-20261023}"
 GALI_PAYLOAD="${GALI_PAYLOAD:-benchmarks/gali_nonlinear_pilot_payload.json}"
 GALI_CASE_NAME="${GALI_CASE_NAME:-gali_full_nonlinear_reduced_pilot}"
+GALI_TARGET_PREFLIGHT_ONLY="${GALI_TARGET_PREFLIGHT_ONLY:-0}"
+if [[ "$GALI_TARGET_PREFLIGHT_ONLY" == "1" ]]; then
+  GALI_PERIODS="${GALI_PERIODS:-1}"
+  GALI_EPOCHS="${GALI_EPOCHS:-1}"
+else
+  GALI_PERIODS="${GALI_PERIODS:-10}"
+  GALI_EPOCHS="${GALI_EPOCHS:-400}"
+fi
 
 ARGS=(
   --mode hlt-fixed-ss-smoke
@@ -31,14 +41,14 @@ ARGS=(
   --hlt-theta-include-reference
   --hlt-theta-draws "${GALI_THETA_DRAWS:-8}"
   --hlt-parameter-perturbation "${GALI_PARAMETER_PERTURBATION:-0.12}"
-  --hlt-periods "${GALI_PERIODS:-10}"
+  --hlt-periods "$GALI_PERIODS"
   --hlt-shock-scale "${GALI_SHOCK_SCALE:-0.12}"
   --hlt-steady-state-mode solve
   --hlt-require-solved-steady-state
   --hlt-steady-state-max-iter 100
   --hlt-first-order-qme-algorithm schur
   --hlt-target-builder batched-sep
-  --hlt-target-min-stable-periods "${GALI_PERIODS:-10}"
+  --hlt-target-min-stable-periods "$GALI_PERIODS"
   --hlt-require-full-target-success
   --hlt-min-runtime-successful-theta "${GALI_THETA_DRAWS:-8}"
   --hlt-min-full-success-share 1.0
@@ -48,10 +58,10 @@ ARGS=(
   --sep-nnodes "$GALI_SEP_NNODES"
   --sep-max-iter 50
   --sep-tol 1e-8
-  --sep-accept-tol 1e-5
+  --sep-accept-tol "$GALI_SEP_ACCEPT_TOL"
   --sep-linear-solver qr
   --sep-line-search
-  --epochs "${GALI_EPOCHS:-400}"
+  --epochs "$GALI_EPOCHS"
   --hidden "${GALI_HIDDEN:-64}"
   --blocks "${GALI_BLOCKS:-1}"
   --batch-size "${GALI_TRAIN_BATCH_SIZE:-32}"
@@ -60,34 +70,47 @@ ARGS=(
   --validation-fraction 0.25
   --split-by-theta
   --no-calibrate-residual-shrinkage
-  --hlt-likelihood-periods "${GALI_PERIODS:-10}"
-  --hlt-likelihood-runtime-mode "${GALI_LIKELIHOOD_RUNTIME_MODE:-fixed-reference}"
-  --hlt-jax-log-density-smoke
-  --hlt-require-jax-parity
-  --hlt-surrogate-hmc-warmup "${GALI_HMC_WARMUP:-25}"
-  --hlt-surrogate-hmc-samples "${GALI_HMC_SAMPLES:-50}"
-  --hlt-surrogate-hmc-chains "${GALI_HMC_CHAINS:-1}"
-  --hlt-surrogate-hmc-chain-batch-size "${GALI_HMC_CHAIN_BATCH_SIZE:-1}"
-  --hlt-surrogate-hmc-gradient-mode "${GALI_HMC_GRADIENT_MODE:-target}"
-  --hlt-surrogate-hmc-leapfrog-steps "${GALI_HMC_LEAPFROG_STEPS:-3}"
-  --hlt-surrogate-hmc-step-size "${GALI_HMC_STEP_SIZE:-0.02}"
-  --hlt-surrogate-hmc-seed "$GALI_HMC_SEED"
-  --hlt-surrogate-hmc-target-accept-prob 0.8
-  --hlt-surrogate-hmc-prior-width-scale 0.12
-  --hlt-surrogate-hmc-prior-width-floor 1e-4
-  --hlt-surrogate-hmc-min-accepted-share 0.05
-  --hlt-surrogate-hmc-max-retries 2
-  --hlt-require-hmc
-  --hlt-surrogate-hmc-draws-output "$RESULT_ROOT/posterior_draws.npz"
-  --hlt-surrogate-bundle-path "$RESULT_ROOT/surrogate_bundle.snn.npz"
   --output "$RESULT_ROOT/result.json"
   --seed "$GALI_SEED"
 )
 
-if [[ "${GALI_JAX_LOG_DENSITY_GRADIENT:-1}" == "1" ]]; then
-  ARGS+=(--hlt-jax-log-density-gradient)
+if [[ "$GALI_TARGET_PREFLIGHT_ONLY" == "1" ]]; then
+  ARGS+=(
+    --hlt-likelihood-periods 0
+    --hlt-surrogate-hmc-samples 0
+  )
 else
-  ARGS+=(--no-hlt-jax-log-density-gradient)
+  ARGS+=(
+    --hlt-likelihood-periods "$GALI_PERIODS"
+    --hlt-likelihood-runtime-mode "${GALI_LIKELIHOOD_RUNTIME_MODE:-fixed-reference}"
+    --hlt-jax-log-density-smoke
+    --hlt-require-jax-parity
+    --hlt-surrogate-hmc-warmup "${GALI_HMC_WARMUP:-25}"
+    --hlt-surrogate-hmc-samples "${GALI_HMC_SAMPLES:-50}"
+    --hlt-surrogate-hmc-chains "${GALI_HMC_CHAINS:-1}"
+    --hlt-surrogate-hmc-chain-batch-size "${GALI_HMC_CHAIN_BATCH_SIZE:-1}"
+    --hlt-surrogate-hmc-gradient-mode "${GALI_HMC_GRADIENT_MODE:-target}"
+    --hlt-surrogate-hmc-leapfrog-steps "${GALI_HMC_LEAPFROG_STEPS:-3}"
+    --hlt-surrogate-hmc-step-size "${GALI_HMC_STEP_SIZE:-0.02}"
+    --hlt-surrogate-hmc-seed "$GALI_HMC_SEED"
+    --hlt-surrogate-hmc-target-accept-prob 0.8
+    --hlt-surrogate-hmc-prior-width-scale 0.12
+    --hlt-surrogate-hmc-prior-width-floor 1e-4
+    --hlt-surrogate-hmc-min-accepted-share 0.05
+    --hlt-surrogate-hmc-max-retries 2
+    --hlt-require-hmc
+    --hlt-surrogate-hmc-draws-output "$RESULT_ROOT/posterior_draws.npz"
+    --hlt-surrogate-bundle-path "$RESULT_ROOT/surrogate_bundle.snn.npz"
+  )
+  if [[ "${GALI_JAX_LOG_DENSITY_GRADIENT:-1}" == "1" ]]; then
+    ARGS+=(--hlt-jax-log-density-gradient)
+  else
+    ARGS+=(--no-hlt-jax-log-density-gradient)
+  fi
+fi
+
+if [[ -n "$GALI_SEP_CONTINUATION_SCALES" ]]; then
+  ARGS+=(--hlt-batched-sep-continuation-scales "$GALI_SEP_CONTINUATION_SCALES")
 fi
 
 if [[ "$DEVICE" == "gpu" ]]; then
@@ -113,8 +136,10 @@ MANIFEST_PRE_ARGS=(
   --input benchmarks/model_sources/Gali_2015_chapter_3_nonlinear.jl
   --input "$GALI_PAYLOAD"
   --seed "design=$GALI_SEED"
-  --seed "hmc=$GALI_HMC_SEED"
 )
+if [[ "$GALI_TARGET_PREFLIGHT_ONLY" != "1" ]]; then
+  MANIFEST_PRE_ARGS+=(--seed "hmc=$GALI_HMC_SEED")
+fi
 if [[ "${ALLOW_DIRTY_MANIFEST:-0}" == "1" ]]; then
   MANIFEST_PRE_ARGS+=(--allow-dirty)
 fi
@@ -150,13 +175,20 @@ PY
   fi
 fi
 
-"${PYTHON:-python}" benchmarks/publication_run_manifest.py finalize \
-  --manifest "$MANIFEST_PATH" \
-  --exit-code "$RUN_RC" \
-  --artifact "$RESULT_ROOT/result.json" \
-  --artifact "$RESULT_ROOT/posterior_draws.npz" \
-  --artifact "$RESULT_ROOT/surrogate_bundle.snn.npz" \
+MANIFEST_FINAL_ARGS=(
+  finalize
+  --manifest "$MANIFEST_PATH"
+  --exit-code "$RUN_RC"
+  --artifact "$RESULT_ROOT/result.json"
   --artifact "$RESULT_ROOT/run.log"
+)
+if [[ "$GALI_TARGET_PREFLIGHT_ONLY" != "1" ]]; then
+  MANIFEST_FINAL_ARGS+=(
+    --artifact "$RESULT_ROOT/posterior_draws.npz"
+    --artifact "$RESULT_ROOT/surrogate_bundle.snn.npz"
+  )
+fi
+"${PYTHON:-python}" benchmarks/publication_run_manifest.py "${MANIFEST_FINAL_ARGS[@]}"
 
 if [[ "$RUN_RC" != "0" ]]; then
   exit "$RUN_RC"

@@ -184,6 +184,7 @@ def test_gali_pilot_dry_run_uses_stochastic_sep_and_explicit_seeds(
             "DRY_RUN": "1",
             "RESULT_ROOT": str(tmp_path / "results"),
             "PYTHON": ".venv/bin/python",
+            "GALI_SEP_CONTINUATION_SCALES": "0.5,0.75,1.0",
         }
     )
 
@@ -199,7 +200,43 @@ def test_gali_pilot_dry_run_uses_stochastic_sep_and_explicit_seeds(
     assert "--sep-order 1" in completed.stdout
     assert "--sep-nnodes 3" in completed.stdout
     assert "--sep-periods 15" in completed.stdout
+    assert "--sep-accept-tol 1e-8" in completed.stdout
+    assert "--hlt-batched-sep-continuation-scales 0.5\\,0.75\\,1.0" in completed.stdout
     assert completed.stdout.startswith("JAX_ENABLE_X64=1 ")
     assert "--no-calibrate-residual-shrinkage" in completed.stdout
     assert "--hlt-surrogate-hmc-seed 20261023" in completed.stdout
+
+
+def test_gali_target_preflight_dry_run_skips_likelihood_hmc_and_bundles(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).parents[1]
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "DRY_RUN": "1",
+            "RESULT_ROOT": str(tmp_path / "results"),
+            "PYTHON": ".venv/bin/python",
+            "GALI_TARGET_PREFLIGHT_ONLY": "1",
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", "benchmarks/run_nonlinear_gali_pilot.sh"],
+        cwd=repo,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--hlt-periods 1" in completed.stdout
+    assert "--hlt-target-min-stable-periods 1" in completed.stdout
+    assert "--epochs 1" in completed.stdout
+    assert "--hlt-likelihood-periods 0" in completed.stdout
+    assert "--hlt-surrogate-hmc-samples 0" in completed.stdout
+    assert "--hlt-require-jax-parity" not in completed.stdout
+    assert "--hlt-require-hmc" not in completed.stdout
+    assert "--hlt-surrogate-hmc-draws-output" not in completed.stdout
+    assert "--hlt-surrogate-bundle-path" not in completed.stdout
     assert "--seed 20261019" in completed.stdout

@@ -64,6 +64,42 @@ The runner then requires JAX to expose a GPU. Batched SEP is the principal
 accelerated workload; its theta chunk can be controlled in the underlying
 profile command if device memory is limited.
 
+Before a costly full run, execute the exact theta design through a one-period
+target-generation gate. This mode keeps the steady-state, first-order, and
+batched stochastic-SEP checks, performs only one negligible training epoch, and
+skips likelihood, HMC, posterior draws, and surrogate-bundle export:
+
+```bash
+GALI_TARGET_PREFLIGHT_ONLY=1 DEVICE=gpu PYTHON=.venv/bin/python \
+bash benchmarks/run_nonlinear_gali_pilot.sh
+```
+
+The preflight inherits `GALI_SEP_PERIODS`, the design seed, parameter support,
+and any continuation ladder from the intended run. A zero exit status requires
+all configured theta draws to produce a target under the same strict residual
+gate. It is a resource and feasibility gate, not publication evidence.
+
+For designs that are locally solvable but fail the direct full-stochastic-scale
+Newton solve, a preflighted continuation ladder can be supplied as a recorded
+retry. For example, the following illustrates the interface; it is not a
+validated ladder for every Galí design or horizon:
+
+```bash
+GALI_SEP_CONTINUATION_SCALES=0.25,0.4,0.5,0.6,0.7,0.8,0.9,0.95,0.975,1.0 \
+DEVICE=gpu PYTHON=.venv/bin/python \
+bash benchmarks/run_nonlinear_gali_pilot.sh
+```
+
+The direct scale-1 solve is always attempted first. Only failed theta-period
+pairs enter the continuation ladder. Every intermediate problem must converge
+at the configured Newton tolerance, and a rescued target is accepted only if it
+subsequently passes the original residual tolerance at scale 1. The result
+records attempts, acceptances at every scale, and the number of rescued
+theta-period pairs. This is a numerical globalization device, not a relaxation
+of the target or quality gate. Preflight the exact theta design, horizon, and
+ladder before a production run; a continuation failure is reported rather than
+silently dropped.
+
 ## Freeze confirmatory synthetic data
 
 The original pilot payload duplicated the equation-level `std_a`, `std_nu`,
