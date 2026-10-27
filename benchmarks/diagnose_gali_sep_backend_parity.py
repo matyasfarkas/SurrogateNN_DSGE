@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shlex
 import subprocess
 import sys
 import time
@@ -373,6 +374,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     output: dict[str, Any] = {
         "started_utc": _utc_now(),
         "status": "running",
+        "command": {
+            "argv": list(
+                getattr(
+                    args,
+                    "command_argv",
+                    [sys.executable, str(Path(__file__).resolve())],
+                )
+            ),
+            "shell_escaped": shlex.join(
+                getattr(
+                    args,
+                    "command_argv",
+                    [sys.executable, str(Path(__file__).resolve())],
+                )
+            ),
+            "working_directory": str(Path.cwd().resolve()),
+        },
         "backend": jax.default_backend(),
         "selected_device": str(device),
         "devices": [str(item) for item in jax.devices()],
@@ -385,6 +403,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "shocks": int(model.timings.nExo),
             "parameters": len(model.parameter_names),
             "source_sha256": hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest(),
+        },
+        "inputs": {
+            "model_source": {
+                "path": str(MODEL_PATH.relative_to(ROOT)),
+                "sha256": hashlib.sha256(MODEL_PATH.read_bytes()).hexdigest(),
+            },
+            "payload": {
+                "path": str(PAYLOAD_PATH.relative_to(ROOT)),
+                "sha256": hashlib.sha256(PAYLOAD_PATH.read_bytes()).hexdigest(),
+                "case_name": CASE_NAME,
+            },
         },
         "theta_design": theta_design,
         "theta_indices": list(selected_indices),
@@ -597,6 +626,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    args.command_argv = [sys.executable, *sys.argv]
     result = run(args)
     print(json.dumps(_jsonable(result), indent=2, sort_keys=True))
     print(f"WROTE {args.output}")
