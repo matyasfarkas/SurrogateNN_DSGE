@@ -32,13 +32,16 @@ seven unique policy-rule points, at a five-period terminal horizon. The largest
 equation residual is
 $1.93\times10^{-10}$. This result establishes a reduced numerical pilot, not
 horizon convergence: the hard design fails under both solvers at horizon six,
-and first-step outcomes still move between horizons four and five. A separate
-clean-revision comparison against MacroModelling.jl matches the non-stochastic
-steady state and first-order Schur solution at all eight evaluations. This is a
-core implementation check, not nonlinear trajectory or likelihood parity. We
-therefore pair the method with executable gates for stochastic-solution
-accuracy, independent parity, untouched test performance, posterior agreement,
-multichain sampling, and same-work timing.
+and first-step outcomes still move between horizons four and five. Separate
+clean-revision comparisons against MacroModelling.jl match the non-stochastic
+steady state and first-order Schur solution and, at a three-period horizon, the
+complete order-one sparse nonlinear scenario tree. Across eight evaluations,
+the worst tree and expected-path discrepancies are $1.75\times10^{-7}$ and
+$7.22\times10^{-9}$. These are core and reduced-horizon trajectory checks, not
+production-horizon likelihood or posterior parity. We therefore pair the method
+with executable gates for stochastic-solution accuracy, independent parity,
+untouched test performance, posterior agreement, multichain sampling, and
+same-work timing.
 \end{abstract}
 
 \section{Introduction}
@@ -85,14 +88,15 @@ $1.22\times10^{-3}$ for annualized inflation, and $1.39\times10^{-3}$ for the
 annualized policy rate. Residual convergence at horizon five therefore does not
 establish terminal-horizon convergence.
 
-An independent core comparison closes a separate implementation risk. The
-Python and MacroModelling.jl calculations use byte-identical copies of the
+Independent cross-language comparisons close two scoped implementation risks.
+The Python and MacroModelling.jl calculations use byte-identical copies of the
 complete Gal\'i source, inject the policy coefficients by name despite their
 different internal parameter orders, and retain the duplicated reference in the
 eight-case denominator. Every non-stochastic steady state and first-order Schur
-solution passes its frozen tolerance. Because this comparison stops at the
-local solution, it cannot substitute for nonlinear trajectory or likelihood
-parity.
+solution passes its frozen tolerance. A second comparison activates all three
+shock channels and matches the complete three-period, order-one sparse nonlinear
+scenario tree, rather than only its central path. This reduced-horizon result
+does not establish production-horizon trajectory or likelihood parity.
 
 The paper makes three contributions. First, it separates three objects often
 conflated in surrogate estimation: nonlinear trajectories used as labels, a
@@ -483,6 +487,8 @@ source of manuscript tables; hand-entered numerical cells are not permitted.
 
 \input{generated/gali_core_parity_results.tex}
 
+\input{generated/gali_sep_parity_results.tex}
+
 The pilot establishes three narrow facts. The parser, parameter-specific
 preflight, nonlinear equation solver, residual network, likelihood, and sampler
 compose on the full model. The order-zero extended-path targets satisfy a strict
@@ -529,8 +535,19 @@ evaluations passed. The worst steady-state discrepancy was
 \GaliCoreSSMax, while the worst first-order Schur-matrix discrepancy was
 \GaliCoreFirstOrderMax. These errors are well below the frozen tolerances, but
 the result concerns a non-stochastic steady state and local first-order
-solution. Nonlinear extended-path trajectories and nonlinear likelihoods remain
-to be compared on common case identifiers.
+solution.
+
+Table~\ref{tab:gali-sep-parity} extends the independent check to nonlinear
+stochastic extended path at a frozen three-period horizon. Both implementations
+solve the complete sparse scenario tree with group counts $(1,1,9,9)$ and all
+three first-period shock channels active. All eight evaluations pass. The worst
+complete-tree and expected-path discrepancies are \GaliSEPTreeMax{} and
+\GaliSEPMeanMax{}, respectively, while both implementations remain below the
+$10^{-8}$ residual gate. Repeating the reference calibration at indices 0 and 4
+produces identical trees within each implementation. This result closes the
+reduced-horizon nonlinear-tree subgate only. It neither resolves the observed
+horizon-five-to-six instability nor validates a nonlinear likelihood or
+posterior.
 
 \section{Claim-specific decision rules}
 
@@ -563,11 +580,12 @@ duplicated the equation-level innovation scales in the inversion prior; future
 evidence uses unit-variance standardized innovations. An exact structural
 posterior instead requires explicit support handling and an economically
 defined likelihood. The sampler budgets are too small for convergence
-diagnostics, the data are synthetic and short, and no independent Julia
-nonlinear trajectory or likelihood comparison is yet archived. The independent
-Julia evidence currently ends at the non-stochastic steady state and
-first-order Schur solution. The current evidence therefore supports neither
-exact nonlinear posterior sampling nor an end-to-end speedup claim.
+diagnostics, and the data are synthetic and short. The independent nonlinear
+Julia comparison is restricted to a three-period sparse tree, a single frozen
+first-period shock vector, and seven unique policy-rule points. It does not
+establish production-horizon trajectory or likelihood parity. The current
+evidence therefore supports neither exact nonlinear posterior sampling nor an
+end-to-end speedup claim.
 
 These limitations determine the paper's next experiments rather than merely
 qualifying its conclusion. A credible methods result requires the two-parameter
@@ -588,12 +606,12 @@ points at a five-period horizon. It also shows why that result is insufficient:
 outcomes still move with the
 terminal horizon, and the hard design fails at horizon six. Publication
 readiness therefore depends on terminal-horizon validation, an untouched test
-design, an independently converged nonlinear posterior reference, nonlinear
-trajectory and likelihood parity, efficient multichain sampling, and same-work
-timing. The steady-state and first-order portion of the cross-language gate now
-passes on the full source. The protocol makes the remaining requirements
-falsifiable and preserves negative results rather than redefining success after
-a run.
+design, an independently converged nonlinear posterior reference,
+production-horizon likelihood parity, efficient multichain sampling, and
+same-work timing. The steady-state, first-order, and reduced three-period
+nonlinear-tree portions of the cross-language gate now pass on the full source.
+The protocol makes the remaining requirements falsifiable and preserves
+negative results rather than redefining success after a run.
 
 \section*{Disclosure on computational assistance}
 

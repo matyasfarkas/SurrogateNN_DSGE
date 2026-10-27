@@ -71,6 +71,25 @@ columns by name, and refuses the evidence gate when either repository is dirty.
 The generated table supports non-stochastic steady-state and first-order Schur
 parity only; nonlinear trajectory and likelihood parity remain open.
 
+Build the independent reduced-horizon nonlinear-tree evidence with:
+
+```bash
+.venv/bin/python benchmarks/validate_gali_full_julia_sep_parity.py \
+  --upstream-repo /path/to/clean/MacroModelling.jl \
+  --theta-indices 0,1,2,3,4,5,6,7 \
+  --output /tmp/gali_full_sep_parity.json
+.venv/bin/python benchmarks/build_gali_sep_parity_evidence.py \
+  /tmp/gali_full_sep_parity.json \
+  --output-dir paper/generated
+```
+
+This validator compares the complete three-period sparse scenario tree, not
+only a central path, with order one, three Gauss--Hermite nodes per shock, and
+all three first-period shock channels active. It requires 8/8 joint successes,
+clean repositories, frozen tolerances and configuration, and a reproducible
+duplicate reference case. The generated evidence does not support a
+production-horizon trajectory, nonlinear likelihood, posterior, or GPU claim.
+
 Run the focused validation tests with:
 
 ```bash
@@ -80,6 +99,9 @@ Run the focused validation tests with:
   tests/test_stochastic_horizon_evidence.py \
   tests/test_gali_full_julia_core_parity.py \
   tests/test_gali_core_parity_evidence.py \
+  tests/test_gali_full_julia_sep_parity.py \
+  tests/test_gali_sep_parity_evidence.py \
+  tests/test_model_sep.py \
   tests/test_gali_synthetic_data.py \
   tests/test_static_hmc.py \
   tests/test_publication_readiness_gate.py \
@@ -104,10 +126,12 @@ synthetic-data generator.
 
 The independent core-parity gate now passes on the complete Gal\'i source:
 8/8 evaluations agree between Python and a clean MacroModelling.jl checkout for
-the non-stochastic steady state and first-order Schur solution. This removes a
-core local-solution uncertainty but does not change the paper's overall
-not-ready status because nonlinear trajectory, likelihood, posterior, and
-same-work GPU gates remain incomplete.
+the non-stochastic steady state and first-order Schur solution. A separate 8/8
+comparison also matches the complete three-period nonlinear sparse scenario
+tree within its frozen tolerances. This removes core local-solution and
+reduced-horizon nonlinear-tree uncertainties but does not change the paper's
+overall not-ready status because production-horizon trajectory, likelihood,
+posterior, and same-work GPU gates remain incomplete.
 
 The confirmatory plan is in `../docs/submission_readiness_plan.md`. The paper
 should be promoted to a submission draft only when every hard gate is backed by

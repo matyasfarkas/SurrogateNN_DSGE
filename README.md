@@ -60,6 +60,21 @@ design failure in the denominator:
 This is a local-solution correctness gate, not nonlinear trajectory,
 likelihood, posterior, or GPU evidence.
 
+The companion nonlinear gate compares the complete reduced-horizon sparse SEP
+scenario tree, including all three shock channels, rather than only a central
+path:
+
+```bash
+.venv/bin/python benchmarks/validate_gali_full_julia_sep_parity.py \
+  --upstream-repo /path/to/clean/MacroModelling.jl \
+  --theta-indices 0,1,2,3,4,5,6,7 \
+  --output /tmp/gali_full_sep_parity.json
+```
+
+The preserved clean run passes 8/8 evaluations at a three-period horizon. This
+is reduced-horizon nonlinear-tree evidence, not production-horizon trajectory,
+likelihood, posterior, or GPU evidence.
+
 For Colab, use `notebooks/colab_jax_numpyro_gemini_profile.ipynb` for the
 small GPU/NumPyro smoke run and `notebooks/colab_sw07_long_profile.ipynb` for
 the dedicated Python-only SW07/HLT JAX + NumPyro run. Use

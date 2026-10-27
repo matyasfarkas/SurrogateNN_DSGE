@@ -454,7 +454,7 @@ def render_latex(evidence: Mapping[str, Any]) -> str:
 \caption{{Independent Julia--Python nonlinear SEP parity on the complete Gal\'i source}}
 \label{{tab:gali-sep-parity}}
 \small
-\begin{{tabular}}{{lrrl}}
+\begin{{tabular}}{{@{{}}p{{0.49\linewidth}}rrl@{{}}}}
 \toprule
 Gate & Observed & Threshold & Result \\
 \midrule

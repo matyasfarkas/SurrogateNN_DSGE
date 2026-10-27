@@ -22,8 +22,11 @@ validation.
 The independent core-parity subgate is complete on the full source. A clean
 MacroModelling.jl revision and a clean SurrogateNN_DSGE revision use
 byte-identical Gal\'i files and agree at all eight evaluations on the
-non-stochastic steady state and first-order Schur solution. This does not close
-the independent nonlinear trajectory or likelihood parts of the parity gate.
+non-stochastic steady state and first-order Schur solution. A second clean
+comparison agrees on the complete three-period, order-one sparse nonlinear tree
+with all three first-period shock channels active. This closes the
+reduced-horizon nonlinear-tree subgate, not production-horizon trajectory or
+likelihood parity.
 
 ## Critical path
 
@@ -52,8 +55,9 @@ publication run with that flag cannot satisfy the clean-revision gate.
 4. Cross-check common steady states, QZ solutions, trajectories, and
    likelihoods against MacroModelling.jl. Preserve failures from either
    implementation in the denominator. The steady-state and first-order Schur
-   checks now pass for 8/8 evaluations across seven unique policy-rule points;
-   nonlinear trajectories and likelihoods remain open.
+   checks now pass for 8/8 evaluations across seven unique policy-rule points.
+   The complete reduced-horizon nonlinear tree also passes 8/8; production-
+   horizon trajectories and likelihoods remain open.
 5. Build a full nonlinear $(\phi_\pi,\phi_y)$ likelihood grid. Double the grid
    resolution until posterior moments and interval endpoints stabilize.
 6. Compare ROM, residual-surrogate, surrogate-target HMC, and nonlinear-target
