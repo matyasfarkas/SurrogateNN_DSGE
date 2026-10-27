@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import math
+import platform
 import shlex
 import subprocess
 import sys
@@ -510,6 +511,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "theta_indices": list(theta_indices),
             "theta_points": [list(EXPECTED_THETA_POINTS[index]) for index in theta_indices],
             "deterministic_first_period_shock": list(DEFAULT_SHOCK),
+            "deterministic_shocks": spec["cases"][0]["deterministic_shocks"],
             "config": spec["config"],
         },
         "sources": {
@@ -521,6 +523,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "upstream_repository": upstream_git,
             "jax_backend": jax.default_backend(),
             "jax_devices": [str(device) for device in jax.devices()],
+        },
+        "environment": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "jax": jax.__version__,
+            "numpy": np.__version__,
+            "jax_enable_x64": bool(jax.config.read("jax_enable_x64")),
         },
         "gates": gates,
         "comparisons": comparisons,
