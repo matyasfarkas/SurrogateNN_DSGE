@@ -19,6 +19,12 @@ and the hard design fails under both solvers at horizon six. No manuscript text
 may call either result an exact nonlinear posterior or terminal-horizon
 validation.
 
+The independent core-parity subgate is complete on the full source. A clean
+MacroModelling.jl revision and a clean SurrogateNN_DSGE revision use
+byte-identical Gal\'i files and agree at all eight evaluations on the
+non-stochastic steady state and first-order Schur solution. This does not close
+the independent nonlinear trajectory or likelihood parts of the parity gate.
+
 ## Critical path
 
 Every new Gal\'i pilot is launched from a clean revision through
@@ -45,7 +51,9 @@ publication run with that flag cannot satisfy the clean-revision gate.
    never tune shrinkage on the block used for the reported test error.
 4. Cross-check common steady states, QZ solutions, trajectories, and
    likelihoods against MacroModelling.jl. Preserve failures from either
-   implementation in the denominator.
+   implementation in the denominator. The steady-state and first-order Schur
+   checks now pass for 8/8 evaluations across seven unique policy-rule points;
+   nonlinear trajectories and likelihoods remain open.
 5. Build a full nonlinear $(\phi_\pi,\phi_y)$ likelihood grid. Double the grid
    resolution until posterior moments and interval endpoints stabilize.
 6. Compare ROM, residual-surrogate, surrogate-target HMC, and nonlinear-target

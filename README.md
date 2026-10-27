@@ -46,6 +46,20 @@ short parity/runtime smoke. A larger opt-in SW07/HLT stress profile lives in
 [docs/sw07_long_profile.md](docs/sw07_long_profile.md) for the run command,
 runtime target, and current NUTS caveat.
 
+For the complete nonlinear Gal\'i source, the independent core-parity harness
+compares name-aligned non-stochastic steady states and first-order Schur
+solutions against a clean MacroModelling.jl checkout while preserving every
+design failure in the denominator:
+
+```bash
+.venv/bin/python benchmarks/validate_gali_full_julia_core_parity.py \
+  --upstream-repo /path/to/clean/MacroModelling.jl \
+  --output /tmp/gali_full_core_parity.json
+```
+
+This is a local-solution correctness gate, not nonlinear trajectory,
+likelihood, posterior, or GPU evidence.
+
 For Colab, use `notebooks/colab_jax_numpyro_gemini_profile.ipynb` for the
 small GPU/NumPyro smoke run and `notebooks/colab_sw07_long_profile.ipynb` for
 the dedicated Python-only SW07/HLT JAX + NumPyro run. Use

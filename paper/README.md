@@ -54,6 +54,23 @@ and `generated/stochastic_horizon_results.tex`. The evidence supports a reduced
 horizon-five target pilot but explicitly does not support terminal-horizon,
 likelihood, posterior, or speed claims.
 
+Build the independent full-model Julia/Python core-parity evidence with:
+
+```bash
+.venv/bin/python benchmarks/validate_gali_full_julia_core_parity.py \
+  --upstream-repo /path/to/clean/MacroModelling.jl \
+  --output /tmp/gali_full_core_parity.json
+.venv/bin/python benchmarks/build_gali_core_parity_evidence.py \
+  /tmp/gali_full_core_parity.json \
+  --output-dir paper/generated
+```
+
+The validator requires byte-identical local and upstream Gal\'i sources, keeps
+all eight evaluations in the denominator, aligns variables and state/shock
+columns by name, and refuses the evidence gate when either repository is dirty.
+The generated table supports non-stochastic steady-state and first-order Schur
+parity only; nonlinear trajectory and likelihood parity remain open.
+
 Run the focused validation tests with:
 
 ```bash
@@ -61,6 +78,8 @@ Run the focused validation tests with:
   tests/test_methods_paper_evidence.py \
   tests/test_stochastic_pilot_evidence.py \
   tests/test_stochastic_horizon_evidence.py \
+  tests/test_gali_full_julia_core_parity.py \
+  tests/test_gali_core_parity_evidence.py \
   tests/test_gali_synthetic_data.py \
   tests/test_static_hmc.py \
   tests/test_publication_readiness_gate.py \
@@ -82,6 +101,13 @@ metric rather than an untouched test result. The archived payload also
 duplicated equation-level innovation scales in the inversion prior; future
 evidence uses unit-variance standardized innovations and a provenance-captured
 synthetic-data generator.
+
+The independent core-parity gate now passes on the complete Gal\'i source:
+8/8 evaluations agree between Python and a clean MacroModelling.jl checkout for
+the non-stochastic steady state and first-order Schur solution. This removes a
+core local-solution uncertainty but does not change the paper's overall
+not-ready status because nonlinear trajectory, likelihood, posterior, and
+same-work GPU gates remain incomplete.
 
 The confirmatory plan is in `../docs/submission_readiness_plan.md`. The paper
 should be promoted to a submission draft only when every hard gate is backed by

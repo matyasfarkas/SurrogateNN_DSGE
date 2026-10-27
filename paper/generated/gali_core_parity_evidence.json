@@ -1,0 +1,193 @@
+{
+  "schema_version": "surrogatenn-dsge-gali-core-parity-evidence/v1",
+  "evidence_level": "independent_core_parity",
+  "source_report": {
+    "name": "gali_core_parity_raw.json",
+    "sha256": "bb9f3d5e40de030a5b63765d08eff81730d272742d44b4c2c64912ee00a113d0",
+    "size_bytes": 143136
+  },
+  "model": {
+    "name": "Gali_2015_chapter_3_nonlinear",
+    "equations_and_variables": 23,
+    "parameters": 16,
+    "sha256": "53f909976abc962494693c8ba5d30223653cee6164fc9f183064e3776240fb55"
+  },
+  "design": {
+    "evaluations": 8,
+    "unique_parameter_points": 7,
+    "duplicate_reference_indices": [
+      0,
+      4
+    ],
+    "parameter_names": [
+      "ϕᵖⁱ",
+      "ϕʸ"
+    ],
+    "theta_points": [
+      [
+        1.5,
+        0.125
+      ],
+      [
+        1.32,
+        0.14
+      ],
+      [
+        1.38,
+        0.135
+      ],
+      [
+        1.44,
+        0.13
+      ],
+      [
+        1.5,
+        0.125
+      ],
+      [
+        1.56,
+        0.12
+      ],
+      [
+        1.62,
+        0.115
+      ],
+      [
+        1.68,
+        0.11
+      ]
+    ]
+  },
+  "repositories": {
+    "surrogatenn_dsge": {
+      "commit": "e6a52ff7f01922885009f3b81fae21447b7c1205",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "macromodelling_jl": {
+      "commit": "b224f74fb892b24918aea27f0c22f609cdba2059",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "environment": {
+    "python": "3.9.6",
+    "jax": "0.4.30",
+    "julia": "1.12.6"
+  },
+  "thresholds": {
+    "steady_state_max_abs": 1e-10,
+    "first_order_max_abs": 1e-08,
+    "python_steady_state_residual_norm": 1e-10
+  },
+  "metrics": {
+    "joint_cases_passed": 8,
+    "joint_cases_attempted": 8,
+    "worst_steady_state_max_abs": 9.059419880941277e-14,
+    "worst_first_order_max_abs": 2.8904878490720876e-11,
+    "worst_python_steady_state_residual_norm": 1.1102230246251565e-16,
+    "per_case": [
+      {
+        "case_id": "theta_0",
+        "theta_index": 0,
+        "phi_pi": 1.5,
+        "phi_y": 0.125,
+        "steady_state_max_abs": 9.059419880941277e-14,
+        "steady_state_rmse": 2.3442121899080935e-14,
+        "first_order_max_abs": 1.2398970739013748e-12,
+        "first_order_rmse": 1.9961084976361106e-13,
+        "python_steady_state_residual_norm": 1.1102230246251565e-16
+      },
+      {
+        "case_id": "theta_1",
+        "theta_index": 1,
+        "phi_pi": 1.32,
+        "phi_y": 0.14,
+        "steady_state_max_abs": 9.059419880941277e-14,
+        "steady_state_rmse": 2.3442121899080935e-14,
+        "first_order_max_abs": 2.8904878490720876e-11,
+        "first_order_rmse": 2.823224349548003e-12,
+        "python_steady_state_residual_norm": 1.1102230246251565e-16
+      },
+      {
+        "case_id": "theta_2",
+        "theta_index": 2,
+        "phi_pi": 1.38,
+        "phi_y": 0.135,
+        "steady_state_max_abs": 9.059419880941277e-14,
+        "steady_state_rmse": 2.3442121899080935e-14,
+        "first_order_max_abs": 2.9558577807620168e-12,
+        "first_order_rmse": 4.1567890814542467e-13,
+        "python_steady_state_residual_norm": 1.1102230246251565e-16
+      },
+      {
+        "case_id": "theta_3",
+        "theta_index": 3,
+        "phi_pi": 1.44,
+        "phi_y": 0.13,
+        "steady_state_max_abs": 9.059419880941277e-14,
+        "steady_state_rmse": 2.3442121899080935e-14,
+        "first_order_max_abs": 2.682298827494378e-12,
+        "first_order_rmse": 3.0001075084981275e-13,
+        "python_steady_state_residual_norm": 1.1102230246251565e-16
+      },
+      {
+        "case_id": "theta_4",
+        "theta_index": 4,
+        "phi_pi": 1.5,
+        "phi_y": 0.125,
+        "steady_state_max_abs": 9.059419880941277e-14,
+        "steady_state_rmse": 2.3442121899080935e-14,
+        "first_order_max_abs": 1.2398970739013748e-12,
+        "first_order_rmse": 1.9961084976361106e-13,
+        "python_steady_state_residual_norm": 1.1102230246251565e-16
+      },
+      {
+        "case_id": "theta_5",
+        "theta_index": 5,
+        "phi_pi": 1.56,
+        "phi_y": 0.12,
+        "steady_state_max_abs": 9.059419880941277e-14,
+        "steady_state_rmse": 2.3442121899080935e-14,
+        "first_order_max_abs": 9.805489753489383e-13,
+        "first_order_rmse": 1.3764194838524252e-13,
+        "python_steady_state_residual_norm": 1.1102230246251565e-16
+      },
+      {
+        "case_id": "theta_6",
+        "theta_index": 6,
+        "phi_pi": 1.62,
+        "phi_y": 0.115,
+        "steady_state_max_abs": 9.059419880941277e-14,
+        "steady_state_rmse": 2.3442121899080935e-14,
+        "first_order_max_abs": 1.8616219676914625e-12,
+        "first_order_rmse": 2.0521977776560785e-13,
+        "python_steady_state_residual_norm": 1.1102230246251565e-16
+      },
+      {
+        "case_id": "theta_7",
+        "theta_index": 7,
+        "phi_pi": 1.68,
+        "phi_y": 0.11,
+        "steady_state_max_abs": 9.059419880941277e-14,
+        "steady_state_rmse": 2.3442121899080935e-14,
+        "first_order_max_abs": 5.8193450058752205e-12,
+        "first_order_rmse": 6.000064104165106e-13,
+        "python_steady_state_residual_norm": 1.1102230246251565e-16
+      }
+    ]
+  },
+  "claims": {
+    "supported": [
+      "The local and upstream files are byte-identical copies of the declared full nonlinear Gali model.",
+      "Python and MacroModelling.jl agree on the non-stochastic steady state at all eight evaluations within the frozen tolerance.",
+      "Python and MacroModelling.jl agree on the first-order Schur solution at all eight evaluations within the frozen tolerance."
+    ],
+    "not_supported": [
+      "nonlinear extended-path trajectory parity",
+      "nonlinear likelihood parity",
+      "posterior fidelity",
+      "GPU correctness or throughput",
+      "publication readiness"
+    ]
+  },
+  "publication_ready": false
+}
