@@ -27,19 +27,24 @@ PYTHON=.venv/bin/python bash benchmarks/run_nonlinear_gali_pilot.sh
 ```
 
 The defaults use CPU, eight parameter vectors, ten observed periods, a
-15-period SEP terminal horizon, 400 training epochs, one chain, 25 warmup
-draws, and 50 retained draws. The longer SEP horizon is deliberate: controlled
-CPU/GPU parity experiments showed that a ten-period terminal horizon truncates
-the persistent price-dispersion response, whereas the otherwise identical
-15-period solve reaches the strict residual tolerance. Change it independently
-with `GALI_SEP_PERIODS`; do not infer it from the data horizon. A fast
-integration check is:
+five-period SEP terminal horizon, 400 training epochs, one chain, 25 warmup
+draws, and 50 retained draws. Horizon five is the longest configuration that
+currently passes the full-scale, order-one, three-node stochastic SEP gate for
+all eight points in the 12% pilot parameter design. It is an explicitly reduced
+pilot horizon, not evidence of terminal-horizon convergence. Local sensitivity
+checks across horizons three, four, and five show visible first-step movement;
+the horizon-four-to-five maximum changes are approximately 0.00040 for log
+output, 0.00122 for annualized inflation, and 0.00139 for the annualized policy
+rate. Horizon six fails the strict residual gate for the difficult design point
+under both sequential and batched CPU solvers. Change the horizon independently
+with `GALI_SEP_PERIODS`, but preflight the exact choice and report sensitivity;
+do not infer it from the data horizon. A fast integration check is:
 
 ```bash
 PYTHON=.venv/bin/python \
 GALI_THETA_DRAWS=4 \
 GALI_PERIODS=4 \
-GALI_SEP_PERIODS=6 \
+GALI_SEP_PERIODS=5 \
 GALI_EPOCHS=5 \
 GALI_HMC_WARMUP=1 \
 GALI_HMC_SAMPLES=2 \
@@ -99,6 +104,25 @@ theta-period pairs. This is a numerical globalization device, not a relaxation
 of the target or quality gate. Preflight the exact theta design, horizon, and
 ladder before a production run; a continuation failure is reported rather than
 silently dropped.
+
+For solver diagnosis, the parity tool can enforce positivity for named level
+variables with `--positive-state-names` and can use the L2 merit function
+consistent with the damped least-squares Newton step via
+`--line-search-norm l2`. Both options are opt-in; strict convergence and target
+acceptance always remain L-infinity residual tests. The pilot runner exposes
+the same controls as `GALI_SEP_POSITIVE_STATE_NAMES` and
+`GALI_SEP_LINE_SEARCH_NORM`. Do not use either option to relabel a failed solve
+as accepted.
+
+Reproduce the current horizon-five CPU gate with:
+
+```bash
+.venv/bin/python benchmarks/diagnose_gali_sep_backend_parity.py \
+  --device cpu --solver batched --theta-draws 8 \
+  --theta-indices 0,1,2,3,4,5,6,7 --parameter-perturbation 0.12 \
+  --periods 5 --order 1 --nnodes 3 --tol 1e-8 --accept-tol 1e-8 \
+  --output benchmarks/results/gali_h5_cpu_preflight.json
+```
 
 ## Freeze confirmatory synthetic data
 

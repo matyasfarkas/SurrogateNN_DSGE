@@ -991,6 +991,19 @@ def test_batched_sep_continuation_scale_validation() -> None:
         mod._validate_batched_sep_continuation_scales("0.25,0.5", target_scale=1.0)
 
 
+def test_parse_sep_positive_state_indices() -> None:
+    mod = _load_profile_module()
+
+    names = ("signed", "level_a", "level_b")
+    assert mod._parse_sep_positive_state_indices("", state_names=names) == ()
+    assert mod._parse_sep_positive_state_indices(
+        "level_b, level_a,level_b",
+        state_names=names,
+    ) == (2, 1)
+    with pytest.raises(ValueError, match="absent from the parsed model"):
+        mod._parse_sep_positive_state_indices("missing", state_names=names)
+
+
 def test_batched_sep_continuation_retries_only_failed_draws(monkeypatch) -> None:
     mod = _load_profile_module()
     model = mod.parse_macro_model(

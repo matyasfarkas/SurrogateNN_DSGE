@@ -586,6 +586,30 @@ def _parse_float_ladder(spec: str) -> tuple[float, ...]:
     return tuple(float(x) for x in _unique_preserve_order(values))
 
 
+def _parse_sep_positive_state_indices(
+    spec: str | Sequence[str] | None,
+    *,
+    state_names: Sequence[str],
+) -> tuple[int, ...]:
+    """Resolve an optional positive-state name list against the parsed model."""
+
+    if spec is None or (isinstance(spec, str) and not spec.strip()):
+        return ()
+    raw_names = spec.split(",") if isinstance(spec, str) else spec
+    normalized_names = [str(name).strip() for name in raw_names if str(name).strip()]
+    names = tuple(str(name) for name in _unique_preserve_order(normalized_names))
+    if not names:
+        return ()
+    available = tuple(str(name) for name in state_names)
+    unknown = tuple(name for name in names if name not in available)
+    if unknown:
+        raise ValueError(
+            "SEP positive-state names are absent from the parsed model: "
+            f"{unknown}. Available names: {available}."
+        )
+    return tuple(available.index(name) for name in names)
+
+
 def _validate_batched_sep_continuation_scales(
     spec: str | Sequence[float] | None,
     *,
@@ -3680,6 +3704,11 @@ def _build_batched_hlt_sep_dataset(
                 "max_iter": int(config.max_iter),
                 "tol": float(config.tol),
                 "accept_tol": None if config.accept_tol is None else float(config.accept_tol),
+                "linear_solver": str(config.linear_solver),
+                "line_search_norm": str(config.line_search_norm),
+                "positive_state_indices": [
+                    int(index) for index in config.positive_state_indices
+                ],
                 "batch_chunk_size": int(effective_chunk_size),
             },
         }
@@ -3756,6 +3785,9 @@ def _build_batched_hlt_sep_dataset(
             "max_iter": int(config.max_iter),
             "tol": float(config.tol),
             "accept_tol": None if config.accept_tol is None else float(config.accept_tol),
+            "linear_solver": str(config.linear_solver),
+            "line_search_norm": str(config.line_search_norm),
+            "positive_state_indices": [int(index) for index in config.positive_state_indices],
             "batch_chunk_size": int(effective_chunk_size),
         },
         "caveat": (
@@ -3943,6 +3975,9 @@ def _build_grid_batched_hlt_sep_arrays(
             "max_iter": int(config.max_iter),
             "tol": float(config.tol),
             "accept_tol": None if config.accept_tol is None else float(config.accept_tol),
+            "linear_solver": str(config.linear_solver),
+            "line_search_norm": str(config.line_search_norm),
+            "positive_state_indices": [int(index) for index in config.positive_state_indices],
             "batch_chunk_size": int(effective_chunk_size),
         },
         "caveat": (
@@ -4028,6 +4063,11 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
         accept_tol=float(args.sep_accept_tol),
         linear_solver=str(args.sep_linear_solver),
         line_search=bool(args.sep_line_search),
+        line_search_norm=str(args.sep_line_search_norm),
+        positive_state_indices=_parse_sep_positive_state_indices(
+            args.sep_positive_state_names,
+            state_names=model.timings.var,
+        ),
     )
     steady_state_mode = str(args.hlt_steady_state_mode).strip().lower()
     if steady_state_mode not in {"fixed-reference", "solve", "solve-or-reference"}:
@@ -4480,6 +4520,11 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
                 "max_iter": int(sep_config.max_iter),
                 "tol": float(sep_config.tol),
                 "accept_tol": None if sep_config.accept_tol is None else float(sep_config.accept_tol),
+                "linear_solver": str(sep_config.linear_solver),
+                "line_search_norm": str(sep_config.line_search_norm),
+                "positive_state_indices": [
+                    int(index) for index in sep_config.positive_state_indices
+                ],
             },
         }
     elif target_builder == "adaptive-sep":
@@ -5519,6 +5564,11 @@ def run_hlt_fixed_steady_state_profile(args: argparse.Namespace) -> dict[str, An
             "max_iter": int(sep_config.max_iter),
             "tol": float(sep_config.tol),
             "accept_tol": float(sep_config.accept_tol),
+            "linear_solver": str(sep_config.linear_solver),
+            "line_search_norm": str(sep_config.line_search_norm),
+            "positive_state_indices": [
+                int(index) for index in sep_config.positive_state_indices
+            ],
         },
         "target_diagnostics": target_diagnostics,
         "dataset_summary": result.dataset_summary,
@@ -5730,6 +5780,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--sep-accept-tol", type=float, default=1e-5)
     parser.add_argument("--sep-linear-solver", choices=("qr", "normal_equations"), default="qr")
     parser.add_argument("--sep-line-search", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--sep-line-search-norm",
+        choices=("inf", "l2"),
+        default="inf",
+        help=(
+            "Residual merit norm used to accept SEP line-search steps. The strict "
+            "convergence and acceptance gates always remain L-infinity norms."
+        ),
+    )
+    parser.add_argument(
+        "--sep-positive-state-names",
+        default="",
+        help=(
+            "Optional comma-separated model variable names solved in log coordinates. "
+            "This enforces positivity during SEP Newton iterations; an empty value "
+            "preserves the level-coordinate solver."
+        ),
+    )
     parser.add_argument("--sep-reps", type=int, default=3)
     parser.add_argument("--sep-batch-size", type=int, default=64)
     parser.add_argument(

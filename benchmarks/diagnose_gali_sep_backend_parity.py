@@ -125,9 +125,24 @@ def _parse_scale_ladder(raw: str, *, default: float) -> tuple[float, ...]:
     return values
 
 
-def _base_solution_summary(solution: Any, elapsed_s: float) -> dict[str, Any]:
+def _base_solution_summary(
+    solution: Any,
+    elapsed_s: float,
+    *,
+    state_names: tuple[str, ...],
+) -> dict[str, Any]:
     stacked = np.asarray(solution.stacked_states, dtype=np.float64)
     mean_path = np.asarray(solution.mean_path, dtype=np.float64)
+    state_dim = len(state_names)
+    state_blocks = np.reshape(stacked, (-1, state_dim))
+    if mean_path.ndim == 2:
+        first_step = mean_path[:, 1]
+        last_step = mean_path[:, -1]
+    elif mean_path.ndim == 3 and mean_path.shape[0] == 1:
+        first_step = mean_path[0, :, 1]
+        last_step = mean_path[0, :, -1]
+    else:
+        raise ValueError(f"Unexpected diagnostic mean_path shape {mean_path.shape}.")
     return {
         "elapsed_s": float(elapsed_s),
         "residual_norm": _jsonable(np.asarray(solution.residual_norm, dtype=np.float64)),
@@ -141,6 +156,19 @@ def _base_solution_summary(solution: Any, elapsed_s: float) -> dict[str, Any]:
         "mean_path_shape": list(mean_path.shape),
         "mean_path_sha256": _sha256_array(mean_path),
         "mean_path_finite": bool(np.isfinite(mean_path).all()),
+        "mean_path_first_step": {
+            name: float(first_step[index]) for index, name in enumerate(state_names)
+        },
+        "mean_path_last_step": {
+            name: float(last_step[index]) for index, name in enumerate(state_names)
+        },
+        "state_extrema": {
+            name: {
+                "min": float(np.min(state_blocks[:, index])),
+                "max": float(np.max(state_blocks[:, index])),
+            }
+            for index, name in enumerate(state_names)
+        },
         "max_residual_index": _jsonable(
             np.asarray(solution.max_residual_index, dtype=np.int64)
         ),
@@ -209,7 +237,11 @@ def _run_sequential(
         )
     _block_tree(result.solution)
     elapsed = time.perf_counter() - started
-    summary = _base_solution_summary(result.solution, elapsed)
+    summary = _base_solution_summary(
+        result.solution,
+        elapsed,
+        state_names=tuple(str(value) for value in model.timings.var),
+    )
     return (
         summary,
         np.asarray(result.solution.stacked_states, dtype=np.float64),
@@ -241,7 +273,11 @@ def _run_batched(
         )
     _block_tree(result.solution)
     elapsed = time.perf_counter() - started
-    summary = _base_solution_summary(result.solution, elapsed)
+    summary = _base_solution_summary(
+        result.solution,
+        elapsed,
+        state_names=tuple(str(value) for value in model.timings.var),
+    )
     initial_residual = result.solution.initial_residual_norm
     final_lambda = result.solution.final_lambda
     termination_code = result.solution.termination_code
@@ -314,6 +350,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         args.stochastic_scale_ladder,
         default=args.stochastic_shock_scale,
     )
+    positive_state_indices = profile._parse_sep_positive_state_indices(
+        args.positive_state_names,
+        state_names=model.timings.var,
+    )
     config = SEPConfig(
         periods=args.periods,
         branching_order=args.order,
@@ -325,8 +365,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         accept_tol=args.accept_tol,
         linear_solver=args.linear_solver,
         line_search=True,
+        line_search_norm=args.line_search_norm,
         newton_regularization=args.newton_regularization,
         lm_lambda_min=args.lm_lambda_min,
+        positive_state_indices=positive_state_indices,
     )
     output: dict[str, Any] = {
         "started_utc": _utc_now(),
@@ -357,11 +399,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "tol": args.tol,
             "accept_tol": args.accept_tol,
             "linear_solver": args.linear_solver,
+            "line_search_norm": args.line_search_norm,
             "newton_regularization": args.newton_regularization,
             "lm_lambda_min": args.lm_lambda_min,
             "deterministic_first_shock": args.deterministic_shock,
             "stochastic_shock_scale": args.stochastic_shock_scale,
             "stochastic_scale_ladder": scale_ladder,
+            "positive_state_names": [
+                str(model.timings.var[index]) for index in positive_state_indices
+            ],
+            "positive_state_indices": list(positive_state_indices),
         },
         "draws": [],
     }
@@ -519,8 +566,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tol", type=float, default=1e-8)
     parser.add_argument("--accept-tol", type=float, default=1e-5)
     parser.add_argument("--linear-solver", choices=("qr", "normal_equations"), default="qr")
+    parser.add_argument("--line-search-norm", choices=("inf", "l2"), default="inf")
     parser.add_argument("--newton-regularization", type=float, default=1e-8)
     parser.add_argument("--lm-lambda-min", type=float, default=1e-12)
+    parser.add_argument(
+        "--positive-state-names",
+        default="",
+        help=(
+            "Optional comma-separated Galí variable names represented in log coordinates "
+            "during the SEP Newton solve."
+        ),
+    )
     parser.add_argument("--deterministic-shock", type=float, default=0.12)
     parser.add_argument("--stochastic-shock-scale", type=float, default=1.0)
     parser.add_argument(

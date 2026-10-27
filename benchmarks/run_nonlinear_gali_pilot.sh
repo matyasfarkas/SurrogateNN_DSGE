@@ -14,9 +14,14 @@ mkdir -p "$RESULT_ROOT"
 export JAX_ENABLE_X64="${JAX_ENABLE_X64:-1}"
 GALI_SEP_ORDER="${GALI_SEP_ORDER:-1}"
 GALI_SEP_NNODES="${GALI_SEP_NNODES:-3}"
-GALI_SEP_PERIODS="${GALI_SEP_PERIODS:-15}"
+# Horizon 5 is the longest currently validated full-scale stochastic horizon
+# across the eight-point pilot design. Longer horizons must pass the same
+# preflight before use; they are not silently substituted.
+GALI_SEP_PERIODS="${GALI_SEP_PERIODS:-5}"
 GALI_SEP_ACCEPT_TOL="${GALI_SEP_ACCEPT_TOL:-1e-8}"
+GALI_SEP_LINE_SEARCH_NORM="${GALI_SEP_LINE_SEARCH_NORM:-inf}"
 GALI_SEP_CONTINUATION_SCALES="${GALI_SEP_CONTINUATION_SCALES:-}"
+GALI_SEP_POSITIVE_STATE_NAMES="${GALI_SEP_POSITIVE_STATE_NAMES:-}"
 GALI_SEED="${GALI_SEED:-20261019}"
 GALI_HMC_SEED="${GALI_HMC_SEED:-20261023}"
 GALI_PAYLOAD="${GALI_PAYLOAD:-benchmarks/gali_nonlinear_pilot_payload.json}"
@@ -61,6 +66,7 @@ ARGS=(
   --sep-accept-tol "$GALI_SEP_ACCEPT_TOL"
   --sep-linear-solver qr
   --sep-line-search
+  --sep-line-search-norm "$GALI_SEP_LINE_SEARCH_NORM"
   --epochs "$GALI_EPOCHS"
   --hidden "${GALI_HIDDEN:-64}"
   --blocks "${GALI_BLOCKS:-1}"
@@ -111,6 +117,10 @@ fi
 
 if [[ -n "$GALI_SEP_CONTINUATION_SCALES" ]]; then
   ARGS+=(--hlt-batched-sep-continuation-scales "$GALI_SEP_CONTINUATION_SCALES")
+fi
+
+if [[ -n "$GALI_SEP_POSITIVE_STATE_NAMES" ]]; then
+  ARGS+=(--sep-positive-state-names "$GALI_SEP_POSITIVE_STATE_NAMES")
 fi
 
 if [[ "$DEVICE" == "gpu" ]]; then

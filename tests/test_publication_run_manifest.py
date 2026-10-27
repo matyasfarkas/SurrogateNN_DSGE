@@ -199,8 +199,9 @@ def test_gali_pilot_dry_run_uses_stochastic_sep_and_explicit_seeds(
 
     assert "--sep-order 1" in completed.stdout
     assert "--sep-nnodes 3" in completed.stdout
-    assert "--sep-periods 15" in completed.stdout
+    assert "--sep-periods 5" in completed.stdout
     assert "--sep-accept-tol 1e-8" in completed.stdout
+    assert "--sep-line-search-norm inf" in completed.stdout
     assert "--hlt-batched-sep-continuation-scales 0.5\\,0.75\\,1.0" in completed.stdout
     assert completed.stdout.startswith("JAX_ENABLE_X64=1 ")
     assert "--no-calibrate-residual-shrinkage" in completed.stdout

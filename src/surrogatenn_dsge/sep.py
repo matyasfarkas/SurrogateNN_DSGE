@@ -102,6 +102,8 @@ class SEPConfig:
     line_search_factor: float = 0.5
     line_search_min_alpha: float = 1e-4
     line_search_batch: bool = True
+    line_search_norm: str = "inf"
+    positive_state_indices: tuple[int, ...] = ()
     newton_regularization: float = 1e-8
     lm_lambda_scale: float = 10.0
     lm_lambda_min: float = 1e-12
@@ -217,6 +219,32 @@ def _validate_sep_config(config: SEPConfig, *, shock_dim: int) -> None:
             "SEPConfig.line_search_min_alpha must be in (0, 1], "
             f"got {config.line_search_min_alpha}."
         )
+    if config.line_search_norm not in {"inf", "l2"}:
+        raise ValueError(
+            "SEPConfig.line_search_norm must be 'inf' or 'l2', "
+            f"got {config.line_search_norm!r}."
+        )
+    raw_positive_indices = tuple(config.positive_state_indices)
+    if any(
+        isinstance(index, (bool, np.bool_))
+        or not isinstance(index, (int, np.integer))
+        for index in raw_positive_indices
+    ):
+        raise ValueError(
+            "SEPConfig.positive_state_indices must contain integer indices, "
+            f"got {raw_positive_indices}."
+        )
+    positive_indices = tuple(int(index) for index in raw_positive_indices)
+    if any(index < 0 for index in positive_indices):
+        raise ValueError(
+            "SEPConfig.positive_state_indices must contain non-negative indices, "
+            f"got {positive_indices}."
+        )
+    if len(set(positive_indices)) != len(positive_indices):
+        raise ValueError(
+            "SEPConfig.positive_state_indices must not contain duplicates, "
+            f"got {positive_indices}."
+        )
     if config.newton_regularization <= 0.0:
         raise ValueError(
             "SEPConfig.newton_regularization must be > 0, "
@@ -251,6 +279,57 @@ def _sep_line_search_alphas(config: SEPConfig) -> jax.Array:
             break
         alpha *= config.line_search_factor
     return jnp.asarray(alphas, dtype=jnp.float64)
+
+
+def _sep_residual_merit(
+    residual: jax.Array,
+    *,
+    norm: str,
+    axis: int | None = None,
+) -> jax.Array:
+    residual_arr = jnp.asarray(residual, dtype=jnp.float64)
+    if norm == "inf":
+        return jnp.max(jnp.abs(residual_arr), axis=axis)
+    if norm == "l2":
+        return jnp.sqrt(jnp.sum(jnp.square(residual_arr), axis=axis))
+    raise ValueError(f"Unknown SEP line-search norm {norm!r}.")
+
+
+def _sep_positive_coordinate_mask(
+    *,
+    counts: Sequence[int],
+    state_dim: int,
+    positive_state_indices: Sequence[int],
+) -> jax.Array:
+    """Return the flattened mask of level states represented in log coordinates."""
+
+    indices = tuple(int(index) for index in positive_state_indices)
+    invalid = tuple(index for index in indices if index >= int(state_dim))
+    if invalid:
+        raise ValueError(
+            "SEPConfig.positive_state_indices contains indices outside the state vector: "
+            f"{invalid} for state_dim={state_dim}."
+        )
+    state_mask = np.zeros((int(state_dim),), dtype=bool)
+    if indices:
+        state_mask[np.asarray(indices, dtype=np.int64)] = True
+    repeated = np.concatenate(
+        [np.tile(state_mask, int(counts[t])) for t in range(1, len(counts))],
+        axis=0,
+    )
+    return jnp.asarray(repeated, dtype=bool)
+
+
+def _sep_levels_to_solver_coordinates(values: jax.Array, positive_mask: jax.Array) -> jax.Array:
+    values_arr = jnp.asarray(values, dtype=jnp.float64)
+    positive_values = jnp.where(positive_mask, values_arr, 1.0)
+    return jnp.where(positive_mask, jnp.log(positive_values), values_arr)
+
+
+def _sep_solver_to_level_coordinates(values: jax.Array, positive_mask: jax.Array) -> jax.Array:
+    values_arr = jnp.asarray(values, dtype=jnp.float64)
+    positive_values = jnp.where(positive_mask, values_arr, 0.0)
+    return jnp.where(positive_mask, jnp.exp(positive_values), values_arr)
 
 
 def gauss_hermite_rule(nnodes: int, shock_dim: int, shock_scale: float = 1.0) -> GaussHermiteRule:
@@ -1110,24 +1189,39 @@ def solve_batched_stochastic_extended_path_residual_expectation(
     for t in range(1, config.periods + 1):
         time_offsets.append(time_offsets[-1] + counts[t] * state_dim)
     expected_stacked_size = time_offsets[-1]
+    positive_mask = _sep_positive_coordinate_mask(
+        counts=counts,
+        state_dim=state_dim,
+        positive_state_indices=config.positive_state_indices,
+    )
 
     def unflatten(stacked: jax.Array) -> tuple[jax.Array, ...]:
+        level_stacked = _sep_solver_to_level_coordinates(stacked, positive_mask)
         values = []
         for t in range(1, config.periods + 1):
             start = time_offsets[t - 1]
             end = time_offsets[t]
-            values.append(jnp.reshape(stacked[start:end], (counts[t], state_dim)))
+            values.append(jnp.reshape(level_stacked[start:end], (counts[t], state_dim)))
         return tuple(values)
 
     def unflatten_batch(stacked_batch: jax.Array) -> tuple[jax.Array, ...]:
+        level_stacked_batch = _sep_solver_to_level_coordinates(
+            stacked_batch,
+            positive_mask,
+        )
         values = []
         for t in range(1, config.periods + 1):
             start = time_offsets[t - 1]
             end = time_offsets[t]
-            values.append(jnp.reshape(stacked_batch[:, start:end], (batch_size, counts[t], state_dim)))
+            values.append(
+                jnp.reshape(
+                    level_stacked_batch[:, start:end],
+                    (batch_size, counts[t], state_dim),
+                )
+            )
         return tuple(values)
 
-    terminal_guess = jnp.concatenate(
+    terminal_guess_levels = jnp.concatenate(
         [
             jnp.reshape(
                 jnp.broadcast_to(
@@ -1139,6 +1233,10 @@ def solve_batched_stochastic_extended_path_residual_expectation(
             for t in range(1, config.periods + 1)
         ],
         axis=1,
+    )
+    terminal_guess = _sep_levels_to_solver_coordinates(
+        terminal_guess_levels,
+        positive_mask,
     )
     def coerce_initial_guess(
         values: Sequence[Sequence[float]],
@@ -1157,7 +1255,7 @@ def solve_batched_stochastic_extended_path_residual_expectation(
                 f"{label} must flatten per draw to shape "
                 f"({expected_stacked_size},), got {flattened.shape[1]}."
             )
-        return flattened
+        return _sep_levels_to_solver_coordinates(flattened, positive_mask)
 
     primary_guess = (
         None
@@ -1367,6 +1465,11 @@ def solve_batched_stochastic_extended_path_residual_expectation(
     for _ in range(1, config.max_iter + 1):
         residual = eval_residual(current)
         residual_norm = jnp.max(jnp.abs(residual), axis=1)
+        residual_merit = _sep_residual_merit(
+            residual,
+            norm=config.line_search_norm,
+            axis=1,
+        )
         converged_now = solver_active & (residual_norm < float(config.tol))
         termination_code = jnp.where(
             converged_now,
@@ -1380,7 +1483,7 @@ def solve_batched_stochastic_extended_path_residual_expectation(
         jacobian = eval_jacobian(current)
 
         candidate = current
-        candidate_norm = residual_norm
+        candidate_merit = residual_merit
         accepted_step = jnp.zeros((batch_size,), dtype=bool)
         accepted_lambda = current_lambda
         trial_lambda = current_lambda
@@ -1392,16 +1495,24 @@ def solve_batched_stochastic_extended_path_residual_expectation(
                 for alpha in tuple(float(value) for value in np.asarray(line_search_alphas)):
                     trial = current + float(alpha) * step
                     trial_residual = eval_residual(trial)
-                    trial_norm = jnp.max(jnp.abs(trial_residual), axis=1)
+                    trial_merit = _sep_residual_merit(
+                        trial_residual,
+                        norm=config.line_search_norm,
+                        axis=1,
+                    )
                     improving = (
                         pending
                         & finite_step
                         & (~accepted_step)
-                        & jnp.isfinite(trial_norm)
-                        & (trial_norm < residual_norm)
+                        & jnp.isfinite(trial_merit)
+                        & (trial_merit < residual_merit)
                     )
                     candidate = jnp.where(improving[:, None], trial, candidate)
-                    candidate_norm = jnp.where(improving, trial_norm, candidate_norm)
+                    candidate_merit = jnp.where(
+                        improving,
+                        trial_merit,
+                        candidate_merit,
+                    )
                     accepted_lambda = jnp.where(improving, trial_lambda, accepted_lambda)
                     accepted_step = accepted_step | improving
                     if not bool(np.any(np.asarray(active & (~accepted_step)))):
@@ -1409,14 +1520,22 @@ def solve_batched_stochastic_extended_path_residual_expectation(
             else:
                 trial = current + step
                 trial_residual = eval_residual(trial)
-                trial_norm = jnp.max(jnp.abs(trial_residual), axis=1)
+                trial_merit = _sep_residual_merit(
+                    trial_residual,
+                    norm=config.line_search_norm,
+                    axis=1,
+                )
                 accepted_now = (
                     pending
                     & finite_step
-                    & jnp.isfinite(trial_norm)
+                    & jnp.isfinite(trial_merit)
                 )
                 candidate = jnp.where(accepted_now[:, None], trial, candidate)
-                candidate_norm = jnp.where(accepted_now, trial_norm, candidate_norm)
+                candidate_merit = jnp.where(
+                    accepted_now,
+                    trial_merit,
+                    candidate_merit,
+                )
                 accepted_lambda = jnp.where(accepted_now, trial_lambda, accepted_lambda)
                 accepted_step = accepted_step | accepted_now
             if not bool(np.any(np.asarray(active & (~accepted_step)))):
@@ -1431,7 +1550,7 @@ def solve_batched_stochastic_extended_path_residual_expectation(
         iterations = iterations + (active & accepted_step).astype(jnp.int32)
         if config.linear_solver == "normal_equations":
             current_lambda = jnp.where(
-                active & accepted_step & (candidate_norm < residual_norm),
+                active & accepted_step & (candidate_merit < residual_merit),
                 jnp.maximum(
                     accepted_lambda / float(config.lm_lambda_scale),
                     float(config.lm_lambda_min),
@@ -1469,6 +1588,7 @@ def solve_batched_stochastic_extended_path_residual_expectation(
         termination_code,
     )
 
+    level_current = _sep_solver_to_level_coordinates(current, positive_mask)
     states_by_time_batch = unflatten_batch(current)
     mean_path_blocks = [initial_state_arr]
     for t in range(1, config.periods + 1):
@@ -1476,7 +1596,7 @@ def solve_batched_stochastic_extended_path_residual_expectation(
         mean_path_blocks.append(jnp.sum(weighted, axis=1))
 
     return BatchedSEPSolution(
-        stacked_states=current,
+        stacked_states=level_current,
         mean_path=jnp.stack(mean_path_blocks, axis=2),
         residual_norm=residual_norm,
         converged=converged,
@@ -1597,18 +1717,28 @@ def _solve_stochastic_extended_path_impl(
     time_offsets = [0]
     for t in range(1, config.periods + 1):
         time_offsets.append(time_offsets[-1] + counts[t] * state_dim)
+    positive_mask = _sep_positive_coordinate_mask(
+        counts=counts,
+        state_dim=state_dim,
+        positive_state_indices=config.positive_state_indices,
+    )
+    if config.positive_state_indices and jacobian_fn is not None:
+        raise NotImplementedError(
+            "Custom SEP Jacobians are not supported with positive-state log coordinates."
+        )
 
     def unflatten(stacked: jax.Array) -> tuple[jax.Array, ...]:
+        level_stacked = _sep_solver_to_level_coordinates(stacked, positive_mask)
         values = []
         for t in range(1, config.periods + 1):
             start = time_offsets[t - 1]
             end = time_offsets[t]
-            values.append(jnp.reshape(stacked[start:end], (counts[t], state_dim)))
+            values.append(jnp.reshape(level_stacked[start:end], (counts[t], state_dim)))
         return tuple(values)
 
     expected_stacked_size = time_offsets[-1]
     if initial_guess is None:
-        guess = jnp.concatenate(
+        guess_levels = jnp.concatenate(
             [
                 jnp.tile(terminal_state_arr, (counts[t], 1)).reshape(-1)
                 for t in range(1, config.periods + 1)
@@ -1617,12 +1747,13 @@ def _solve_stochastic_extended_path_impl(
         )
     else:
         guess_arr = jnp.asarray(initial_guess, dtype=jnp.float64)
-        guess = guess_arr.reshape(-1)
-        if guess.shape != (expected_stacked_size,):
+        guess_levels = guess_arr.reshape(-1)
+        if guess_levels.shape != (expected_stacked_size,):
             raise ValueError(
                 "initial_guess must flatten to shape "
-                f"({expected_stacked_size},), got {guess.shape}."
+                f"({expected_stacked_size},), got {guess_levels.shape}."
             )
+    guess = _sep_levels_to_solver_coordinates(guess_levels, positive_mask)
 
     def residual_vector_loop(stacked: jax.Array) -> jax.Array:
         states_by_time = unflatten(stacked)
@@ -2008,6 +2139,14 @@ def _solve_stochastic_extended_path_impl(
             converged = True
             iterations = iteration - 1
             break
+        residual_merit = float(
+            np.asarray(
+                _sep_residual_merit(
+                    residual,
+                    norm=config.line_search_norm,
+                )
+            )
+        )
 
         if jacobian_method_used == "finite_difference":
             jacobian = _finite_difference_jacobian(residual_eval, current)
@@ -2023,7 +2162,7 @@ def _solve_stochastic_extended_path_impl(
 
         accepted = False
         candidate = current
-        err_after = residual_norm
+        err_after = residual_merit
         lambda_value = current_lambda
         while lambda_value <= config.lm_lambda_max:
             step = direction_eval(
@@ -2040,10 +2179,17 @@ def _solve_stochastic_extended_path_impl(
                 batch_search_finished = False
                 trial = current + step
                 trial_residual = residual_eval(trial)
-                trial_norm = float(np.asarray(jnp.linalg.norm(trial_residual, ord=jnp.inf)))
-                if np.isfinite(trial_norm) and trial_norm < residual_norm:
+                trial_merit = float(
+                    np.asarray(
+                        _sep_residual_merit(
+                            trial_residual,
+                            norm=config.line_search_norm,
+                        )
+                    )
+                )
+                if np.isfinite(trial_merit) and trial_merit < residual_merit:
                     candidate = trial
-                    err_after = trial_norm
+                    err_after = trial_merit
                     if active_solver == "normal_equations":
                         current_lambda = max(
                             lambda_value / config.lm_lambda_scale,
@@ -2059,9 +2205,13 @@ def _solve_stochastic_extended_path_impl(
                     try:
                         trials = current[None, :] + line_search_alpha_tail[:, None] * step[None, :]
                         trial_residuals = batched_residual_eval(trials)
-                        trial_norms = jnp.max(jnp.abs(trial_residuals), axis=1)
-                        improving = jnp.isfinite(trial_norms) & (
-                            trial_norms < residual_norm
+                        trial_merits = _sep_residual_merit(
+                            trial_residuals,
+                            norm=config.line_search_norm,
+                            axis=1,
+                        )
+                        improving = jnp.isfinite(trial_merits) & (
+                            trial_merits < residual_merit
                         )
                         improving_np = np.asarray(improving)
                         batch_search_finished = True
@@ -2069,7 +2219,7 @@ def _solve_stochastic_extended_path_impl(
                             accepted_index = int(np.flatnonzero(improving_np)[0])
                             candidate = trials[accepted_index]
                             err_after = float(
-                                np.asarray(trial_norms[accepted_index])
+                                np.asarray(trial_merits[accepted_index])
                             )
                             if active_solver == "normal_equations":
                                 current_lambda = max(
@@ -2084,10 +2234,17 @@ def _solve_stochastic_extended_path_impl(
                     for alpha in line_search_alpha_values[1:]:
                         trial = current + alpha * step
                         trial_residual = residual_eval(trial)
-                        trial_norm = float(np.asarray(jnp.linalg.norm(trial_residual, ord=jnp.inf)))
-                        if np.isfinite(trial_norm) and trial_norm < residual_norm:
+                        trial_merit = float(
+                            np.asarray(
+                                _sep_residual_merit(
+                                    trial_residual,
+                                    norm=config.line_search_norm,
+                                )
+                            )
+                        )
+                        if np.isfinite(trial_merit) and trial_merit < residual_merit:
                             candidate = trial
-                            err_after = trial_norm
+                            err_after = trial_merit
                             if active_solver == "normal_equations":
                                 current_lambda = max(
                                     lambda_value / config.lm_lambda_scale,
@@ -2099,12 +2256,19 @@ def _solve_stochastic_extended_path_impl(
                 alpha = 1.0
                 trial = current + alpha * step
                 trial_residual = residual_eval(trial)
-                trial_norm = float(np.asarray(jnp.linalg.norm(trial_residual, ord=jnp.inf)))
-                if np.isfinite(trial_norm):
+                trial_merit = float(
+                    np.asarray(
+                        _sep_residual_merit(
+                            trial_residual,
+                            norm=config.line_search_norm,
+                        )
+                    )
+                )
+                if np.isfinite(trial_merit):
                     candidate = trial
-                    err_after = trial_norm
+                    err_after = trial_merit
                     if active_solver == "normal_equations":
-                        if trial_norm < residual_norm:
+                        if trial_merit < residual_merit:
                             current_lambda = max(
                                 lambda_value / config.lm_lambda_scale,
                                 config.lm_lambda_min,
@@ -2157,6 +2321,7 @@ def _solve_stochastic_extended_path_impl(
     converged = residual_norm < config.tol
     accepted = bool(np.isfinite(residual_norm) and residual_norm <= accept_threshold)
 
+    level_current = _sep_solver_to_level_coordinates(current, positive_mask)
     states_by_time = unflatten(current)
     mean_path = [initial_state_arr]
     for t in range(1, config.periods + 1):
@@ -2164,7 +2329,7 @@ def _solve_stochastic_extended_path_impl(
         mean_path.append(jnp.sum(weighted, axis=0))
 
     return SEPSolution(
-        stacked_states=current,
+        stacked_states=level_current,
         mean_path=jnp.stack(mean_path, axis=1),
         residual_norm=residual_norm,
         converged=converged,

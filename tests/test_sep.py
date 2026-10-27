@@ -18,6 +18,19 @@ def test_gauss_hermite_rule_has_unit_total_weight() -> None:
     np.testing.assert_allclose(jnp.sum(rule.weights), 1.0, rtol=1e-12, atol=1e-12)
 
 
+def test_sep_line_search_merit_supports_inf_and_l2_norms() -> None:
+    residual = jnp.asarray([[3.0, 4.0], [5.0, 12.0]], dtype=jnp.float64)
+
+    np.testing.assert_allclose(
+        sep_module._sep_residual_merit(residual, norm="inf", axis=1),
+        np.asarray([4.0, 12.0]),
+    )
+    np.testing.assert_allclose(
+        sep_module._sep_residual_merit(residual, norm="l2", axis=1),
+        np.asarray([5.0, 13.0]),
+    )
+
+
 def test_sep_zero_shock_linear_model_returns_zero_mean_path() -> None:
     def residual(y_prev, y_curr, expected_next, shock, params):
         return y_curr - (0.5 * y_prev + 0.3 * expected_next + shock)
@@ -88,6 +101,94 @@ def test_sep_handles_nonlinear_expectational_equation() -> None:
     assert solution.converged
     assert solution.residual_norm < 1e-8
     assert np.all(np.isfinite(solution.mean_path))
+
+
+def test_sep_positive_state_log_coordinates_avoid_invalid_level_newton_steps() -> None:
+    def residual(y_prev, y_curr, expected_next, shock, params):
+        del y_prev, expected_next, shock, params
+        return jnp.asarray([jnp.log(y_curr[0]) - jnp.log(2.0)], dtype=jnp.float64)
+
+    level_solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[100.0],
+        terminal_state=[100.0],
+        shock_dim=0,
+        config=SEPConfig(
+            periods=1,
+            branching_order=0,
+            max_iter=5,
+            tol=1e-10,
+            line_search_maxit=2,
+            newton_regularization=1e-8,
+            lm_lambda_max=1e-8,
+        ),
+    )
+    log_coordinate_solution = solve_stochastic_extended_path(
+        residual,
+        initial_state=[100.0],
+        terminal_state=[100.0],
+        shock_dim=0,
+        config=SEPConfig(
+            periods=1,
+            branching_order=0,
+            max_iter=5,
+            tol=1e-10,
+            line_search_maxit=2,
+            positive_state_indices=(0,),
+            newton_regularization=1e-8,
+            lm_lambda_max=1e-8,
+        ),
+    )
+
+    assert not level_solution.converged
+    assert log_coordinate_solution.converged
+    np.testing.assert_allclose(
+        log_coordinate_solution.stacked_states,
+        np.asarray([2.0]),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        log_coordinate_solution.mean_path,
+        np.asarray([[100.0, 2.0]]),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+
+
+def test_batched_sep_positive_state_log_coordinates_return_level_states() -> None:
+    def conditional_residual(y_prev, y_curr, y_next, shock, params):
+        del y_prev, y_next, shock, params
+        return jnp.asarray([jnp.log(y_curr[0]) - jnp.log(2.0)], dtype=jnp.float64)
+
+    solution = solve_batched_stochastic_extended_path_residual_expectation(
+        conditional_residual,
+        initial_state=[[100.0], [50.0]],
+        terminal_state=[[100.0], [50.0]],
+        shock_dim=0,
+        deterministic_shocks=np.zeros((2, 1, 0), dtype=np.float64),
+        config=SEPConfig(
+            periods=1,
+            branching_order=0,
+            max_iter=5,
+            tol=1e-10,
+            positive_state_indices=(0,),
+        ),
+    )
+
+    np.testing.assert_array_equal(solution.converged, np.asarray([True, True]))
+    np.testing.assert_allclose(
+        solution.stacked_states,
+        np.asarray([[2.0], [2.0]]),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        solution.mean_path[:, :, 1],
+        np.asarray([[2.0], [2.0]]),
+        rtol=1e-10,
+        atol=1e-10,
+    )
 
 
 def test_sep_accept_tol_allows_usable_solution_without_strict_convergence() -> None:
@@ -983,6 +1084,58 @@ def test_sep_validates_bad_config_values() -> None:
                 branching_order=1,
                 nnodes=3,
                 line_search_maxit=0,
+            ),
+        )
+    with np.testing.assert_raises_regex(ValueError, "line_search_norm"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(
+                periods=3,
+                branching_order=1,
+                nnodes=3,
+                line_search_norm="bad_norm",
+            ),
+        )
+    with np.testing.assert_raises_regex(ValueError, "integer indices"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(
+                periods=3,
+                branching_order=1,
+                nnodes=3,
+                positive_state_indices=(0.5,),
+            ),
+        )
+    with np.testing.assert_raises_regex(ValueError, "must not contain duplicates"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(
+                periods=3,
+                branching_order=1,
+                nnodes=3,
+                positive_state_indices=(0, 0),
+            ),
+        )
+    with np.testing.assert_raises_regex(ValueError, "outside the state vector"):
+        solve_stochastic_extended_path(
+            residual,
+            initial_state=[0.0],
+            terminal_state=[0.0],
+            shock_dim=1,
+            config=SEPConfig(
+                periods=3,
+                branching_order=1,
+                nnodes=3,
+                positive_state_indices=(1,),
             ),
         )
 
