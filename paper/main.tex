@@ -34,10 +34,10 @@ $1.93\times10^{-10}$. This result establishes a reduced numerical pilot, not
 horizon convergence: the hard design fails under both solvers at horizon six,
 and first-step outcomes still move between horizons four and five. Separate
 clean-revision comparisons against MacroModelling.jl match the non-stochastic
-steady state and first-order Schur solution and, at a three-period horizon, the
+steady state and first-order Schur solution and, at a five-period horizon, the
 complete order-one sparse nonlinear scenario tree. Across eight evaluations,
-the worst tree and expected-path discrepancies are $1.75\times10^{-7}$ and
-$7.22\times10^{-9}$. These are core and reduced-horizon trajectory checks, not
+the worst tree and expected-path discrepancies are $6.40\times10^{-8}$ and
+$6.50\times10^{-9}$. These are core and reduced-horizon trajectory checks, not
 production-horizon likelihood or posterior parity. We therefore pair the method
 with executable gates for stochastic-solution accuracy, independent parity,
 untouched test performance, posterior agreement, multichain sampling, and
@@ -94,7 +94,7 @@ complete Gal\'i source, inject the policy coefficients by name despite their
 different internal parameter orders, and retain the duplicated reference in the
 eight-case denominator. Every non-stochastic steady state and first-order Schur
 solution passes its frozen tolerance. A second comparison activates all three
-shock channels and matches the complete three-period, order-one sparse nonlinear
+shock channels and matches the complete five-period, order-one sparse nonlinear
 scenario tree, rather than only its central path. This reduced-horizon result
 does not establish production-horizon trajectory or likelihood parity.
 
@@ -538,12 +538,12 @@ the result concerns a non-stochastic steady state and local first-order
 solution.
 
 Table~\ref{tab:gali-sep-parity} extends the independent check to nonlinear
-stochastic extended path at a frozen three-period horizon. Both implementations
-solve the complete sparse scenario tree with group counts $(1,1,9,9)$ and all
+stochastic extended path at a frozen five-period horizon. Both implementations
+solve the complete sparse scenario tree with group counts $(1,1,9,9,9,9)$ and all
 three first-period shock channels active. All eight evaluations pass. The worst
 complete-tree and expected-path discrepancies are \GaliSEPTreeMax{} and
 \GaliSEPMeanMax{}, respectively, while both implementations remain below the
-$10^{-8}$ residual gate. Repeating the reference calibration at indices 0 and 4
+$10^{-10}$ residual gate. Repeating the reference calibration at indices 0 and 4
 produces identical trees within each implementation. This result closes the
 reduced-horizon nonlinear-tree subgate only. It neither resolves the observed
 horizon-five-to-six instability nor validates a nonlinear likelihood or
@@ -581,9 +581,13 @@ evidence uses unit-variance standardized innovations. An exact structural
 posterior instead requires explicit support handling and an economically
 defined likelihood. The sampler budgets are too small for convergence
 diagnostics, and the data are synthetic and short. The independent nonlinear
-Julia comparison is restricted to a three-period sparse tree, a single frozen
+Julia comparison is restricted to a five-period sparse tree, a single frozen
 first-period shock vector, and seven unique policy-rule points. It does not
-establish production-horizon trajectory or likelihood parity. The current
+establish production-horizon trajectory or likelihood parity. At the pinned
+upstream revision, the public likelihood interface exposes neither SEP controls
+nor per-period nonlinear likelihood contributions, so direct nonlinear
+likelihood parity remains an explicitly open implementation and evidence task.
+The current
 evidence therefore supports neither exact nonlinear posterior sampling nor an
 end-to-end speedup claim.
 
@@ -608,7 +612,7 @@ terminal horizon, and the hard design fails at horizon six. Publication
 readiness therefore depends on terminal-horizon validation, an untouched test
 design, an independently converged nonlinear posterior reference,
 production-horizon likelihood parity, efficient multichain sampling, and
-same-work timing. The steady-state, first-order, and reduced three-period
+same-work timing. The steady-state, first-order, and reduced five-period
 nonlinear-tree portions of the cross-language gate now pass on the full source.
 The protocol makes the remaining requirements falsifiable and preserves
 negative results rather than redefining success after a run.

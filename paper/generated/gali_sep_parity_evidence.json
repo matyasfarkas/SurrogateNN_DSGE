@@ -1,10 +1,10 @@
 {
-  "schema_version": "surrogatenn-dsge-gali-sep-parity-evidence/v1",
+  "schema_version": "surrogatenn-dsge-gali-sep-parity-evidence/v2",
   "evidence_level": "independent_reduced_horizon_nonlinear_tree_parity",
   "source_report": {
-    "name": "gali_sep_all_clean_v2.json",
-    "sha256": "0bf2508c3744ad0f111244596d93fa4706f1e8f16ea36edf60bfd944ba935bbc",
-    "size_bytes": 321446
+    "name": "gali_sep_h5_all_clean_v2.json",
+    "sha256": "2dd04e5f118c1ae9be499eaf1468349483c42c7b8d6cfcb31833ab5cf2c4ecb8",
+    "size_bytes": 566234
   },
   "model": {
     "name": "Gali_2015_chapter_3_nonlinear",
@@ -60,13 +60,13 @@
       0.1
     ],
     "configuration": {
-      "periods": 3,
+      "periods": 5,
       "branching_order": 1,
       "nnodes": 3,
       "sparse_tree": true,
-      "max_iter": 80,
-      "tol": 1e-08,
-      "accept_tol": 1e-08,
+      "max_iter": 120,
+      "tol": 1e-10,
+      "accept_tol": 1e-10,
       "linear_solver": "qr",
       "fallback_solver": null,
       "stall_iters": 25,
@@ -77,12 +77,14 @@
       1,
       1,
       9,
+      9,
+      9,
       9
     ]
   },
   "repositories": {
     "surrogatenn_dsge": {
-      "commit": "a68b996c03486faa4e31059cfba04e7334c90f13"
+      "commit": "790fe8011b8a46f55ff0187867b1c60f4b898f34"
     },
     "macromodelling_jl": {
       "commit": "b224f74fb892b24918aea27f0c22f609cdba2059"
@@ -100,16 +102,16 @@
     "steady_state_max_abs": 1e-10,
     "tree_max_abs": 1e-06,
     "mean_path_max_abs": 1e-08,
-    "solver_residual": 1e-08
+    "solver_residual": 1e-10
   },
   "metrics": {
     "joint_cases_passed": 8,
     "joint_cases_attempted": 8,
     "worst_steady_state_max_abs": 9.059419880941277e-14,
-    "worst_tree_max_abs": 1.7534523166773397e-07,
-    "worst_mean_path_max_abs": 7.217006992021879e-09,
-    "worst_python_residual_norm": 9.23399912089451e-09,
-    "worst_julia_residual_norm": 9.213550977715812e-09,
+    "worst_tree_max_abs": 6.39904049748452e-08,
+    "worst_mean_path_max_abs": 6.5006817706603215e-09,
+    "worst_python_residual_norm": 5.6348163334900845e-11,
+    "worst_julia_residual_norm": 8.49798703628224e-11,
     "per_case": [
       {
         "case_id": "theta_0",
@@ -117,12 +119,12 @@
         "phi_pi": 1.5,
         "phi_y": 0.125,
         "steady_state_max_abs": 9.059419880941277e-14,
-        "tree_max_abs": 1.2165448204370932e-07,
-        "tree_rmse": 8.346565168417586e-09,
-        "mean_path_max_abs": 5.853360907082106e-09,
-        "mean_path_rmse": 1.123444576996513e-09,
-        "python_residual_norm": 6.5295151507882565e-09,
-        "julia_residual_norm": 9.213550977715812e-09
+        "tree_max_abs": 2.222679995611543e-08,
+        "tree_rmse": 1.113437832529716e-09,
+        "mean_path_max_abs": 2.461568726630503e-09,
+        "mean_path_rmse": 3.4311925918224714e-10,
+        "python_residual_norm": 2.3631792496584285e-11,
+        "julia_residual_norm": 8.49798703628224e-11
       },
       {
         "case_id": "theta_1",
@@ -130,12 +132,12 @@
         "phi_pi": 1.32,
         "phi_y": 0.14,
         "steady_state_max_abs": 9.059419880941277e-14,
-        "tree_max_abs": 1.7534523166773397e-07,
-        "tree_rmse": 1.122973403922256e-08,
-        "mean_path_max_abs": 5.608707276394398e-09,
-        "mean_path_rmse": 1.015637441739777e-09,
-        "python_residual_norm": 5.007778046406397e-14,
-        "julia_residual_norm": 9.213550977715812e-09
+        "tree_max_abs": 6.124674101215533e-10,
+        "tree_rmse": 4.580424095616002e-11,
+        "mean_path_max_abs": 1.4040901774592385e-10,
+        "mean_path_rmse": 1.8806209379604692e-11,
+        "python_residual_norm": 2.052332641940685e-12,
+        "julia_residual_norm": 8.49798703628224e-11
       },
       {
         "case_id": "theta_2",
@@ -143,12 +145,12 @@
         "phi_pi": 1.38,
         "phi_y": 0.135,
         "steady_state_max_abs": 9.059419880941277e-14,
-        "tree_max_abs": 1.7164693932869568e-07,
-        "tree_rmse": 1.1011645511090003e-08,
-        "mean_path_max_abs": 5.4108197922175805e-09,
-        "mean_path_rmse": 9.882557119209805e-10,
-        "python_residual_norm": 3.921082208924176e-14,
-        "julia_residual_norm": 9.213550977715812e-09
+        "tree_max_abs": 2.7202924357538905e-09,
+        "tree_rmse": 1.274966110178974e-10,
+        "mean_path_max_abs": 9.682832313728795e-11,
+        "mean_path_rmse": 1.4052268428202208e-11,
+        "python_residual_norm": 4.826722483882492e-13,
+        "julia_residual_norm": 8.49798703628224e-11
       },
       {
         "case_id": "theta_3",
@@ -156,12 +158,12 @@
         "phi_pi": 1.44,
         "phi_y": 0.13,
         "steady_state_max_abs": 9.059419880941277e-14,
-        "tree_max_abs": 1.1977389302586516e-07,
-        "tree_rmse": 8.340825287605324e-09,
-        "mean_path_max_abs": 7.217006992021879e-09,
-        "mean_path_rmse": 1.2793783171244865e-09,
-        "python_residual_norm": 9.23399912089451e-09,
-        "julia_residual_norm": 9.213550977715812e-09
+        "tree_max_abs": 6.39904049748452e-08,
+        "tree_rmse": 3.1678312406223024e-09,
+        "mean_path_max_abs": 6.5006817706603215e-09,
+        "mean_path_rmse": 9.066235592989406e-10,
+        "python_residual_norm": 5.6348163334900845e-11,
+        "julia_residual_norm": 8.49798703628224e-11
       },
       {
         "case_id": "theta_4",
@@ -169,12 +171,12 @@
         "phi_pi": 1.5,
         "phi_y": 0.125,
         "steady_state_max_abs": 9.059419880941277e-14,
-        "tree_max_abs": 1.2165448204370932e-07,
-        "tree_rmse": 8.346565168417586e-09,
-        "mean_path_max_abs": 5.853360907082106e-09,
-        "mean_path_rmse": 1.123444576996513e-09,
-        "python_residual_norm": 6.5295151507882565e-09,
-        "julia_residual_norm": 9.213550977715812e-09
+        "tree_max_abs": 2.222679995611543e-08,
+        "tree_rmse": 1.113437832529716e-09,
+        "mean_path_max_abs": 2.461568726630503e-09,
+        "mean_path_rmse": 3.4311925918224714e-10,
+        "python_residual_norm": 2.3631792496584285e-11,
+        "julia_residual_norm": 8.49798703628224e-11
       },
       {
         "case_id": "theta_5",
@@ -182,12 +184,12 @@
         "phi_pi": 1.56,
         "phi_y": 0.12,
         "steady_state_max_abs": 9.059419880941277e-14,
-        "tree_max_abs": 1.2278721328584652e-07,
-        "tree_rmse": 8.348231239226667e-09,
-        "mean_path_max_abs": 4.916643092656159e-09,
-        "mean_path_rmse": 1.02257248816887e-09,
-        "python_residual_norm": 4.650319906929212e-09,
-        "julia_residual_norm": 9.213550977715812e-09
+        "tree_max_abs": 7.822607450691521e-09,
+        "tree_rmse": 4.038056431126256e-10,
+        "mean_path_max_abs": 1.0162493069287848e-09,
+        "mean_path_rmse": 1.4114512240876372e-10,
+        "python_residual_norm": 1.086004070417583e-11,
+        "julia_residual_norm": 8.49798703628224e-11
       },
       {
         "case_id": "theta_6",
@@ -195,12 +197,12 @@
         "phi_pi": 1.62,
         "phi_y": 0.115,
         "steady_state_max_abs": 9.059419880941277e-14,
-        "tree_max_abs": 1.2341709609842155e-07,
-        "tree_rmse": 8.342295061644367e-09,
-        "mean_path_max_abs": 4.699998501500602e-09,
-        "mean_path_rmse": 9.526210355818656e-10,
-        "python_residual_norm": 3.3309871527720247e-09,
-        "julia_residual_norm": 9.213550977715812e-09
+        "tree_max_abs": 2.3273942773016643e-09,
+        "tree_rmse": 1.3553196122826386e-10,
+        "mean_path_max_abs": 4.43232117675052e-10,
+        "mean_path_rmse": 6.102599738497679e-11,
+        "python_residual_norm": 5.373938117691091e-12,
+        "julia_residual_norm": 8.49798703628224e-11
       },
       {
         "case_id": "theta_7",
@@ -208,12 +210,12 @@
         "phi_pi": 1.68,
         "phi_y": 0.11,
         "steady_state_max_abs": 9.059419880941277e-14,
-        "tree_max_abs": 1.2368633317549893e-07,
-        "tree_rmse": 8.328470869380215e-09,
-        "mean_path_max_abs": 4.563757760589482e-09,
-        "mean_path_rmse": 9.01347457476048e-10,
-        "python_residual_norm": 2.3968900197957055e-09,
-        "julia_residual_norm": 9.213550977715812e-09
+        "tree_max_abs": 4.1455816557345315e-10,
+        "tree_rmse": 4.291794432062249e-11,
+        "mean_path_max_abs": 1.9741408507911729e-10,
+        "mean_path_rmse": 2.689017288880753e-11,
+        "python_residual_norm": 2.8258741206147863e-12,
+        "julia_residual_norm": 8.49798703628224e-11
       }
     ]
   },
@@ -222,8 +224,8 @@
       0,
       4
     ],
-    "python_tree_sha256": "ad03da99132528997fd4b4f2f0cbd9eec4f9872508340dd07c01bdd09b492a5f",
-    "julia_tree_sha256": "4ec4c6bc165a489cb768924d17abf5fb3aa472276204f5c84b33cdd2c28684aa"
+    "python_tree_sha256": "2ab477e02b97a6499e7bc12ec7d67a4a4195887c525d580edf211df5ac238563",
+    "julia_tree_sha256": "9775ed8cf941c4e48caa926853fd01088f21fb6e164708566302968d7344b481"
   },
   "claims": {
     "supported": [

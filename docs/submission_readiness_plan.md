@@ -23,10 +23,16 @@ The independent core-parity subgate is complete on the full source. A clean
 MacroModelling.jl revision and a clean SurrogateNN_DSGE revision use
 byte-identical Gal\'i files and agree at all eight evaluations on the
 non-stochastic steady state and first-order Schur solution. A second clean
-comparison agrees on the complete three-period, order-one sparse nonlinear tree
+comparison agrees on the complete five-period, order-one sparse nonlinear tree
 with all three first-period shock channels active. This closes the
 reduced-horizon nonlinear-tree subgate, not production-horizon trajectory or
 likelihood parity.
+
+At the pinned clean MacroModelling.jl revision, the public likelihood interface
+does not expose SEP controls or per-period nonlinear likelihood contributions.
+Direct nonlinear likelihood parity therefore requires a separately specified,
+tested reference adapter or an upstream interface extension; it must not be
+inferred from the passing scenario-tree comparison.
 
 ## Critical path
 

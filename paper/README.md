@@ -83,11 +83,13 @@ Build the independent reduced-horizon nonlinear-tree evidence with:
   --output-dir paper/generated
 ```
 
-This validator compares the complete three-period sparse scenario tree, not
+This validator compares the complete five-period sparse scenario tree, not
 only a central path, with order one, three Gauss--Hermite nodes per shock, and
 all three first-period shock channels active. It requires 8/8 joint successes,
 clean repositories, frozen tolerances and configuration, and a reproducible
-duplicate reference case. The generated evidence does not support a
+duplicate reference case. The evidence builder recomputes tree and expected-path
+discrepancies from the archived raw states rather than trusting reported summary
+metrics. The generated evidence does not support a
 production-horizon trajectory, nonlinear likelihood, posterior, or GPU claim.
 
 Run the focused validation tests with:
@@ -127,7 +129,7 @@ synthetic-data generator.
 The independent core-parity gate now passes on the complete Gal\'i source:
 8/8 evaluations agree between Python and a clean MacroModelling.jl checkout for
 the non-stochastic steady state and first-order Schur solution. A separate 8/8
-comparison also matches the complete three-period nonlinear sparse scenario
+comparison also matches the complete five-period nonlinear sparse scenario
 tree within its frozen tolerances. This removes core local-solution and
 reduced-horizon nonlinear-tree uncertainties but does not change the paper's
 overall not-ready status because production-horizon trajectory, likelihood,

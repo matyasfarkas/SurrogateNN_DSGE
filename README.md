@@ -71,7 +71,7 @@ path:
   --output /tmp/gali_full_sep_parity.json
 ```
 
-The preserved clean run passes 8/8 evaluations at a three-period horizon. This
+The preserved clean run passes 8/8 evaluations at a five-period horizon. This
 is reduced-horizon nonlinear-tree evidence, not production-horizon trajectory,
 likelihood, posterior, or GPU evidence.
 
