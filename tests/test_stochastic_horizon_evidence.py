@@ -132,6 +132,16 @@ def _diagnostic_payload(
     theta_indices: list[int],
 ) -> dict[str, Any]:
     draws = []
+    theta_points = [
+        [1.50, 0.125],
+        [1.32, 0.140],
+        [1.38, 0.135],
+        [1.44, 0.130],
+        [1.50, 0.125],
+        [1.56, 0.120],
+        [1.62, 0.115],
+        [1.68, 0.110],
+    ]
     for theta_index in theta_indices:
         first_step = {
             "log_y": 0.1 * theta_index + periods * 1e-3,
@@ -143,7 +153,7 @@ def _diagnostic_payload(
             draws.append(
                 {
                     "theta_index": theta_index,
-                    "theta": [1.32, 0.14],
+                    "theta": theta_points[theta_index],
                     "sequential": {
                         "accepted": False,
                         "residual_norm": 1.02e-4,
@@ -163,6 +173,7 @@ def _diagnostic_payload(
             draws.append(
                 {
                     "theta_index": theta_index,
+                    "theta": theta_points[theta_index],
                     "batched": {
                         "accepted": [True],
                         "converged": [True],
@@ -194,13 +205,20 @@ def _diagnostic_payload(
             "branching_order": 1,
             "nnodes": 3,
             "sparse_tree": True,
-            "shock_scale": 1.0,
             "linear_solver": "qr",
             "line_search_norm": "inf",
             "positive_state_indices": [],
             "tol": 1e-8,
             "accept_tol": 1e-8,
             "solver": solver,
+            "deterministic_first_shock": 0.12,
+            "stochastic_shock_scale": 1.0,
+            "stochastic_scale_ladder": [1.0],
+        },
+        "theta_design": {
+            "design": "perturbation",
+            "include_reference": True,
+            "perturbation": 0.12,
         },
         "theta_indices": theta_indices,
         "draws": draws,
@@ -253,6 +271,9 @@ def test_builder_preserves_reduced_horizon_claim_boundary(tmp_path: Path) -> Non
 
     assert evidence["publication_ready"] is False
     assert evidence["target_preflight"]["accepted_targets"] == 8
+    assert evidence["parameter_design"]["path_evaluations"] == 8
+    assert evidence["parameter_design"]["unique_parameter_points"] == 7
+    assert evidence["parameter_design"]["reference_duplicate_indices"] == [0, 4]
     assert [row["periods"] for row in evidence["horizon_results"]] == [3, 4, 5]
     assert all(row["accepted"] == 8 for row in evidence["horizon_results"])
     comparison = evidence["first_step_sensitivity"][1]
@@ -318,6 +339,21 @@ def test_builder_rejects_dirty_or_cross_revision_diagnostic(tmp_path: Path) -> N
     horizons[0].write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match="clean revision"):
+        module.build_evidence(
+            preflight,
+            horizon_paths=horizons,
+            horizon_six_path=horizon_six,
+        )
+
+
+def test_builder_rejects_substituted_parameter_design(tmp_path: Path) -> None:
+    module = _load_module()
+    preflight, horizons, horizon_six = _write_sources(tmp_path)
+    payload = json.loads(horizons[0].read_text(encoding="utf-8"))
+    payload["draws"][1]["theta"] = [1.31, 0.14]
+    horizons[0].write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unexpected theta point"):
         module.build_evidence(
             preflight,
             horizon_paths=horizons,

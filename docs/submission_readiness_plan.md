@@ -9,9 +9,15 @@ Metropolis correction is prior art. The paper's contribution must come from the
 DSGE integration, numerical validation, posterior fidelity, and measured
 speed--accuracy tradeoff.
 
-The current pilot is not publication evidence. It uses deterministic order-zero
-extended path, and its corrected target is still a surrogate profile inversion
-objective. No manuscript text may call that run an exact nonlinear posterior.
+The deterministic order-zero pilots are not publication evidence, and their
+corrected target is still a surrogate profile inversion objective. A later
+clean, order-one, three-node preflight accepts all eight path evaluations across
+seven unique policy-rule points at a five-period terminal horizon. The reference
+calibration is evaluated twice. This supports reduced stochastic target
+construction only: first-step outcomes still move from horizons four to five,
+and the hard design fails under both solvers at horizon six. No manuscript text
+may call either result an exact nonlinear posterior or terminal-horizon
+validation.
 
 ## Critical path
 

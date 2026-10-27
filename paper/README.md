@@ -33,12 +33,34 @@ This writes the hash-verified negative-result record and
 `generated/stochastic_pilot_results.tex`. A failed strict gate remains a failed
 gate in both the machine-readable evidence and the manuscript.
 
+Build the reduced-horizon stochastic target evidence from the clean preflight
+and clean horizon diagnostics with:
+
+```bash
+.venv/bin/python benchmarks/build_stochastic_horizon_evidence.py \
+  benchmarks/results/local_gali_h5_stochastic_preflight_95122e6 \
+  --horizon-result benchmarks/results/local_gali_alltheta_p12_h3_level_inf_95122e6.json \
+  --horizon-result benchmarks/results/local_gali_alltheta_p12_h4_level_inf_95122e6.json \
+  --horizon-result benchmarks/results/local_gali_alltheta_p12_h5_level_inf_95122e6.json \
+  --horizon-six-result benchmarks/results/local_gali_theta1_p12_h6_both_level_inf_95122e6.json \
+  --output-dir paper/generated
+```
+
+The builder checks source hashes, clean-revision metadata, recorded commands,
+the exact stochastic SEP configuration, all eight path-level acceptance
+decisions across seven unique parameter points, and the horizon-six failure
+under both solver implementations. It emits JSON, Markdown,
+and `generated/stochastic_horizon_results.tex`. The evidence supports a reduced
+horizon-five target pilot but explicitly does not support terminal-horizon,
+likelihood, posterior, or speed claims.
+
 Run the focused validation tests with:
 
 ```bash
 .venv/bin/python -m pytest -q \
   tests/test_methods_paper_evidence.py \
   tests/test_stochastic_pilot_evidence.py \
+  tests/test_stochastic_horizon_evidence.py \
   tests/test_gali_synthetic_data.py \
   tests/test_static_hmc.py \
   tests/test_publication_readiness_gate.py \
@@ -47,17 +69,19 @@ Run the focused validation tests with:
 
 ## Evidence status
 
-The preserved suite is an engineering pilot. It uses the complete 23-equation
-model, but its target construction has branching order zero and one node. The
-corrected HMC run targets a parameter-dependent surrogate profile objective,
-not a full nonlinear SEP likelihood. Its Schur QME path also invokes a SciPy host
-callback and is not GPU-native. The preserved RMSE also uses a parameter block
-that calibrated per-output residual shrinkage, so it is labelled a calibration
-metric rather than an untouched test result. These limitations are stated in
-the abstract, results table, limitations section, and generated claim ledger.
-The archived payload also duplicated equation-level innovation scales in the
-inversion prior; future evidence uses unit-variance standardized innovations
-and a provenance-captured synthetic-data generator.
+The preserved suite is an engineering pilot. The new clean preflight uses the
+complete 23-equation model, order-one stochastic SEP, and three quadrature
+nodes; all eight path evaluations across seven unique parameter points pass at
+horizon five. The hard design fails at horizon
+six under both solvers, and first-step outcomes still move from horizon four to
+five. The corrected HMC run targets a parameter-dependent surrogate profile
+objective, not a full nonlinear SEP likelihood. Its Schur QME path also invokes
+a SciPy host callback and is not GPU-native. The preserved RMSE uses a parameter
+block that calibrated per-output residual shrinkage, so it remains a calibration
+metric rather than an untouched test result. The archived payload also
+duplicated equation-level innovation scales in the inversion prior; future
+evidence uses unit-variance standardized innovations and a provenance-captured
+synthetic-data generator.
 
 The confirmatory plan is in `../docs/submission_readiness_plan.md`. The paper
 should be promoted to a submission draft only when every hard gate is backed by

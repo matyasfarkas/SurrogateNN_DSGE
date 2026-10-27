@@ -23,6 +23,16 @@ EXPECTED_MODEL = "Gali_2015_chapter_3_nonlinear"
 EXPECTED_EQUATIONS = 23
 EXPECTED_PARAMETERS = 16
 EXPECTED_THETA_INDICES = tuple(range(8))
+EXPECTED_THETA_POINTS = (
+    (1.50, 0.125),
+    (1.32, 0.140),
+    (1.38, 0.135),
+    (1.44, 0.130),
+    (1.50, 0.125),
+    (1.56, 0.120),
+    (1.62, 0.115),
+    (1.68, 0.110),
+)
 SENSITIVITY_VARIABLES = ("log_y", "pi_ann", "i_ann")
 
 
@@ -119,7 +129,6 @@ def _validate_common_solver_config(
         "branching_order": 1,
         "nnodes": 3,
         "sparse_tree": True,
-        "shock_scale": 1.0,
         "linear_solver": "qr",
         "line_search_norm": "inf",
         "positive_state_indices": [],
@@ -213,6 +222,13 @@ def _validate_preflight(run_dir: Path) -> dict[str, Any]:
 
     sep = _mapping(run.get("sep_config"), field="sep_config")
     _validate_common_solver_config(sep, periods=5, field="sep_config")
+    if not math.isclose(
+        _finite(sep.get("shock_scale"), field="sep_config.shock_scale"),
+        1.0,
+        rel_tol=0.0,
+        abs_tol=1e-15,
+    ):
+        raise ValueError("sep_config.shock_scale must equal 1.0.")
     target = _mapping(run.get("target_diagnostics"), field="target_diagnostics")
     gate = _mapping(run.get("quality_gate"), field="quality_gate")
     if gate.get("status") != "ok" or gate.get("issues") != []:
@@ -288,14 +304,71 @@ def _validate_diagnostic(
         periods=expected_periods,
         field=f"{path.name}.config",
     )
+    for scale_name, expected_scale in (
+        ("deterministic_first_shock", 0.12),
+        ("stochastic_shock_scale", 1.0),
+    ):
+        if not math.isclose(
+            _finite(config.get(scale_name), field=f"{path.name}.config.{scale_name}"),
+            expected_scale,
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        ):
+            raise ValueError(
+                f"Diagnostic {path.name} uses the wrong {scale_name}."
+            )
+    if config.get("stochastic_scale_ladder") != [1.0]:
+        raise ValueError(f"Diagnostic {path.name} uses a continuation ladder.")
     if config.get("solver") != expected_solver:
         raise ValueError(f"Diagnostic {path.name} uses the wrong solver selection.")
+    theta_design = _mapping(
+        payload.get("theta_design"), field=f"{path.name}.theta_design"
+    )
+    if (
+        theta_design.get("design") != "perturbation"
+        or theta_design.get("include_reference") is not True
+        or not math.isclose(
+            _finite(
+                theta_design.get("perturbation"),
+                field=f"{path.name}.theta_design.perturbation",
+            ),
+            0.12,
+            rel_tol=0.0,
+            abs_tol=1e-15,
+        )
+    ):
+        raise ValueError(f"Diagnostic {path.name} uses the wrong theta design.")
     theta_indices = payload.get("theta_indices")
     if theta_indices != list(expected_indices):
         raise ValueError(f"Diagnostic {path.name} uses unexpected theta indices.")
     draws = payload.get("draws")
     if not isinstance(draws, list) or len(draws) != len(expected_indices):
         raise ValueError(f"Diagnostic {path.name} has an unexpected draw count.")
+    for row_index, (raw_draw, theta_index) in enumerate(zip(draws, expected_indices)):
+        draw = _mapping(raw_draw, field=f"{path.name}.draws[{row_index}]")
+        if draw.get("theta_index") != theta_index:
+            raise ValueError(f"Diagnostic {path.name} has misordered theta indices.")
+        theta = draw.get("theta")
+        if not isinstance(theta, list) or len(theta) != 2:
+            raise ValueError(f"Diagnostic {path.name} has an invalid theta point.")
+        expected_theta = EXPECTED_THETA_POINTS[theta_index]
+        for parameter_index, (actual, expected) in enumerate(
+            zip(theta, expected_theta)
+        ):
+            if not math.isclose(
+                _finite(
+                    actual,
+                    field=(
+                        f"{path.name}.draws[{row_index}].theta[{parameter_index}]"
+                    ),
+                ),
+                expected,
+                rel_tol=0.0,
+                abs_tol=1e-14,
+            ):
+                raise ValueError(
+                    f"Diagnostic {path.name} uses an unexpected theta point."
+                )
     return payload
 
 
@@ -515,6 +588,13 @@ def build_evidence(
             "parameters": EXPECTED_PARAMETERS,
             "estimated_parameters": ["ϕᵖⁱ", "ϕʸ"],
         },
+        "parameter_design": {
+            "path_evaluations": len(EXPECTED_THETA_POINTS),
+            "unique_parameter_points": len(set(EXPECTED_THETA_POINTS)),
+            "perturbation_fraction": 0.12,
+            "reference_duplicate_indices": [0, 4],
+            "theta_points": [list(point) for point in EXPECTED_THETA_POINTS],
+        },
         "provenance": {
             "commit": preflight["commit"],
             "branch": preflight["branch"],
@@ -539,9 +619,10 @@ def build_evidence(
         "horizon_six_hard_case": horizon_six,
         "interpretation": {
             "supported": (
-                "All eight prespecified 12% policy-rule designs solve the complete "
-                "23-equation model at stochastic SEP horizons three through five under "
-                "the strict 1e-8 residual gate."
+                "All eight prespecified path evaluations, spanning seven unique "
+                "policy-rule points in the 12% perturbation design, solve the complete "
+                "23-equation model at stochastic SEP horizons three through five "
+                "under the strict 1e-8 residual gate."
             ),
             "not_supported": (
                 "The evidence does not establish terminal-horizon convergence, a "
@@ -556,6 +637,11 @@ def _format_scientific(value: float) -> str:
     return f"{value:.3e}"
 
 
+def _format_latex_scientific(value: float) -> str:
+    mantissa, exponent = f"{value:.2e}".split("e")
+    return f"{mantissa}\\times 10^{{{int(exponent)}}}"
+
+
 def render_markdown(evidence: Mapping[str, Any]) -> str:
     lines = [
         "# Stochastic Galí horizon evidence",
@@ -566,7 +652,7 @@ def render_markdown(evidence: Mapping[str, Any]) -> str:
         "",
         "## Residual gates",
         "",
-        "| SEP horizon | Accepted designs | Maximum residual | Newton iterations |",
+        "| SEP horizon | Accepted paths | Maximum residual | Newton iterations |",
         "|---:|---:|---:|---:|",
     ]
     for row in evidence["horizon_results"]:
@@ -620,15 +706,16 @@ def render_latex(evidence: Mapping[str, Any]) -> str:
         "\\caption{Reduced-horizon stochastic SEP evidence}",
         "\\label{tab:stochastic-horizon-evidence}",
         "\\small",
-        "\\begin{tabular}{rrrr}",
+        "\\begin{tabular}{lccc}",
         "\\toprule",
-        "SEP horizon & Accepted designs & Maximum residual & Newton iterations \\\\",
+        "SEP horizon & Accepted paths & Maximum residual & Newton iterations \\\\",
         "\\midrule",
     ]
     for row in evidence["horizon_results"]:
         lines.append(
             f"{row['periods']} & {row['accepted']}/{row['attempted']} & "
-            f"${row['residual_max']:.2e}$ & {row['iterations_min']}--{row['iterations_max']} \\\\"
+            f"${_format_latex_scientific(row['residual_max'])}$ & "
+            f"{row['iterations_min']}--{row['iterations_max']} \\\\"
         )
     lines.extend(
         [
@@ -653,12 +740,15 @@ def render_latex(evidence: Mapping[str, Any]) -> str:
             "",
             "\\vspace{0.4em}",
             "\\parbox{0.96\\textwidth}{\\footnotesize\\textit{Notes:} "
-            "Horizons three through five use all eight prespecified 12 percent "
-            "perturbations of the two policy-rule parameters, order-one stochastic "
-            "extended path, three Gauss--Hermite nodes, and an $L_\\infty$ residual "
-            "gate of $10^{-8}$. The horizon-six hard design fails under both the "
-            f"sequential ($ {h6['sequential']['residual_norm']:.2e} $) and batched "
-            f"($ {h6['batched']['residual_norm']:.2e} $) solvers. First-step changes "
+            "Horizons three through five use eight prespecified path evaluations "
+            "spanning seven unique points in a 12 percent perturbation design for "
+            "the two policy-rule parameters; the reference calibration is evaluated "
+            "twice. The calculation uses order-one stochastic extended path, three "
+            "Gauss--Hermite nodes, and an $L_\\infty$ residual gate of $10^{-8}$. "
+            "The horizon-six hard design fails under both the "
+            f"sequential (${_format_latex_scientific(h6['sequential']['residual_norm'])}$) "
+            f"and batched (${_format_latex_scientific(h6['batched']['residual_norm'])}$) "
+            "solvers. First-step changes "
             "show that residual convergence is not terminal-horizon convergence. "
             "This table supports a reduced numerical pilot only; it is not likelihood "
             "or posterior evidence.}",

@@ -1,0 +1,246 @@
+{
+  "evidence_level": "reduced_horizon_stochastic_target_preflight",
+  "first_step_sensitivity": [
+    {
+      "all_states": {
+        "max_abs": 0.013725057095930637,
+        "rmse": 0.0022606197174703533
+      },
+      "from_periods": 3,
+      "to_periods": 4,
+      "variables": {
+        "i_ann": {
+          "max_abs": 0.0011153305859770424,
+          "rmse": 0.000915085467156569
+        },
+        "log_y": {
+          "max_abs": 0.00029046349478535627,
+          "rmse": 0.00023408687181026457
+        },
+        "pi_ann": {
+          "max_abs": 0.000968174249552678,
+          "rmse": 0.0007108762118694347
+        }
+      }
+    },
+    {
+      "all_states": {
+        "max_abs": 0.02117903365190843,
+        "rmse": 0.00291711118756398
+      },
+      "from_periods": 4,
+      "to_periods": 5,
+      "variables": {
+        "i_ann": {
+          "max_abs": 0.0013941811736892934,
+          "rmse": 0.0008571970364639145
+        },
+        "log_y": {
+          "max_abs": 0.00039569727597548593,
+          "rmse": 0.00025671589193962044
+        },
+        "pi_ann": {
+          "max_abs": 0.0012240693314988422,
+          "rmse": 0.0007034309148824887
+        }
+      }
+    },
+    {
+      "all_states": {
+        "max_abs": 0.03490409074783907,
+        "rmse": 0.005140482436310165
+      },
+      "from_periods": 3,
+      "to_periods": 5,
+      "variables": {
+        "i_ann": {
+          "max_abs": 0.0025095117596663358,
+          "rmse": 0.0017598256004100262
+        },
+        "log_y": {
+          "max_abs": 0.0006861607707608422,
+          "rmse": 0.0004889689470179652
+        },
+        "pi_ann": {
+          "max_abs": 0.0021922435810515202,
+          "rmse": 0.0014056569399918586
+        }
+      }
+    }
+  ],
+  "horizon_results": [
+    {
+      "accepted": 8,
+      "attempted": 8,
+      "iterations_max": 5,
+      "iterations_min": 5,
+      "periods": 3,
+      "residual_max": 1.7280525968499383e-12,
+      "residual_min": 7.107554562263419e-13
+    },
+    {
+      "accepted": 8,
+      "attempted": 8,
+      "iterations_max": 5,
+      "iterations_min": 4,
+      "periods": 4,
+      "residual_max": 7.444004024304007e-09,
+      "residual_min": 2.178379698847266e-11
+    },
+    {
+      "accepted": 8,
+      "attempted": 8,
+      "iterations_max": 7,
+      "iterations_min": 5,
+      "periods": 5,
+      "residual_max": 1.9276650887810518e-10,
+      "residual_min": 3.971423063012022e-12
+    }
+  ],
+  "horizon_six_hard_case": {
+    "batched": {
+      "accepted": false,
+      "iterations": 41,
+      "residual_norm": 0.0001023598494923241,
+      "termination": "line_search_failed"
+    },
+    "periods": 6,
+    "sequential": {
+      "accepted": false,
+      "iterations": 6,
+      "residual_norm": 0.00010203216407939616
+    },
+    "theta": [
+      1.32,
+      0.14
+    ],
+    "theta_index": 1
+  },
+  "interpretation": {
+    "not_supported": "The evidence does not establish terminal-horizon convergence, a nonlinear likelihood, posterior fidelity, or a speed advantage. The hard design fails at horizon six under both solver implementations.",
+    "supported": "All eight prespecified path evaluations, spanning seven unique policy-rule points in the 12% perturbation design, solve the complete 23-equation model at stochastic SEP horizons three through five under the strict 1e-8 residual gate."
+  },
+  "model": {
+    "equations": 23,
+    "estimated_parameters": [
+      "\u03d5\u1d56\u2071",
+      "\u03d5\u02b8"
+    ],
+    "name": "Gali_2015_chapter_3_nonlinear",
+    "parameters": 16
+  },
+  "parameter_design": {
+    "path_evaluations": 8,
+    "perturbation_fraction": 0.12,
+    "reference_duplicate_indices": [
+      0,
+      4
+    ],
+    "theta_points": [
+      [
+        1.5,
+        0.125
+      ],
+      [
+        1.32,
+        0.14
+      ],
+      [
+        1.38,
+        0.135
+      ],
+      [
+        1.44,
+        0.13
+      ],
+      [
+        1.5,
+        0.125
+      ],
+      [
+        1.56,
+        0.12
+      ],
+      [
+        1.62,
+        0.115
+      ],
+      [
+        1.68,
+        0.11
+      ]
+    ],
+    "unique_parameter_points": 7
+  },
+  "provenance": {
+    "branch": "codex/nonlinear-sep-surrogate-port",
+    "clean_worktree": true,
+    "commit": "95122e63c51f570e858ca0838b9841b85459791e",
+    "sources": [
+      {
+        "name": "preflight/run_manifest.json",
+        "sha256": "03701bfb454fe90ebd2ef5da9491cf92985192813b376455f162a0fc06036177"
+      },
+      {
+        "name": "preflight/result.json",
+        "sha256": "47f3786e22c218af583b84f5764d7f1bb74ab0452b2db166551f7a4d9e16d1d6"
+      },
+      {
+        "name": "local_gali_alltheta_p12_h3_level_inf_95122e6.json",
+        "sha256": "186ccbdcc507ba60e1177b196e76b6d7fa08b7c38f8ca581ac4e79131b79fe8d",
+        "size_bytes": 103795
+      },
+      {
+        "name": "local_gali_alltheta_p12_h4_level_inf_95122e6.json",
+        "sha256": "ecb029a5c0b19876dd809ed35d9667328e2e8b44d5ce2e69167b88fc65c56430",
+        "size_bytes": 103989
+      },
+      {
+        "name": "local_gali_alltheta_p12_h5_level_inf_95122e6.json",
+        "sha256": "77f0fffac995b01874707c54d3866f2f5977e7d1df165b0111a262f77b3a9a8b",
+        "size_bytes": 104139
+      },
+      {
+        "name": "local_gali_theta1_p12_h6_both_level_inf_95122e6.json",
+        "sha256": "2654622848856ee2255bdb8a35d97a3a61cd6849eb1a2cbd6713f6c218789ca8",
+        "size_bytes": 27259
+      }
+    ],
+    "verified_preflight_artifacts": [
+      {
+        "name": "result.json",
+        "sha256": "47f3786e22c218af583b84f5764d7f1bb74ab0452b2db166551f7a4d9e16d1d6",
+        "size_bytes": 15359
+      },
+      {
+        "name": "run.log",
+        "sha256": "d9eec7b8aa20711d96146152fab1974d1081918610038a952aaf3188c9a037a8",
+        "size_bytes": 18247
+      }
+    ]
+  },
+  "publication_ready": false,
+  "schema_version": "surrogatenn-dsge-stochastic-horizon-evidence/v1",
+  "target_preflight": {
+    "accepted_targets": 8,
+    "completed_at_utc": "2026-10-27T09:26:39.810584+00:00",
+    "pipeline_seconds": 9.820849417,
+    "prepared_at_utc": "2026-10-27T09:26:27.933338+00:00",
+    "residual_max": 1.9276650862096285e-10,
+    "solver": {
+      "accept_tol": 1e-08,
+      "branching_order": 1,
+      "line_search_norm": "inf",
+      "linear_solver": "qr",
+      "max_iter": 50,
+      "nnodes": 3,
+      "periods": 5,
+      "positive_state_indices": [],
+      "shock_scale": 1.0,
+      "sparse_tree": true,
+      "tol": 1e-08
+    },
+    "steady_state_fallbacks": 0,
+    "steady_states_solved": 8
+  }
+}
