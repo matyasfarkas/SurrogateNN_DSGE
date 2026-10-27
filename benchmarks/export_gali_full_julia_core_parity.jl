@@ -27,7 +27,7 @@ function row_major_json(matrix::AbstractMatrix)
 end
 
 
-function inject_parameters(model, overrides::Dict{String,Any})
+function inject_parameters(model, overrides::AbstractDict{String,<:Any})
     values = Float64.(model.parameter_values)
     for (name, raw_value) in overrides
         index = findfirst(==(Symbol(name)), model.parameters)
@@ -38,7 +38,7 @@ function inject_parameters(model, overrides::Dict{String,Any})
 end
 
 
-function solve_case(model, case::Dict{String,Any})
+function solve_case(model, case::AbstractDict{String,<:Any})
     started_ns = time_ns()
     try
         parameters = inject_parameters(model, case["parameters"])
