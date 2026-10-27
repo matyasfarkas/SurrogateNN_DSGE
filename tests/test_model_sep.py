@@ -41,6 +41,18 @@ end
 """
 
 
+SQUARE_SHOCK_SEP_SOURCE = """
+@model square_shock_sep begin
+    a[0] = eps_a[x]
+    b[0] = eps_b[x]
+    c[0] = eps_c[x]
+end
+
+@parameters square_shock_sep begin
+end
+"""
+
+
 def test_evaluate_dynamic_residual_matches_manual_equation() -> None:
     model = parse_macro_model(NONLINEAR_SEP_SOURCE)
 
@@ -107,6 +119,39 @@ def test_parsed_model_sep_matches_manual_conditional_residual_solver() -> None:
         manual.mean_path,
         rtol=1e-10,
         atol=1e-10,
+    )
+
+
+def test_unbatched_square_deterministic_shocks_prefer_period_major_layout() -> None:
+    model = parse_macro_model(SQUARE_SHOCK_SEP_SOURCE)
+    config = SEPConfig(
+        periods=3,
+        branching_order=0,
+        nnodes=3,
+        tol=1e-12,
+        max_iter=10,
+    )
+    deterministic = np.asarray(
+        [
+            [0.10, 0.20, 0.30],
+            [0.40, 0.50, 0.60],
+            [0.70, 0.80, 0.90],
+        ],
+        dtype=np.float64,
+    )
+
+    result = solve_stochastic_extended_path_model(
+        model,
+        config=config,
+        deterministic_shocks=deterministic,
+    )
+
+    assert result.solution.accepted
+    np.testing.assert_allclose(
+        np.asarray(result.solution.mean_path[:, 1:], dtype=np.float64),
+        deterministic.T,
+        rtol=0.0,
+        atol=1e-12,
     )
 
 

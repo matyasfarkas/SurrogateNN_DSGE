@@ -1361,14 +1361,16 @@ class MacroModel:
                 values[:, idx] = series
             return jnp.asarray(values, dtype=jnp.float64)
         values = np.asarray(deterministic_shocks, dtype=np.float64)
+        # Period-major is the canonical SEP layout.  Check it first so a
+        # square (periods == nExo) matrix is not silently transposed.
+        if values.shape == (periods, self.timings.nExo):
+            return jnp.asarray(values, dtype=jnp.float64)
         if values.shape == (self.timings.nExo, periods):
             return jnp.asarray(values.T, dtype=jnp.float64)
-        if values.shape != (periods, self.timings.nExo):
-            raise ValueError(
-                "deterministic_shocks must have shape "
-                f"({periods}, {self.timings.nExo}) or ({self.timings.nExo}, {periods}), got {values.shape}."
-            )
-        return jnp.asarray(values, dtype=jnp.float64)
+        raise ValueError(
+            "deterministic_shocks must have shape "
+            f"({periods}, {self.timings.nExo}) or ({self.timings.nExo}, {periods}), got {values.shape}."
+        )
 
     def _coerce_batched_sep_deterministic_shocks(
         self,
