@@ -10,10 +10,12 @@ import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+import numpy as np
 
-REPORT_SCHEMA = "surrogatenn-dsge-gali-sep-parity/v1"
+
+REPORT_SCHEMA = "surrogatenn-dsge-gali-sep-parity/v2"
 EXPORT_SCHEMA = "surrogatenn-dsge-gali-julia-sep-export/v1"
-EVIDENCE_SCHEMA = "surrogatenn-dsge-gali-sep-parity-evidence/v1"
+EVIDENCE_SCHEMA = "surrogatenn-dsge-gali-sep-parity-evidence/v2"
 EXPECTED_MODEL = "Gali_2015_chapter_3_nonlinear"
 EXPECTED_MODEL_SHA256 = "53f909976abc962494693c8ba5d30223653cee6164fc9f183064e3776240fb55"
 EXPECTED_THETA_POINTS = (
@@ -30,16 +32,16 @@ EXPECTED_THRESHOLDS = {
     "steady_state_max_abs": 1.0e-10,
     "tree_max_abs": 1.0e-6,
     "mean_path_max_abs": 1.0e-8,
-    "solver_residual": 1.0e-8,
+    "solver_residual": 1.0e-10,
 }
 EXPECTED_CONFIG = {
-    "periods": 3,
+    "periods": 5,
     "branching_order": 1,
     "nnodes": 3,
     "sparse_tree": True,
-    "max_iter": 80,
-    "tol": 1.0e-8,
-    "accept_tol": 1.0e-8,
+    "max_iter": 120,
+    "tol": 1.0e-10,
+    "accept_tol": 1.0e-10,
     "linear_solver": "qr",
     "fallback_solver": None,
     "stall_iters": 25,
@@ -51,8 +53,10 @@ EXPECTED_SHOCK_MATRIX = (
     EXPECTED_FIRST_PERIOD_SHOCK,
     (0.0, 0.0, 0.0),
     (0.0, 0.0, 0.0),
+    (0.0, 0.0, 0.0),
+    (0.0, 0.0, 0.0),
 )
-EXPECTED_GROUP_COUNTS = [1, 1, 9, 9]
+EXPECTED_GROUP_COUNTS = [1, 1, 9, 9, 9, 9]
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -113,8 +117,10 @@ def _validate_config(value: Any) -> None:
 
 
 def _validate_shock_matrix(value: Any, *, field: str) -> None:
-    if not isinstance(value, list) or len(value) != 3:
-        raise ValueError(f"{field} must have three period rows.")
+    if not isinstance(value, list) or len(value) != EXPECTED_CONFIG["periods"]:
+        raise ValueError(
+            f"{field} must have {EXPECTED_CONFIG['periods']} period rows."
+        )
     rows: list[tuple[float, ...]] = []
     for period, row in enumerate(value):
         if not isinstance(row, list) or len(row) != 3:
@@ -127,6 +133,92 @@ def _validate_shock_matrix(value: Any, *, field: str) -> None:
         )
     if tuple(rows) != EXPECTED_SHOCK_MATRIX:
         raise ValueError(f"{field} does not match the frozen three-shock scenario.")
+
+
+def _tree_arrays(value: Any, *, field: str) -> list[np.ndarray]:
+    if not isinstance(value, list) or len(value) != len(EXPECTED_GROUP_COUNTS):
+        raise ValueError(
+            f"{field} must contain {len(EXPECTED_GROUP_COUNTS)} period blocks."
+        )
+    output: list[np.ndarray] = []
+    for period, (block, groups) in enumerate(zip(value, EXPECTED_GROUP_COUNTS)):
+        try:
+            array = np.asarray(block, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field}[{period}] must be numeric.") from exc
+        if array.shape != (groups, 23):
+            raise ValueError(
+                f"{field}[{period}] has shape {array.shape}; expected {(groups, 23)}."
+            )
+        if not np.isfinite(array).all():
+            raise ValueError(f"{field}[{period}] must be finite.")
+        output.append(array)
+    return output
+
+
+def _difference_metrics(left: np.ndarray, right: np.ndarray) -> dict[str, float]:
+    if left.shape != right.shape:
+        raise ValueError(f"Cannot compare shapes {left.shape} and {right.shape}.")
+    delta = np.asarray(left - right, dtype=np.float64)
+    return {
+        "max_abs": float(np.max(np.abs(delta))),
+        "rmse": float(np.sqrt(np.mean(np.square(delta)))),
+    }
+
+
+def _sparse_probabilities() -> tuple[np.ndarray, ...]:
+    nnodes = int(EXPECTED_CONFIG["nnodes"])
+    shock_dim = len(EXPECTED_FIRST_PERIOD_SHOCK)
+    nodes, one_d_weights = np.polynomial.hermite.hermgauss(nnodes)
+    one_d_weights = one_d_weights / np.sqrt(np.pi)
+    zero_index = int(np.argmin(np.abs(nodes)))
+    if zero_index != 0:
+        one_d_weights[[0, zero_index]] = one_d_weights[[zero_index, 0]]
+    rule_weights = np.tile(one_d_weights / shock_dim, shock_dim)
+    rule_weights /= np.sum(rule_weights)
+    probabilities: list[np.ndarray] = [np.ones(1, dtype=np.float64)]
+    trunk_probability = 1.0
+    side_probabilities = np.zeros(0, dtype=np.float64)
+    for period in range(1, int(EXPECTED_CONFIG["periods"]) + 1):
+        if period > 1 and period <= int(EXPECTED_CONFIG["branching_order"]) + 1:
+            branch_probability = trunk_probability
+            trunk_probability = branch_probability * rule_weights[0]
+            side_probabilities = np.concatenate(
+                (side_probabilities, branch_probability * rule_weights[1:])
+            )
+        probabilities.append(
+            np.concatenate((np.asarray([trunk_probability]), side_probabilities))
+        )
+    return tuple(probabilities)
+
+
+def _mean_path(
+    tree_states: Sequence[np.ndarray], probabilities: Sequence[np.ndarray]
+) -> np.ndarray:
+    return np.stack(
+        [
+            np.sum(probability[:, None] * states, axis=0)
+            for probability, states in zip(probabilities, tree_states)
+        ],
+        axis=1,
+    )
+
+
+def _validate_reported_metrics(
+    reported: Mapping[str, Any],
+    recomputed: Mapping[str, float],
+    *,
+    field: str,
+) -> None:
+    for name in ("max_abs", "rmse"):
+        actual = _finite(reported.get(name), field=f"{field}.{name}")
+        if not math.isclose(
+            actual,
+            float(recomputed[name]),
+            rel_tol=1.0e-12,
+            abs_tol=1.0e-14,
+        ):
+            raise ValueError(f"{field}.{name} does not match the raw trees.")
 
 
 def validate_report(report: Mapping[str, Any]) -> dict[str, Any]:
@@ -174,6 +266,21 @@ def validate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         if source.get("sha256") != EXPECTED_MODEL_SHA256:
             raise ValueError(f"Unexpected {name} content hash.")
 
+    python_model = _mapping(report.get("python_model"), field="python_model")
+    if python_model.get("symbol") != EXPECTED_MODEL:
+        raise ValueError("Unexpected Python model identity.")
+    python_variable_names = [str(name) for name in python_model.get("variable_names", [])]
+    python_shock_names = [str(name) for name in python_model.get("shock_names", [])]
+    python_parameter_names = [
+        str(name) for name in python_model.get("parameter_names", [])
+    ]
+    if len(python_variable_names) != 23 or len(set(python_variable_names)) != 23:
+        raise ValueError("The Python report is not the 23-variable full model.")
+    if len(python_shock_names) != 3 or len(set(python_shock_names)) != 3:
+        raise ValueError("The Python report does not declare three unique shocks.")
+    if len(python_parameter_names) != 16 or len(set(python_parameter_names)) != 16:
+        raise ValueError("The Python report does not declare 16 unique parameters.")
+
     provenance = _mapping(report.get("provenance"), field="provenance")
     repositories: dict[str, Any] = {}
     for key, output_name in (
@@ -201,6 +308,21 @@ def validate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("The Julia export does not declare three shocks.")
     if len(model.get("parameter_names", [])) != 16:
         raise ValueError("The Julia export does not declare 16 parameters.")
+    julia_variable_names = [str(name) for name in model["variable_names"]]
+    julia_shock_names = [str(name) for name in model["shock_names"]]
+    julia_parameter_names = [str(name) for name in model["parameter_names"]]
+    if len(set(julia_variable_names)) != 23:
+        raise ValueError("The Julia export does not declare 23 unique variables.")
+    if len(set(julia_shock_names)) != 3:
+        raise ValueError("The Julia export does not declare three unique shocks.")
+    if len(set(julia_parameter_names)) != 16:
+        raise ValueError("The Julia export does not declare 16 unique parameters.")
+    if set(julia_variable_names) != set(python_variable_names):
+        raise ValueError("The Julia and Python variable names differ.")
+    if set(julia_shock_names) != set(python_shock_names):
+        raise ValueError("The Julia and Python shock names differ.")
+    if set(julia_parameter_names) != set(python_parameter_names):
+        raise ValueError("The Julia and Python parameter names differ.")
     _validate_config(julia_export.get("config"))
 
     python_cases = report.get("python_cases")
@@ -222,16 +344,37 @@ def validate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         if [case.get("case_id") for case in cases] != expected_ids:
             raise ValueError(f"The {name} case identifiers or ordering changed.")
 
+    julia_variable_index = {
+        name: index for index, name in enumerate(julia_variable_names)
+    }
+    julia_to_python_order = [
+        julia_variable_index[name] for name in python_variable_names
+    ]
+    python_trees: list[list[np.ndarray]] = []
+    julia_trees: list[list[np.ndarray]] = []
     for index, (python_case, julia_case) in enumerate(zip(python_cases, julia_cases)):
         if python_case.get("status") != "ok" or julia_case.get("status") != "ok":
             raise ValueError(f"At least one implementation failed theta_{index}.")
-
-    for index, julia_case in enumerate(julia_cases):
+        if python_case.get("group_counts") != EXPECTED_GROUP_COUNTS:
+            raise ValueError(f"Python theta_{index} group counts changed.")
         if julia_case.get("group_counts") != EXPECTED_GROUP_COUNTS:
             raise ValueError(f"Julia theta_{index} group counts changed.")
         if int(julia_case.get("convergence_flag", -1)) != 0:
             raise ValueError(f"Julia theta_{index} did not converge.")
+        python_tree = _tree_arrays(
+            python_case.get("tree_states"),
+            field=f"python_cases[{index}].tree_states",
+        )
+        julia_tree_raw = _tree_arrays(
+            julia_case.get("tree_states"),
+            field=f"julia_export.cases[{index}].tree_states",
+        )
+        python_trees.append(python_tree)
+        julia_trees.append(
+            [period[:, julia_to_python_order] for period in julia_tree_raw]
+        )
 
+    probabilities = _sparse_probabilities()
     per_case: list[dict[str, Any]] = []
     for index, comparison in enumerate(comparisons):
         if comparison.get("passed") is not True:
@@ -260,16 +403,54 @@ def validate_report(report: Mapping[str, Any]) -> dict[str, Any]:
             comparison.get("python"), field=f"comparisons[{index}].python"
         )
         julia = _mapping(comparison.get("julia"), field=f"comparisons[{index}].julia")
-        steady_max = _finite(
-            steady.get("max_abs"), field=f"comparisons[{index}].steady_state.max_abs"
+        python_tree = python_trees[index]
+        julia_tree = julia_trees[index]
+        python_mean_from_tree = _mean_path(python_tree, probabilities)
+        try:
+            python_mean_reported = np.asarray(
+                python_cases[index].get("mean_path"), dtype=np.float64
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"python_cases[{index}].mean_path must be numeric."
+            ) from exc
+        if python_mean_reported.shape != python_mean_from_tree.shape:
+            raise ValueError(
+                f"python_cases[{index}].mean_path has shape "
+                f"{python_mean_reported.shape}; expected {python_mean_from_tree.shape}."
+            )
+        if not np.isfinite(python_mean_reported).all():
+            raise ValueError(f"python_cases[{index}].mean_path must be finite.")
+        if not np.allclose(
+            python_mean_reported,
+            python_mean_from_tree,
+            rtol=1.0e-12,
+            atol=1.0e-14,
+        ):
+            raise ValueError(
+                f"python_cases[{index}].mean_path does not match its raw tree."
+            )
+        julia_mean = _mean_path(julia_tree, probabilities)
+        steady_metrics = _difference_metrics(python_tree[0], julia_tree[0])
+        tree_metrics = _difference_metrics(
+            np.concatenate(python_tree, axis=0),
+            np.concatenate(julia_tree, axis=0),
         )
-        tree_max = _finite(tree.get("max_abs"), field=f"comparisons[{index}].tree.max_abs")
-        tree_rmse = _finite(tree.get("rmse"), field=f"comparisons[{index}].tree.rmse")
-        mean_max = _finite(
-            mean.get("max_abs"), field=f"comparisons[{index}].mean_path.max_abs"
+        mean_metrics = _difference_metrics(python_mean_reported, julia_mean)
+        _validate_reported_metrics(
+            steady,
+            steady_metrics,
+            field=f"comparisons[{index}].steady_state",
         )
-        mean_rmse = _finite(
-            mean.get("rmse"), field=f"comparisons[{index}].mean_path.rmse"
+        _validate_reported_metrics(
+            tree,
+            tree_metrics,
+            field=f"comparisons[{index}].tree",
+        )
+        _validate_reported_metrics(
+            mean,
+            mean_metrics,
+            field=f"comparisons[{index}].mean_path",
         )
         python_residual = _finite(
             python.get("residual_norm"), field=f"comparisons[{index}].python.residual_norm"
@@ -277,6 +458,41 @@ def validate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         julia_residual = _finite(
             julia.get("final_error"), field=f"comparisons[{index}].julia.final_error"
         )
+        raw_python_residual = _finite(
+            python_cases[index].get("residual_norm"),
+            field=f"python_cases[{index}].residual_norm",
+        )
+        raw_julia_residual = _finite(
+            julia_cases[index].get("final_error"),
+            field=f"julia_export.cases[{index}].final_error",
+        )
+        if python_residual != raw_python_residual:
+            raise ValueError(
+                f"Comparison theta_{index} Python residual does not match raw output."
+            )
+        if julia_residual != raw_julia_residual:
+            raise ValueError(
+                f"Comparison theta_{index} Julia residual does not match raw output."
+            )
+        if (
+            python.get("accepted") is not python_cases[index].get("accepted")
+            or python.get("converged") is not python_cases[index].get("converged")
+            or python.get("iterations") != python_cases[index].get("iterations")
+        ):
+            raise ValueError(
+                f"Comparison theta_{index} Python status does not match raw output."
+            )
+        if julia.get("convergence_flag") != julia_cases[index].get(
+            "convergence_flag"
+        ):
+            raise ValueError(
+                f"Comparison theta_{index} Julia status does not match raw output."
+            )
+        steady_max = steady_metrics["max_abs"]
+        tree_max = tree_metrics["max_abs"]
+        tree_rmse = tree_metrics["rmse"]
+        mean_max = mean_metrics["max_abs"]
+        mean_rmse = mean_metrics["rmse"]
         if steady_max > EXPECTED_THRESHOLDS["steady_state_max_abs"]:
             raise ValueError(f"Comparison theta_{index} fails steady-state parity.")
         if tree_max > EXPECTED_THRESHOLDS["tree_max_abs"]:
@@ -422,7 +638,7 @@ def render_markdown(evidence: Mapping[str, Any]) -> str:
         "",
         "## Claim boundary",
         "",
-        "This result validates a three-period, order-one, three-node-per-shock sparse nonlinear SEP tree with all three deterministic shock channels active. It does not validate the production horizon, nonlinear likelihood, posterior, or GPU performance.",
+        "This result validates a five-period, order-one, three-node-per-shock sparse nonlinear SEP tree with all three deterministic shock channels active. It does not validate the production horizon, nonlinear likelihood, posterior, or GPU performance.",
         "",
         "## Per-case discrepancies",
         "",
@@ -461,14 +677,14 @@ Gate & Observed & Threshold & Result \\
 Joint design evaluations & 8/8 & 8/8 & Pass \\
 Complete scenario-tree maximum absolute difference & \GaliSEPTreeMax & $10^{{-6}}$ & Pass \\
 Expected-path maximum absolute difference & \GaliSEPMeanMax & $10^{{-8}}$ & Pass \\
-Python solver residual norm & \GaliSEPPythonResidual & $10^{{-8}}$ & Pass \\
-Julia solver residual norm & \GaliSEPJuliaResidual & $10^{{-8}}$ & Pass \\
+Python solver residual norm & \GaliSEPPythonResidual & $10^{{-10}}$ & Pass \\
+Julia solver residual norm & \GaliSEPJuliaResidual & $10^{{-10}}$ & Pass \\
 Clean source revisions & 2/2 & 2/2 & Pass \\
 \bottomrule
 \end{{tabular}}
 
 \vspace{{0.4em}}
-\parbox{{0.91\textwidth}}{{\footnotesize\textit{{Notes:}} The test uses a three-period, order-one sparse tree with three Gauss--Hermite nodes per shock, group counts $(1,1,9,9)$, and first-period standardized innovations $(0.12,-0.08,0.10)$ across all three shock channels. Eight evaluations cover seven unique $(\phi_\pi,\phi_y)$ points; indices 0 and 4 repeat the reference calibration and reproduce bit-for-bit within each implementation. This closes only the reduced-horizon nonlinear-tree subgate; production-horizon likelihood, posterior, and GPU gates remain open.}}
+\parbox{{0.91\textwidth}}{{\footnotesize\textit{{Notes:}} The test uses a five-period, order-one sparse tree with three Gauss--Hermite nodes per shock, group counts $(1,1,9,9,9,9)$, and first-period standardized innovations $(0.12,-0.08,0.10)$ across all three shock channels. Eight evaluations cover seven unique $(\phi_\pi,\phi_y)$ points; indices 0 and 4 repeat the reference calibration and reproduce bit-for-bit within each implementation. This closes only the reduced-horizon nonlinear-tree subgate; production-horizon likelihood, posterior, and GPU gates remain open.}}
 \end{{table}}
 """
 

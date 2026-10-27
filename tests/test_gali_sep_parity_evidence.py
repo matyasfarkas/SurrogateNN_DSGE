@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 from pathlib import Path
@@ -24,13 +25,23 @@ def _load_module() -> ModuleType:
     return module
 
 
-def _tree(index: int) -> list[list[list[float]]]:
+def _tree(index: int, group_counts: list[int]) -> list[list[list[float]]]:
     offset = 0.0 if index in (0, 4) else index * 0.01
     return [
-        [[offset, 1.0 + offset]],
-        [[0.1 + offset, 1.1 + offset]],
-        [[0.2 + offset, 1.2 + offset] for _ in range(9)],
-        [[0.3 + offset, 1.3 + offset] for _ in range(9)],
+        [
+            [offset + 0.1 * period + 0.01 * variable for variable in range(23)]
+            for _ in range(groups)
+        ]
+        for period, groups in enumerate(group_counts)
+    ]
+
+
+def _mean_path(tree: list[list[list[float]]]) -> list[list[float]]:
+    # Every group within a synthetic period is identical, so its expectation is
+    # exactly the first row. The report convention is variables by periods.
+    return [
+        [period[0][variable] for period in tree]
+        for variable in range(23)
     ]
 
 
@@ -41,11 +52,18 @@ def _report() -> dict[str, Any]:
     julia_cases = []
     for index, (phi_pi, phi_y) in enumerate(module.EXPECTED_THETA_POINTS):
         case_id = f"theta_{index}"
+        tree = _tree(index, module.EXPECTED_GROUP_COUNTS)
         python_cases.append(
             {
                 "case_id": case_id,
                 "status": "ok",
-                "tree_states": _tree(index),
+                "group_counts": list(module.EXPECTED_GROUP_COUNTS),
+                "residual_norm": 5.0e-11,
+                "converged": True,
+                "accepted": True,
+                "iterations": 4,
+                "tree_states": copy.deepcopy(tree),
+                "mean_path": _mean_path(tree),
             }
         )
         julia_cases.append(
@@ -54,8 +72,8 @@ def _report() -> dict[str, Any]:
                 "status": "ok",
                 "group_counts": list(module.EXPECTED_GROUP_COUNTS),
                 "convergence_flag": 0,
-                "final_error": 8.0e-9,
-                "tree_states": _tree(index),
+                "final_error": 8.0e-11,
+                "tree_states": copy.deepcopy(tree),
             }
         )
         comparisons.append(
@@ -67,16 +85,16 @@ def _report() -> dict[str, Any]:
                 "julia_status": "ok",
                 "passed": True,
                 "group_counts": list(module.EXPECTED_GROUP_COUNTS),
-                "steady_state": {"max_abs": 9.0e-14, "rmse": 2.0e-14},
-                "tree": {"max_abs": 1.7e-7, "rmse": 2.0e-8},
-                "mean_path": {"max_abs": 7.0e-9, "rmse": 8.0e-10},
+                "steady_state": {"max_abs": 0.0, "rmse": 0.0},
+                "tree": {"max_abs": 0.0, "rmse": 0.0},
+                "mean_path": {"max_abs": 0.0, "rmse": 0.0},
                 "python": {
-                    "residual_norm": 9.0e-9,
+                    "residual_norm": 5.0e-11,
                     "converged": True,
                     "accepted": True,
                     "iterations": 4,
                 },
-                "julia": {"final_error": 8.0e-9, "convergence_flag": 0},
+                "julia": {"final_error": 8.0e-11, "convergence_flag": 0},
             }
         )
     clean_repo = {
@@ -108,6 +126,12 @@ def _report() -> dict[str, Any]:
         "sources": {
             "local_model": {"sha256": module.EXPECTED_MODEL_SHA256},
             "upstream_model": {"sha256": module.EXPECTED_MODEL_SHA256},
+        },
+        "python_model": {
+            "symbol": module.EXPECTED_MODEL,
+            "variable_names": [f"x{i}" for i in range(23)],
+            "shock_names": ["eps_a", "eps_nu", "eps_z"],
+            "parameter_names": [f"p{i}" for i in range(16)],
         },
         "provenance": {
             "repository": clean_repo,
@@ -145,7 +169,7 @@ def test_build_evidence_accepts_complete_scoped_pass(tmp_path: Path) -> None:
     report_path.write_text(json.dumps(_report()), encoding="utf-8")
     evidence = module.build_evidence(report_path)
     assert evidence["metrics"]["joint_cases_passed"] == 8
-    assert evidence["metrics"]["worst_tree_max_abs"] == 1.7e-7
+    assert evidence["metrics"]["worst_tree_max_abs"] == 0.0
     assert evidence["duplicate_reference"]["indices"] == [0, 4]
     assert evidence["publication_ready"] is False
     assert "nonlinear likelihood parity" in evidence["claims"]["not_supported"]
@@ -179,15 +203,17 @@ def test_rejects_material_tree_error() -> None:
     module = _load_module()
     report = _report()
     report["comparisons"][3]["tree"]["max_abs"] = 2.0e-6
-    with pytest.raises(ValueError, match="fails full-tree parity"):
+    with pytest.raises(ValueError, match="does not match the raw trees"):
         module.validate_report(report)
 
 
 def test_rejects_nonreproducible_duplicate_reference() -> None:
     module = _load_module()
     report = _report()
+    report["python_cases"][4]["tree_states"][1][0][0] += 1.0e-12
+    report["python_cases"][4]["mean_path"][0][1] += 1.0e-12
     report["julia_export"]["cases"][4]["tree_states"][1][0][0] += 1.0e-12
-    with pytest.raises(ValueError, match="duplicated Julia reference"):
+    with pytest.raises(ValueError, match="duplicated Python reference"):
         module.validate_report(report)
 
 

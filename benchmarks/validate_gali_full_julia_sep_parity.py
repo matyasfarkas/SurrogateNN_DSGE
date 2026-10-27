@@ -38,7 +38,7 @@ from surrogatenn_dsge import (  # noqa: E402
 )
 
 
-SCHEMA_VERSION = "surrogatenn-dsge-gali-sep-parity/v1"
+SCHEMA_VERSION = "surrogatenn-dsge-gali-sep-parity/v2"
 JULIA_SCHEMA_VERSION = "surrogatenn-dsge-gali-julia-sep-export/v1"
 MODEL_SYMBOL = "Gali_2015_chapter_3_nonlinear"
 MODEL_PATH = ROOT / "benchmarks" / "model_sources" / f"{MODEL_SYMBOL}.jl"
@@ -59,7 +59,7 @@ DEFAULT_SHOCK = (0.12, -0.08, 0.10)
 SS_MAX_ABS_TOL = 1.0e-10
 TREE_MAX_ABS_TOL = 1.0e-6
 MEAN_PATH_MAX_ABS_TOL = 1.0e-8
-SOLVER_RESIDUAL_TOL = 1.0e-8
+SOLVER_RESIDUAL_TOL = 1.0e-10
 
 
 def _utc_now() -> str:
@@ -182,11 +182,11 @@ def _parse_indices(raw: str) -> tuple[int, ...]:
 
 def _build_spec(theta_indices: Sequence[int]) -> dict[str, Any]:
     config = {
-        "periods": 3,
+        "periods": 5,
         "branching_order": 1,
         "nnodes": 3,
         "sparse_tree": True,
-        "max_iter": 80,
+        "max_iter": 120,
         "tol": SOLVER_RESIDUAL_TOL,
         "accept_tol": SOLVER_RESIDUAL_TOL,
         "linear_solver": "qr",
@@ -517,6 +517,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "sources": {
             "local_model": {"path": str(MODEL_PATH), "sha256": local_hash},
             "upstream_model": {"path": str(upstream_model), "sha256": upstream_hash},
+        },
+        "python_model": {
+            "symbol": str(model.name),
+            "variable_names": [str(name) for name in model.timings.var],
+            "shock_names": [str(name) for name in model.timings.exo],
+            "parameter_names": [str(name) for name in model.parameter_names],
         },
         "provenance": {
             "repository": repository_git,

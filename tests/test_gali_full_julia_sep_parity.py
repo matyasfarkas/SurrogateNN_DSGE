@@ -62,14 +62,14 @@ def _matching_cases(module: ModuleType) -> tuple[dict, dict, dict]:
     return python_case, julia_case, config
 
 
-def test_spec_uses_period_major_square_shock_matrix() -> None:
+def test_spec_uses_period_major_shock_matrix() -> None:
     module = _load_module()
     spec = module._build_spec((0, 4))
 
     assert len(spec["cases"]) == 2
     assert spec["cases"][0]["parameters"] == spec["cases"][1]["parameters"]
     shocks = np.asarray(spec["cases"][0]["deterministic_shocks"])
-    assert shocks.shape == (3, 3)
+    assert shocks.shape == (5, 3)
     np.testing.assert_allclose(shocks[0], module.DEFAULT_SHOCK)
     np.testing.assert_allclose(shocks[1:], 0.0)
 
