@@ -69,7 +69,8 @@ The validator requires byte-identical local and upstream Gal\'i sources, keeps
 all eight evaluations in the denominator, aligns variables and state/shock
 columns by name, and refuses the evidence gate when either repository is dirty.
 The generated table supports non-stochastic steady-state and first-order Schur
-parity only; nonlinear trajectory and likelihood parity remain open.
+parity only; it does not by itself support nonlinear trajectory or likelihood
+parity.
 
 Build the independent reduced-horizon nonlinear-tree evidence with:
 
@@ -89,8 +90,27 @@ all three first-period shock channels active. It requires 8/8 joint successes,
 clean repositories, frozen tolerances and configuration, and a reproducible
 duplicate reference case. The evidence builder recomputes tree and expected-path
 discrepancies from the archived raw states rather than trusting reported summary
-metrics. The generated evidence does not support a
-production-horizon trajectory, nonlinear likelihood, posterior, or GPU claim.
+metrics. The generated evidence does not support a production-horizon
+trajectory, multi-period nonlinear likelihood, posterior, or GPU claim.
+
+Build the independent one-transition nonlinear likelihood evidence with:
+
+```bash
+.venv/bin/python benchmarks/validate_gali_full_julia_sep_likelihood.py \
+  --upstream-repo /path/to/clean/MacroModelling.jl \
+  --output /tmp/gali_sep_likelihood_parity.json
+.venv/bin/python benchmarks/build_gali_sep_likelihood_evidence.py \
+  /tmp/gali_sep_likelihood_parity.json \
+  --output-dir paper/generated
+```
+
+The validator generates one transition from the complete nonlinear Gal\'i
+model, then makes the Python public likelihood and an independent Julia adapter
+recover all three standardized innovations. The gate compares recovered shocks,
+the complete finite-difference observation Jacobian, residuals, and the scalar
+likelihood. It requires clean repositories and a $10^{-12}$ nonlinear-solver
+tolerance. This is one-transition algorithmic parity; multi-period filtering,
+the parameter-surface likelihood, and the production horizon remain open.
 
 Run the focused validation tests with:
 
@@ -103,6 +123,8 @@ Run the focused validation tests with:
   tests/test_gali_core_parity_evidence.py \
   tests/test_gali_full_julia_sep_parity.py \
   tests/test_gali_sep_parity_evidence.py \
+  tests/test_gali_full_julia_sep_likelihood.py \
+  tests/test_gali_sep_likelihood_evidence.py \
   tests/test_model_sep.py \
   tests/test_gali_synthetic_data.py \
   tests/test_static_hmc.py \
@@ -130,9 +152,11 @@ The independent core-parity gate now passes on the complete Gal\'i source:
 8/8 evaluations agree between Python and a clean MacroModelling.jl checkout for
 the non-stochastic steady state and first-order Schur solution. A separate 8/8
 comparison also matches the complete five-period nonlinear sparse scenario
-tree within its frozen tolerances. This removes core local-solution and
-reduced-horizon nonlinear-tree uncertainties but does not change the paper's
-overall not-ready status because production-horizon trajectory, likelihood,
+tree within its frozen tolerances. A direct one-transition likelihood adapter
+also passes recovered-shock, Jacobian, residual, and scalar-likelihood parity.
+This removes core local-solution, reduced-horizon nonlinear-tree, and
+one-transition likelihood uncertainties but does not change the paper's overall
+not-ready status because multi-period and production-horizon likelihood,
 posterior, and same-work GPU gates remain incomplete.
 
 The confirmatory plan is in `../docs/submission_readiness_plan.md`. The paper

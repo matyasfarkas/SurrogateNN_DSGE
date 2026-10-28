@@ -14,7 +14,7 @@
 \title{Residual Surrogates for Nonlinear DSGE Estimation:\\
 An Auditable Target-Corrected Workflow}
 \author{Anonymous working draft}
-\date{October 27, 2026}
+\date{October 28, 2026}
 
 \begin{document}
 \maketitle
@@ -37,8 +37,11 @@ clean-revision comparisons against MacroModelling.jl match the non-stochastic
 steady state and first-order Schur solution and, at a five-period horizon, the
 complete order-one sparse nonlinear scenario tree. Across eight evaluations,
 the worst tree and expected-path discrepancies are $6.40\times10^{-8}$ and
-$6.50\times10^{-9}$. These are core and reduced-horizon trajectory checks, not
-production-horizon likelihood or posterior parity. We therefore pair the method
+$6.50\times10^{-9}$. A direct one-transition adapter also matches recovered
+shocks within $8.30\times10^{-10}$, the observation Jacobian within
+$9.49\times10^{-7}$, and log likelihood within $5.30\times10^{-5}$. These are
+core and reduced-horizon checks, not multi-period or production-horizon
+likelihood or posterior parity. We therefore pair the method
 with executable gates for stochastic-solution accuracy, independent parity,
 untouched test performance, posterior agreement, multichain sampling, and
 same-work timing.
@@ -88,15 +91,20 @@ $1.22\times10^{-3}$ for annualized inflation, and $1.39\times10^{-3}$ for the
 annualized policy rate. Residual convergence at horizon five therefore does not
 establish terminal-horizon convergence.
 
-Independent cross-language comparisons close two scoped implementation risks.
+Independent cross-language comparisons close three scoped implementation risks.
 The Python and MacroModelling.jl calculations use byte-identical copies of the
 complete Gal\'i source, inject the policy coefficients by name despite their
 different internal parameter orders, and retain the duplicated reference in the
 eight-case denominator. Every non-stochastic steady state and first-order Schur
 solution passes its frozen tolerance. A second comparison activates all three
 shock channels and matches the complete five-period, order-one sparse nonlinear
-scenario tree, rather than only its central path. This reduced-horizon result
-does not establish production-horizon trajectory or likelihood parity.
+scenario tree, rather than only its central path. A reference adapter then
+reconstructs one nonlinear inversion-likelihood contribution from the same
+model. Recovered shocks agree within $8.30\times10^{-10}$, the finite-difference
+observation Jacobians within $9.49\times10^{-7}$, and log likelihoods within
+$5.30\times10^{-5}$. This reduced-horizon, one-transition result does not
+establish multi-period filtering or production-horizon trajectory and
+likelihood parity.
 
 The paper makes three contributions. First, it separates three objects often
 conflated in surrogate estimation: nonlinear trajectories used as labels, a
@@ -489,6 +497,8 @@ source of manuscript tables; hand-entered numerical cells are not permitted.
 
 \input{generated/gali_sep_parity_results.tex}
 
+\input{generated/gali_sep_likelihood_results.tex}
+
 The pilot establishes three narrow facts. The parser, parameter-specific
 preflight, nonlinear equation solver, residual network, likelihood, and sampler
 compose on the full model. The order-zero extended-path targets satisfy a strict
@@ -546,8 +556,20 @@ complete-tree and expected-path discrepancies are \GaliSEPTreeMax{} and
 $10^{-10}$ residual gate. Repeating the reference calibration at indices 0 and 4
 produces identical trees within each implementation. This result closes the
 reduced-horizon nonlinear-tree subgate only. It neither resolves the observed
-horizon-five-to-six instability nor validates a nonlinear likelihood or
-posterior.
+horizon-five-to-six instability nor, by itself, validates a nonlinear
+likelihood or posterior.
+
+Table~\ref{tab:gali-sep-likelihood-parity} adds the first direct nonlinear
+likelihood subgate. Because the pinned upstream public likelihood interface does
+not expose SEP controls or per-period nonlinear likelihood contributions, a
+separately specified Julia adapter reconstructs one inversion contribution from
+the upstream SEP solver. Both implementations invert the same synthetic
+transition in three observables and recover all three standardized innovations.
+The recovered-shock, finite-difference Jacobian, and log-likelihood
+discrepancies are \GaliSEPLLShockMax{}, \GaliSEPLLJacobianMax{}, and
+\GaliSEPLLAbs{}, respectively. This closes a one-transition algorithmic parity
+check. It does not test state propagation across observations, a production
+horizon, a likelihood surface over parameters, or a posterior.
 
 \section{Claim-specific decision rules}
 
@@ -583,11 +605,12 @@ defined likelihood. The sampler budgets are too small for convergence
 diagnostics, and the data are synthetic and short. The independent nonlinear
 Julia comparison is restricted to a five-period sparse tree, a single frozen
 first-period shock vector, and seven unique policy-rule points. It does not
-establish production-horizon trajectory or likelihood parity. At the pinned
+establish production-horizon trajectory parity. At the pinned
 upstream revision, the public likelihood interface exposes neither SEP controls
-nor per-period nonlinear likelihood contributions, so direct nonlinear
-likelihood parity remains an explicitly open implementation and evidence task.
-The current
+nor per-period nonlinear likelihood contributions. The reference adapter
+therefore validates only one inversion contribution; multi-period filtering,
+parameter-surface likelihood parity, and production-horizon likelihood parity
+remain open. The current
 evidence therefore supports neither exact nonlinear posterior sampling nor an
 end-to-end speedup claim.
 
@@ -613,7 +636,8 @@ readiness therefore depends on terminal-horizon validation, an untouched test
 design, an independently converged nonlinear posterior reference,
 production-horizon likelihood parity, efficient multichain sampling, and
 same-work timing. The steady-state, first-order, and reduced five-period
-nonlinear-tree portions of the cross-language gate now pass on the full source.
+nonlinear-tree portions of the cross-language gate now pass on the full source,
+as does one nonlinear inversion-likelihood contribution.
 The protocol makes the remaining requirements falsifiable and preserves
 negative results rather than redefining success after a run.
 

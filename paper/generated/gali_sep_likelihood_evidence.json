@@ -1,0 +1,95 @@
+{
+  "schema_version": "surrogatenn-dsge-gali-sep-likelihood-evidence/v1",
+  "publication_ready": false,
+  "evidence_level": "one-transition full-model nonlinear SEP likelihood parity",
+  "raw_report": {
+    "filename": "gali_sep_likelihood_raw.json",
+    "sha256": "1895be0ee03578a28e160bfb1e92c5b7109b94408c6ac7605e5c711df0cd73d1",
+    "bytes": 34838
+  },
+  "repositories": {
+    "surrogatenn_dsge": {
+      "commit": "163babd111cd455b1d12d79134ef425b9108a3d1",
+      "dirty": false
+    },
+    "macromodelling_jl": {
+      "commit": "b224f74fb892b24918aea27f0c22f609cdba2059",
+      "dirty": false
+    }
+  },
+  "model": {
+    "symbol": "Gali_2015_chapter_3_nonlinear",
+    "sha256": "53f909976abc962494693c8ba5d30223653cee6164fc9f183064e3776240fb55",
+    "variables": 23,
+    "parameters": 16,
+    "shocks": 3
+  },
+  "design": {
+    "sep_periods": 5,
+    "branching_order": 1,
+    "nodes_per_shock": 3,
+    "observables": [
+      "log_y",
+      "pi_ann",
+      "i_ann"
+    ],
+    "known_shocks": [
+      0.02,
+      -0.01,
+      0.015
+    ],
+    "solver_tolerance": 1e-12
+  },
+  "thresholds": {
+    "steady_state_max_abs": 1e-10,
+    "public_audit_abs": 1e-08,
+    "recovered_shock_max_abs": 1e-07,
+    "known_shock_max_abs": 1e-07,
+    "jacobian_max_abs": 1e-05,
+    "loglikelihood_abs": 0.0001,
+    "inversion_residual": 1e-09,
+    "solver_residual": 1e-12
+  },
+  "metrics": {
+    "steady_state_max_abs": 9.059419880941277e-14,
+    "observation_max_abs": 4.399258735077183e-15,
+    "public_audit_abs": 5.485798482141035e-10,
+    "recovered_shock_max_abs": 8.300993815935076e-10,
+    "python_known_shock_max_abs": 7.427753332539533e-09,
+    "julia_known_shock_max_abs": 6.597653950946025e-09,
+    "jacobian_max_abs": 9.489184967827191e-07,
+    "loglikelihood_abs": 5.3004503935305536e-05,
+    "python_inversion_residual": 1.2165480912847324e-10,
+    "julia_inversion_residual": 1.0778458262658245e-10,
+    "python_solver_residual": 6.230642523559558e-13,
+    "julia_solver_residual": 8.761005701289628e-13,
+    "python_loglikelihood": 3.1934449924919233,
+    "julia_loglikelihood": 3.1934979969958586,
+    "python_iterations": 3,
+    "julia_iterations": 3,
+    "python_predict_calls": 12,
+    "julia_predict_calls": 12
+  },
+  "claims": {
+    "supported": [
+      "one-transition nonlinear SEP inversion-likelihood parity",
+      "three-shock recovery parity",
+      "finite-difference observation-Jacobian parity"
+    ],
+    "not_supported": [
+      "multi-period nonlinear likelihood recursion",
+      "production-horizon likelihood parity",
+      "posterior recovery",
+      "GPU speed or efficiency",
+      "overall publication readiness"
+    ]
+  },
+  "environment": {
+    "jax": "0.4.30",
+    "jax_enable_x64": true,
+    "numpy": "2.0.2",
+    "platform": "macOS-15.7.3-arm64-arm-64bit",
+    "python": "3.9.6 (default, Dec  2 2025, 07:27:58) \n[Clang 17.0.0 (clang-1700.6.3.2)]"
+  },
+  "julia_version": "1.12.6"
+}

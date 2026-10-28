@@ -25,14 +25,17 @@ byte-identical Gal\'i files and agree at all eight evaluations on the
 non-stochastic steady state and first-order Schur solution. A second clean
 comparison agrees on the complete five-period, order-one sparse nonlinear tree
 with all three first-period shock channels active. This closes the
-reduced-horizon nonlinear-tree subgate, not production-horizon trajectory or
-likelihood parity.
+reduced-horizon nonlinear-tree subgate, not production-horizon trajectory
+parity.
 
 At the pinned clean MacroModelling.jl revision, the public likelihood interface
 does not expose SEP controls or per-period nonlinear likelihood contributions.
-Direct nonlinear likelihood parity therefore requires a separately specified,
-tested reference adapter or an upstream interface extension; it must not be
-inferred from the passing scenario-tree comparison.
+A separately specified reference adapter now reconstructs one nonlinear
+inversion-likelihood contribution directly from the upstream SEP solver. The
+clean comparison passes its recovered-shock, finite-difference Jacobian,
+residual, and likelihood gates. This closes one-transition algorithmic parity;
+multi-period state propagation, parameter-surface likelihood parity, and the
+production horizon remain open.
 
 ## Critical path
 
@@ -62,8 +65,10 @@ publication run with that flag cannot satisfy the clean-revision gate.
    likelihoods against MacroModelling.jl. Preserve failures from either
    implementation in the denominator. The steady-state and first-order Schur
    checks now pass for 8/8 evaluations across seven unique policy-rule points.
-   The complete reduced-horizon nonlinear tree also passes 8/8; production-
-   horizon trajectories and likelihoods remain open.
+   The complete reduced-horizon nonlinear tree also passes 8/8, and one direct
+   nonlinear inversion-likelihood contribution passes its cross-language gate.
+   Production-horizon trajectories, multi-period likelihood recursion, and the
+   likelihood surface remain open.
 5. Build a full nonlinear $(\phi_\pi,\phi_y)$ likelihood grid. Double the grid
    resolution until posterior moments and interval endpoints stabilize.
 6. Compare ROM, residual-surrogate, surrogate-target HMC, and nonlinear-target

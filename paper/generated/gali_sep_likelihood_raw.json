@@ -1,0 +1,1025 @@
+{
+  "comparison": {
+    "jacobian": {
+      "max_abs": 9.489184967827191e-07,
+      "rmse": 6.561774865553318e-07
+    },
+    "julia_final_sep_error": 8.761005701289628e-13,
+    "julia_iterations": 3,
+    "julia_loglikelihood": 3.1934979969958586,
+    "julia_predict_calls": 12,
+    "julia_recovered_vs_known": {
+      "max_abs": 6.597653950946025e-09,
+      "rmse": 4.343986011868509e-09
+    },
+    "julia_residual_norm": 1.0778458262658245e-10,
+    "julia_stop_reason": "residual_tolerance",
+    "logabsdet_abs_diff": 0.00010600903651791782,
+    "loglikelihood_abs_diff": 5.3004503935305536e-05,
+    "observation_deviation": {
+      "max_abs": 4.399258735077183e-15,
+      "rmse": 3.1100387729153414e-15
+    },
+    "python_final_sep_error": 6.230642523559558e-13,
+    "python_iterations": 3,
+    "python_loglikelihood": 3.1934449924919233,
+    "python_predict_calls": 12,
+    "python_recovered_vs_known": {
+      "max_abs": 7.427753332539533e-09,
+      "rmse": 4.7435967663731045e-09
+    },
+    "python_residual_norm": 1.2165480912847324e-10,
+    "python_stop_reason": "residual_tolerance",
+    "recovered_shocks": {
+      "max_abs": 8.300993815935076e-10,
+      "rmse": 5.37086327954357e-10
+    },
+    "steady_state": {
+      "max_abs": 9.059419880941277e-14,
+      "rmse": 2.3442121899080935e-14
+    }
+  },
+  "design": {
+    "config": {
+      "accept_tol": 1e-12,
+      "branching_order": 1,
+      "fallback_solver": null,
+      "linear_solver": "qr",
+      "max_iter": 120,
+      "nnodes": 3,
+      "periods": 5,
+      "sparse_tree": true,
+      "stall_abs_tol": 1e-10,
+      "stall_iters": 25,
+      "stall_rel_tol": 0.0001,
+      "tol": 1e-12
+    },
+    "inversion": {
+      "finite_difference_step_rule": "max(cbrt(eps)*max(1,abs(shock),sigma),1e-6)",
+      "lambda": 1e-08,
+      "max_iter": 12,
+      "residual_tol": 1e-09,
+      "step_tol": 1e-10
+    },
+    "known_generation_shocks": [
+      0.02,
+      -0.01,
+      0.015
+    ],
+    "model_symbol": "Gali_2015_chapter_3_nonlinear",
+    "observable_names": [
+      "log_y",
+      "pi_ann",
+      "i_ann"
+    ],
+    "observation_levels": [
+      -0.052806306828146236,
+      0.004031763103994279,
+      0.04508740391298038
+    ],
+    "parameters": {
+      "ϕʸ": 0.125,
+      "ϕᵖⁱ": 1.5
+    },
+    "shock_sigmas": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "structural_shocks": [
+      "eps_a",
+      "eps_nu",
+      "eps_z"
+    ]
+  },
+  "elapsed_s": 90.531622708,
+  "environment": {
+    "jax": "0.4.30",
+    "jax_enable_x64": true,
+    "numpy": "2.0.2",
+    "platform": "macOS-15.7.3-arm64-arm-64bit",
+    "python": "3.9.6 (default, Dec  2 2025, 07:27:58) \n[Clang 17.0.0 (clang-1700.6.3.2)]"
+  },
+  "gates": {
+    "clean_provenance": true,
+    "finite_difference_jacobian_parity": true,
+    "julia_inversion_residual": true,
+    "julia_recovers_known_shocks": true,
+    "julia_sep_solver_residual": true,
+    "loglikelihood_parity": true,
+    "model_identity": true,
+    "observation_demeaning_parity": true,
+    "public_python_matches_audit": true,
+    "python_inversion_residual": true,
+    "python_recovers_known_shocks": true,
+    "python_sep_solver_residual": true,
+    "recovered_shock_parity": true,
+    "source_identity": true,
+    "steady_state_parity": true
+  },
+  "generated_at_utc": "2026-10-28T13:48:56Z",
+  "julia_export": {
+    "generated_at_utc": "2026-10-28T13:48:55.558Z",
+    "julia_version": "1.12.6",
+    "model": {
+      "parameter_names": [
+        "σ",
+        "φ",
+        "ϕᵖⁱ",
+        "ϕʸ",
+        "θ",
+        "ρ_ν",
+        "ρ_z",
+        "ρ_a",
+        "β",
+        "η",
+        "α",
+        "ϵ",
+        "τ",
+        "std_a",
+        "std_z",
+        "std_nu"
+      ],
+      "path": "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/model_sources/Gali_2015_chapter_3_nonlinear.jl",
+      "sha256": "53f909976abc962494693c8ba5d30223653cee6164fc9f183064e3776240fb55",
+      "shock_names": [
+        "eps_a",
+        "eps_nu",
+        "eps_z"
+      ],
+      "symbol": "Gali_2015_chapter_3_nonlinear",
+      "variable_names": [
+        "A",
+        "C",
+        "MC",
+        "M_real",
+        "N",
+        "Pi",
+        "Pi_star",
+        "Q",
+        "R",
+        "S",
+        "W_real",
+        "Y",
+        "Z",
+        "i_ann",
+        "log_N",
+        "log_W_real",
+        "log_y",
+        "nu",
+        "pi_ann",
+        "r_real_ann",
+        "realinterest",
+        "x_aux_1",
+        "x_aux_2"
+      ]
+    },
+    "result": {
+      "elapsed_s": 12.773075208,
+      "final_evaluated_shocks": [
+        0.01999999340234605,
+        -0.010000003374883142,
+        0.015000001300680412
+      ],
+      "final_sep_convergence_flag": 0,
+      "final_sep_error": 8.761005701289628e-13,
+      "iteration_trace": [
+        {
+          "evaluated_shocks": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "iteration": 1,
+          "jacobian": [
+            [
+              0.007573449377896762,
+              -0.0025358872068140187,
+              -0.025230281915138583
+            ],
+            [
+              -0.01584314748297828,
+              -0.003546082515584766,
+              -0.03734224843251613
+            ],
+            [
+              -0.01997799650185848,
+              0.003412497089713928,
+              -0.06862851357941503
+            ]
+          ],
+          "predict_calls": [
+            {
+              "accepted": true,
+              "convergence_flag": 0,
+              "final_error": 9.803130529562054e-13,
+              "kind": "base",
+              "runtime_seconds": 0.8829929828643799,
+              "shocks": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            {
+              "accepted": true,
+              "column": 0,
+              "convergence_flag": 0,
+              "final_error": 8.64510765099845e-13,
+              "kind": "finite_difference",
+              "runtime_seconds": 0.04451394081115723,
+              "shocks": [
+                6.0554544523933395e-06,
+                0.0,
+                0.0
+              ],
+              "step_size": 6.0554544523933395e-06
+            },
+            {
+              "accepted": true,
+              "column": 1,
+              "convergence_flag": 0,
+              "final_error": 8.242257495382411e-13,
+              "kind": "finite_difference",
+              "runtime_seconds": 0.037973880767822266,
+              "shocks": [
+                0.0,
+                6.0554544523933395e-06,
+                0.0
+              ],
+              "step_size": 6.0554544523933395e-06
+            },
+            {
+              "accepted": true,
+              "column": 2,
+              "convergence_flag": 0,
+              "final_error": 9.06129321447693e-13,
+              "kind": "finite_difference",
+              "runtime_seconds": 0.04384613037109375,
+              "shocks": [
+                0.0,
+                0.0,
+                6.0554544523933395e-06
+              ],
+              "step_size": 6.0554544523933395e-06
+            }
+          ],
+          "predicted_observation_deviation": [
+            -0.0019203717210839744,
+            0.004871265676422399,
+            0.006346712654090932
+          ],
+          "residual": [
+            -0.00020279659354171392,
+            -0.0008395025724250108,
+            -0.0014606521551121798
+          ],
+          "residual_norm": 0.0016968782353764188,
+          "step": [
+            0.019860415435673913,
+            -0.009997455500828067,
+            0.015004743422570521
+          ],
+          "step_norm": 0.02682401056788051
+        },
+        {
+          "evaluated_shocks": [
+            0.019860415435673913,
+            -0.009997455500828067,
+            0.015004743422570521
+          ],
+          "iteration": 2,
+          "jacobian": [
+            [
+              0.007517670242308872,
+              -0.00254346922493952,
+              -0.02531559969220517
+            ],
+            [
+              -0.015740751522763424,
+              -0.003534243404755712,
+              -0.03720289220413572
+            ],
+            [
+              -0.019852308179331323,
+              0.003426448681065945,
+              -0.0684621542563791
+            ]
+          ],
+          "predict_calls": [
+            {
+              "accepted": true,
+              "convergence_flag": 0,
+              "final_error": 9.108712048511158e-13,
+              "kind": "base",
+              "runtime_seconds": 0.061131954193115234,
+              "shocks": [
+                0.019860415435673913,
+                -0.009997455500828067,
+                0.015004743422570521
+              ]
+            },
+            {
+              "accepted": true,
+              "column": 0,
+              "convergence_flag": 0,
+              "final_error": 8.642989752713494e-13,
+              "kind": "finite_difference",
+              "runtime_seconds": 0.03951692581176758,
+              "shocks": [
+                0.019866470890126307,
+                -0.009997455500828067,
+                0.015004743422570521
+              ],
+              "step_size": 6.0554544523933395e-06
+            },
+            {
+              "accepted": true,
+              "column": 1,
+              "convergence_flag": 0,
+              "final_error": 8.242244302976605e-13,
+              "kind": "finite_difference",
+              "runtime_seconds": 0.03559708595275879,
+              "shocks": [
+                0.019860415435673913,
+                -0.009991400046375673,
+                0.015004743422570521
+              ],
+              "step_size": 6.0554544523933395e-06
+            },
+            {
+              "accepted": true,
+              "column": 2,
+              "convergence_flag": 0,
+              "final_error": 9.062956548427927e-13,
+              "kind": "finite_difference",
+              "runtime_seconds": 0.041132211685180664,
+              "shocks": [
+                0.019860415435673913,
+                -0.009997455500828067,
+                0.015010798877022915
+              ],
+              "step_size": 6.0554544523933395e-06
+            }
+          ],
+          "predicted_observation_deviation": [
+            -0.002124344224032272,
+            0.004033774790677936,
+            0.004888515519089143
+          ],
+          "residual": [
+            1.1759094065838527e-06,
+            -2.01168668054804e-06,
+            -2.4550201103909486e-06
+          ],
+          "residual_norm": 3.3847850708148025e-06,
+          "step": [
+            0.00013957796667213765,
+            -2.5478740550752396e-06,
+            -4.742121890108623e-06
+          ],
+          "step_norm": 0.00013968173882991842
+        },
+        {
+          "evaluated_shocks": [
+            0.01999999340234605,
+            -0.010000003374883142,
+            0.015000001300680412
+          ],
+          "iteration": 3,
+          "jacobian": [
+            [
+              0.007517599881131898,
+              -0.002543358409208341,
+              -0.025315694343990572
+            ],
+            [
+              -0.015740378645079402,
+              -0.0035342455352545196,
+              -0.03720256008667246
+            ],
+            [
+              -0.019851770142010807,
+              0.0034265148173408862,
+              -0.06846168934985536
+            ]
+          ],
+          "predict_calls": [
+            {
+              "accepted": true,
+              "convergence_flag": 0,
+              "final_error": 8.761005701289628e-13,
+              "kind": "base",
+              "runtime_seconds": 0.04351210594177246,
+              "shocks": [
+                0.01999999340234605,
+                -0.010000003374883142,
+                0.015000001300680412
+              ]
+            },
+            {
+              "accepted": true,
+              "column": 0,
+              "convergence_flag": 0,
+              "final_error": 8.642309957951343e-13,
+              "kind": "finite_difference",
+              "runtime_seconds": 0.0370640754699707,
+              "shocks": [
+                0.020006048856798443,
+                -0.010000003374883142,
+                0.015000001300680412
+              ],
+              "step_size": 6.0554544523933395e-06
+            },
+            {
+              "accepted": true,
+              "column": 1,
+              "convergence_flag": 0,
+              "final_error": 8.242255720980735e-13,
+              "kind": "finite_difference",
+              "runtime_seconds": 0.03511404991149902,
+              "shocks": [
+                0.01999999340234605,
+                -0.009993947920430749,
+                0.015000001300680412
+              ],
+              "step_size": 6.0554544523933395e-06
+            },
+            {
+              "accepted": true,
+              "column": 2,
+              "convergence_flag": 0,
+              "final_error": 9.063423839564267e-13,
+              "kind": "finite_difference",
+              "runtime_seconds": 0.04159283638000488,
+              "shocks": [
+                0.01999999340234605,
+                -0.010000003374883142,
+                0.015006056755132805
+              ],
+              "step_size": 6.0554544523933395e-06
+            }
+          ],
+          "predicted_observation_deviation": [
+            -0.0021231683895585884,
+            0.004031763173915108,
+            0.004886060532356726
+          ],
+          "residual": [
+            7.493290016258314e-11,
+            -6.991772005110475e-11,
+            -3.3377973995829535e-11
+          ],
+          "residual_norm": 1.0778458262658245e-10,
+          "stop_reason": "residual_tolerance"
+        }
+      ],
+      "iterations": 3,
+      "jacobian": [
+        [
+          0.007517599881131898,
+          -0.002543358409208341,
+          -0.025315694343990572
+        ],
+        [
+          -0.015740378645079402,
+          -0.0035342455352545196,
+          -0.03720256008667246
+        ],
+        [
+          -0.019851770142010807,
+          0.0034265148173408862,
+          -0.06846168934985536
+        ]
+      ],
+      "logabsdet": -11.901352193062365,
+      "loglikelihood": 3.1934979969958586,
+      "observable_indices_zero_based": [
+        16,
+        18,
+        13
+      ],
+      "observation_deviation": [
+        -0.0021231683146256883,
+        0.004031763103997388,
+        0.004886060498978752
+      ],
+      "observation_levels": [
+        -0.052806306828146236,
+        0.004031763103994279,
+        0.04508740391298038
+      ],
+      "parameter_values": [
+        1.0,
+        5.0,
+        1.5,
+        0.125,
+        0.75,
+        0.5,
+        0.5,
+        0.9,
+        0.99,
+        3.77,
+        0.25,
+        9.0,
+        0.0,
+        0.01,
+        0.05,
+        0.0025
+      ],
+      "predict_calls": 12,
+      "predicted_observation_deviation": [
+        -0.0021231683895585884,
+        0.004031763173915108,
+        0.004886060532356726
+      ],
+      "recovered_shocks": [
+        0.01999999340234605,
+        -0.010000003374883142,
+        0.015000001300680412
+      ],
+      "residual": [
+        7.493290016258314e-11,
+        -6.991772005110475e-11,
+        -3.3377973995829535e-11
+      ],
+      "residual_norm": 1.0778458262658245e-10,
+      "shocks2": 0.0007249998426119737,
+      "standardized_jacobian": [
+        [
+          0.007517599881131898,
+          -0.002543358409208341,
+          -0.025315694343990572
+        ],
+        [
+          -0.015740378645079402,
+          -0.0035342455352545196,
+          -0.03720256008667246
+        ],
+        [
+          -0.019851770142010807,
+          0.0034265148173408862,
+          -0.06846168934985536
+        ]
+      ],
+      "status": "ok",
+      "steady_state": [
+        1.0,
+        0.9505798249541406,
+        0.8888888888888891,
+        0.9152363832868937,
+        0.9346552651840673,
+        0.9999999999999992,
+        0.9999999999999977,
+        0.9900000000000011,
+        1.010101010101009,
+        1.0,
+        0.6780252644037248,
+        0.9505798249541407,
+        1.0,
+        0.040201343414001625,
+        -0.06757751801802725,
+        -0.3885707286036573,
+        -0.05068313851352055,
+        0.0,
+        -3.1086244689504395e-15,
+        0.04020134341400514,
+        1.01010101010101,
+        3.4519956850053024,
+        3.883495145631001
+      ],
+      "stop_reason": "residual_tolerance"
+    },
+    "schema_version": "surrogatenn-dsge-gali-julia-sep-likelihood-export/v1",
+    "spec": {
+      "config": {
+        "accept_tol": 1e-12,
+        "branching_order": 1,
+        "fallback_solver": null,
+        "linear_solver": "qr",
+        "max_iter": 120,
+        "nnodes": 3,
+        "periods": 5,
+        "sparse_tree": true,
+        "stall_abs_tol": 1e-10,
+        "stall_iters": 25,
+        "stall_rel_tol": 0.0001,
+        "tol": 1e-12
+      },
+      "inversion": {
+        "finite_difference_step_rule": "max(cbrt(eps)*max(1,abs(shock),sigma),1e-6)",
+        "lambda": 1e-08,
+        "max_iter": 12,
+        "residual_tol": 1e-09,
+        "step_tol": 1e-10
+      },
+      "known_generation_shocks": [
+        0.02,
+        -0.01,
+        0.015
+      ],
+      "model_symbol": "Gali_2015_chapter_3_nonlinear",
+      "observable_names": [
+        "log_y",
+        "pi_ann",
+        "i_ann"
+      ],
+      "observation_levels": [
+        -0.052806306828146236,
+        0.004031763103994279,
+        0.04508740391298038
+      ],
+      "parameters": {
+        "ϕʸ": 0.125,
+        "ϕᵖⁱ": 1.5
+      },
+      "shock_sigmas": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "structural_shocks": [
+        "eps_a",
+        "eps_nu",
+        "eps_z"
+      ]
+    }
+  },
+  "julia_invocation": {
+    "argv": [
+      "julia",
+      "--project=/private/tmp/macromodelling-clean.zLWo3D/checkout",
+      "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/export_gali_full_julia_sep_likelihood.jl",
+      "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/model_sources/Gali_2015_chapter_3_nonlinear.jl",
+      "/var/folders/qd/hnykx95x79n54tfcj68jpcgm0000gp/T/gali-sep-likelihood-parity-bts4ypoz/spec.json",
+      "/var/folders/qd/hnykx95x79n54tfcj68jpcgm0000gp/T/gali-sep-likelihood-parity-bts4ypoz/julia.json"
+    ],
+    "cwd": "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE",
+    "elapsed_s": 42.36834158400001,
+    "exit_code": 0,
+    "shell_escaped": "julia --project=/private/tmp/macromodelling-clean.zLWo3D/checkout /Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/export_gali_full_julia_sep_likelihood.jl /Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/model_sources/Gali_2015_chapter_3_nonlinear.jl /var/folders/qd/hnykx95x79n54tfcj68jpcgm0000gp/T/gali-sep-likelihood-parity-bts4ypoz/spec.json /var/folders/qd/hnykx95x79n54tfcj68jpcgm0000gp/T/gali-sep-likelihood-parity-bts4ypoz/julia.json",
+    "stderr": "┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_a not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_nu not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n┌ Warning: Shock std parameter z_eps_z not found, using default 1.0\n└ @ MacroModelling /private/tmp/macromodelling-clean.zLWo3D/checkout/src/sep_solver.jl:924\n",
+    "stdout": "Remove redundant variables in non-stochastic steady state problem:\t1.233 seconds\nSet up non-stochastic steady state problem:\t\t\t\t10.089 seconds\nFind non-stochastic steady state:\t\t\t\t\t1.432 seconds\nTake symbolic derivatives up to first order:\t\t\t\t4.36 seconds\nModel:        Gali_2015_chapter_3_nonlinear\nVariables\n Total:       23\n  Auxiliary:  0\n States:      4\n  Auxiliary:  0\n Jumpers:     5\n  Auxiliary:  0\nShocks:       3\nParameters:   16\n"
+  },
+  "provenance": {
+    "jax_backend": "cpu",
+    "jax_devices": [
+      "TFRT_CPU_0"
+    ],
+    "repository": {
+      "commit": "163babd111cd455b1d12d79134ef425b9108a3d1",
+      "dirty": false,
+      "path": "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE",
+      "status_short": []
+    },
+    "upstream_repository": {
+      "commit": "b224f74fb892b24918aea27f0c22f609cdba2059",
+      "dirty": false,
+      "path": "/private/tmp/macromodelling-clean.zLWo3D/checkout",
+      "status_short": []
+    }
+  },
+  "publication_ready": false,
+  "python": {
+    "audit": {
+      "final_evaluated_shocks": [
+        0.019999992572246668,
+        -0.010000003111809113,
+        0.01500000162796048
+      ],
+      "final_sep_convergence_flag": 0,
+      "final_sep_error": 6.230642523559558e-13,
+      "iteration_trace": [
+        {
+          "base_sep_error": 2.7054435671188754e-13,
+          "base_sep_flag": 0,
+          "evaluated_shocks": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "iteration": 1,
+          "jacobian": [
+            [
+              0.007573441806991492,
+              -0.0025360814285512305,
+              -0.02523043956001849
+            ],
+            [
+              -0.01584296178409572,
+              -0.003545909471498436,
+              -0.03734195885484318
+            ],
+            [
+              -0.019977797443313162,
+              0.0034130270141224843,
+              -0.06862823626450018
+            ]
+          ],
+          "predict_calls": 4,
+          "predicted_observation_deviation": [
+            -0.001920371720584478,
+            0.004871265674465526,
+            0.006346712651812546
+          ],
+          "residual": [
+            -0.0002027965940412102,
+            -0.0008395025704712464,
+            -0.0014606521528381933
+          ],
+          "residual_norm": 0.0016968782325121018,
+          "step": [
+            0.01986068456248515,
+            -0.009996820908451252,
+            0.015004737665459499
+          ],
+          "step_norm": 0.026823970100927325
+        },
+        {
+          "base_sep_error": 6.932293823182223e-15,
+          "base_sep_flag": 0,
+          "evaluated_shocks": [
+            0.01986068456248515,
+            -0.009996820908451252,
+            0.015004737665459499
+          ],
+          "iteration": 2,
+          "jacobian": [
+            [
+              0.007517776228107296,
+              -0.0025435504961496516,
+              -0.025315643112326626
+            ],
+            [
+              -0.0157407490565184,
+              -0.003534250613988971,
+              -0.03720278841615723
+            ],
+            [
+              -0.019852244877992,
+              0.0034268463982404357,
+              -0.06846201544078864
+            ]
+          ],
+          "predict_calls": 4,
+          "predicted_observation_deviation": [
+            -0.002124343669349285,
+            0.00403376852490305,
+            0.004888512743605383
+          ],
+          "residual": [
+            1.175354723596811e-06,
+            -2.005420908770747e-06,
+            -2.45224463103072e-06
+          ],
+          "residual_norm": 3.3788571260169043e-06,
+          "step": [
+            0.00013930800976151803,
+            -3.182203357860191e-06,
+            -4.73603749901864e-06
+          ],
+          "step_norm": 0.0001394248114688275
+        },
+        {
+          "base_sep_error": 6.230642523559558e-13,
+          "base_sep_flag": 0,
+          "evaluated_shocks": [
+            0.019999992572246668,
+            -0.010000003111809113,
+            0.01500000162796048
+          ],
+          "iteration": 3,
+          "jacobian": [
+            [
+              0.007517792989062553,
+              -0.002543352961640057,
+              -0.02531565038415421
+            ],
+            [
+              -0.015741181431038663,
+              -0.003535057091724235,
+              -0.03720326164371547
+            ],
+            [
+              -0.01985271906050759,
+              0.0034259012772281496,
+              -0.06846256325943917
+            ]
+          ],
+          "predict_calls": 4,
+          "predicted_observation_deviation": [
+            -0.0021231684054641917,
+            0.0040317631778803865,
+            0.0048860605319758985
+          ],
+          "residual": [
+            9.083850338598154e-11,
+            -7.388610730185707e-11,
+            -3.300154594043647e-11
+          ],
+          "residual_norm": 1.2165480912847324e-10,
+          "stop_reason": "residual_tolerance"
+        }
+      ],
+      "iterations": 3,
+      "jacobian": [
+        [
+          0.007517792989062553,
+          -0.002543352961640057,
+          -0.02531565038415421
+        ],
+        [
+          -0.015741181431038663,
+          -0.003535057091724235,
+          -0.03720326164371547
+        ],
+        [
+          -0.01985271906050759,
+          0.0034259012772281496,
+          -0.06846256325943917
+        ]
+      ],
+      "logabsdet": -11.901246184025847,
+      "loglikelihood": 3.1934449924919233,
+      "predict_calls": 12,
+      "predicted_observation_deviation": [
+        -0.0021231684054641917,
+        0.0040317631778803865,
+        0.0048860605319758985
+      ],
+      "recovered_shocks": [
+        0.019999992572246668,
+        -0.010000003111809113,
+        0.01500000162796048
+      ],
+      "residual": [
+        9.083850338598154e-11,
+        -7.388610730185707e-11,
+        -3.300154594043647e-11
+      ],
+      "residual_norm": 1.2165480912847324e-10,
+      "shocks2": 0.0007249998139649309,
+      "standardized_jacobian": [
+        [
+          0.007517792989062553,
+          -0.002543352961640057,
+          -0.02531565038415421
+        ],
+        [
+          -0.015741181431038663,
+          -0.003535057091724235,
+          -0.03720326164371547
+        ],
+        [
+          -0.01985271906050759,
+          0.0034259012772281496,
+          -0.06846256325943917
+        ]
+      ],
+      "status": "ok",
+      "stop_reason": "residual_tolerance"
+    },
+    "generation_sep_error": 1.9997303585513938e-13,
+    "generation_sep_flag": 0,
+    "known_generation_shocks": [
+      0.02,
+      -0.01,
+      0.015
+    ],
+    "observable_indices_zero_based": [
+      16,
+      18,
+      13
+    ],
+    "observation_deviation": [
+      -0.0021231683146256883,
+      0.004031763103994279,
+      0.0048860604989743525
+    ],
+    "observation_levels": [
+      -0.052806306828146236,
+      0.004031763103994279,
+      0.04508740391298038
+    ],
+    "parameter_values": [
+      0.01,
+      0.0025,
+      0.05,
+      0.25,
+      0.99,
+      3.77,
+      0.75,
+      0.9,
+      0.5,
+      0.5,
+      1.0,
+      0.0,
+      5.0,
+      0.125,
+      1.5,
+      9.0
+    ],
+    "public_audit_abs_diff": 5.485798482141035e-10,
+    "public_diagnostics": {
+      "final_state_finite": true,
+      "kind": "sep_inversion_filter",
+      "ll_total": 3.193444993040503,
+      "n_obs": 3,
+      "n_periods": 1,
+      "n_struct": 3,
+      "presample_periods": 0,
+      "sep_accept_tol": 1e-12,
+      "sep_carry_warm_start_strategy": "shifted_tree",
+      "sep_inv_lambda": 1e-08,
+      "sep_inv_maxit": 12,
+      "sep_inv_resid_tol": 1e-09,
+      "sep_inv_step_tol": 1e-10,
+      "sep_maxit": 120,
+      "sep_nnodes": 3,
+      "sep_order": 1,
+      "sep_period_carry_warm_start_used": [
+        false
+      ],
+      "sep_period_predict_calls": [
+        12
+      ],
+      "sep_periods": 5,
+      "sep_shock_scale": 1.0,
+      "sep_sparse_tree": true,
+      "sep_tol": 1e-12,
+      "sep_total_predict_calls": 12,
+      "status": "ok"
+    },
+    "public_loglikelihood_per_period": [
+      3.193444993040503
+    ],
+    "shock_sigmas": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "status": "ok",
+    "steady_state": [
+      1.0,
+      0.9505798249541407,
+      0.8888888888888888,
+      0.9152363832868898,
+      0.9346552651840672,
+      1.0,
+      1.0,
+      0.99,
+      1.0101010101010102,
+      1.0,
+      0.6780252644037247,
+      0.9505798249541407,
+      1.0,
+      0.040201343414006024,
+      -0.06757751801802737,
+      -0.3885707286036575,
+      -0.05068313851352055,
+      0.0,
+      0.0,
+      0.040201343414006024,
+      1.0101010101010102,
+      3.451995685005393,
+      3.883495145631067
+    ],
+    "steady_state_residual_norm": 1.1102230246251565e-16
+  },
+  "schema_version": "surrogatenn-dsge-gali-sep-likelihood-parity/v1",
+  "scope": {
+    "not_validated": [
+      "multi-period nonlinear likelihood recursion",
+      "production-horizon likelihood parity",
+      "posterior recovery",
+      "GPU throughput"
+    ],
+    "validated": [
+      "full nonlinear Gali source identity",
+      "one-transition nonlinear SEP inversion likelihood",
+      "all three standardized structural innovations",
+      "recovered shocks, finite-difference Jacobian, and likelihood"
+    ]
+  },
+  "sources": {
+    "local_model": {
+      "path": "/Volumes/MacMini/matyasfarkas/Documents/GitHub/SurrogateNN_DSGE/benchmarks/model_sources/Gali_2015_chapter_3_nonlinear.jl",
+      "sha256": "53f909976abc962494693c8ba5d30223653cee6164fc9f183064e3776240fb55"
+    },
+    "upstream_model": {
+      "path": "/private/tmp/macromodelling-clean.zLWo3D/checkout/models/Gali_2015_chapter_3_nonlinear.jl",
+      "sha256": "53f909976abc962494693c8ba5d30223653cee6164fc9f183064e3776240fb55"
+    }
+  },
+  "status": "pass",
+  "thresholds": {
+    "inversion_residual": 1e-09,
+    "jacobian_max_abs": 1e-05,
+    "known_shock_max_abs": 1e-07,
+    "loglikelihood_abs": 0.0001,
+    "public_audit_abs": 1e-08,
+    "recovered_shock_max_abs": 1e-07,
+    "solver_residual": 1e-12,
+    "steady_state_max_abs": 1e-10
+  }
+}
