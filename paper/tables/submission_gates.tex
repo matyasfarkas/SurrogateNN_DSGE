@@ -11,7 +11,8 @@ Scope and provenance & Full 23-equation source verified by content hash and upst
 Nonlinear solution & Positive-order stochastic SEP with multiple nodes and all shocks active; raw attempted and successful counts; scaled residuals; regular, posterior, and boundary-stress strata. \\
 Independent parity & Common case identifiers evaluated in Python and MacroModelling.jl; both failures retained in the denominator; QZ, trajectory, and likelihood errors reported on common successful cases. \\
 Surrogate accuracy & Disjoint parameter, shock, and trajectory partitions; shrinkage disabled or fitted on a separate calibration partition; untouched-test per-output and tail errors; paired improvement over ROM with a 95 percent interval; learning-curve and out-of-distribution results. \\
-Posterior fidelity & Two-parameter full nonlinear grid with resolution-doubling convergence; posterior moments, intervals, and distribution compared with the surrogate and corrected samplers using numerical or Monte Carlo uncertainty. \\
+End-to-end pipeline & Known-truth nonlinear data; matched direct and surrogate data, priors, transforms, objective terms, and chain seeds; held-out residual, inversion-grid, and matched-HMC layers passed sequentially; failures retained. \\
+Posterior fidelity & Two-parameter full nonlinear grid with resolution-doubling convergence; interval overlap and truth coverage for every identified parameter; posterior-mean differences no larger than 0.5 combined MCSE in the publication run. \\
 Sampling & Four tuned chains for the scaling experiment; rank-normalized split $\widehat R$, bulk and tail ESS, failures, ESS per gradient evaluation, and ESS per second. \\
 Timing & Same-work, same-precision comparison; synchronized warm calls and independent end-to-end processes; compilation, transfers, training, and host callbacks reported separately; continuous dedicated-device traces for utilization, peak memory, power, and energy. \\
 \bottomrule

@@ -40,6 +40,14 @@ residual, and likelihood gates. This closes one-transition algorithmic parity;
 multi-period state propagation, parameter-surface likelihood parity, and the
 production horizon remain open.
 
+The original `SurrogateNN_Estimation.jl` paper treats those component checks as
+prerequisites, not as estimator validation. Its decisive evidence is a matched,
+known-truth pipeline: nonlinear reference data, held-out residual trajectories,
+a common-shock inversion grid, and direct-reference versus surrogate HMC using
+the same data, priors, transforms, objective terms, and chain seeds. This
+project has not yet completed that package. GPU execution and profiling remain
+computational-feasibility evidence until the matched pipeline passes.
+
 ## Critical path
 
 Every new Gal\'i pilot is launched from a clean revision through
@@ -74,10 +82,15 @@ publication run with that flag cannot satisfy the clean-revision gate.
    likelihood surface remain open.
 5. Build a full nonlinear $(\phi_\pi,\phi_y)$ likelihood grid. Double the grid
    resolution until posterior moments and interval endpoints stabilize.
-6. Compare ROM, residual-surrogate, surrogate-target HMC, and nonlinear-target
-   corrected HMC against the grid. Report numerical uncertainty or pooled Monte
-   Carlo error.
-7. Stop if posterior fidelity fails. Do not scale the parameter dimension to
+6. Compare direct-reference and residual-surrogate objectives against the grid,
+   then run matched HMC with the same observations, priors, transforms, shock
+   treatment, objective terms, initialization rules, and chain seeds. Report
+   truth coverage, interval overlap, posterior-mean differences in combined
+   MCSE units, convergence diagnostics, and every numerical failure.
+7. Require the held-out residual, common-shock inversion-grid, and matched-HMC
+   layers to pass sequentially. Preserve cases in which both objectives agree
+   but miss a weakly identified truth as identification failures.
+8. Stop if posterior fidelity fails. Do not scale the parameter dimension to
    compensate for a failed correctness reference.
 
 ### Experiment B: computational scaling
@@ -116,8 +129,11 @@ publication run with that flag cannot satisfy the clean-revision gate.
   reversals, and normalized gradient error with a declared reference-gradient
   floor.
 - The two-parameter nonlinear grid passes resolution-doubling checks, and the
-  approximate/corrected posterior agrees within prespecified numerical or Monte
-  Carlo uncertainty.
+  matched direct-reference and surrogate arms use identical data, priors,
+  transforms, shock treatment, objective terms, and chain seeds.
+- Direct and surrogate intervals overlap and both cover every identified truth;
+  posterior-mean differences are no larger than 0.5 combined MCSE. All
+  attempted evaluations and expected identification failures remain visible.
 - The scaling run passes multi-chain diagnostics and reports effective samples
   per second.
 - Timing claims use same-work baselines and uncertainty intervals. A GPU label

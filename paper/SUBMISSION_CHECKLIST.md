@@ -14,9 +14,17 @@
 - [x] Bibliographic metadata and title capitalization have been checked.
 - [x] LaTeX build has no warnings, undefined references, or overfull/underfull boxes.
 - [x] All 14 rendered pages have been visually checked.
-- [x] Focused evidence, profiling, and submission-bundle tests pass: 126 passed.
+- [x] Focused evidence, profiling, and submission-bundle tests pass: 127 passed.
 - [x] Data/code availability and computational-assistance statements are included.
 - [x] Conference-neutral source/PDF bundle is deterministic and hash-verified.
+
+## Open computational gate for an estimation claim
+
+- [ ] Generate the frozen known-truth nonlinear Gal\'i panel.
+- [ ] Pass the parameter-held-out residual and common-shock inversion-grid layers.
+- [ ] Pass matched direct-reference versus surrogate HMC with common data, priors, transforms, objective terms, and chain seeds.
+- [ ] Establish interval overlap and truth coverage for both estimated parameters, with posterior-mean differences no larger than 0.5 combined MCSE.
+- [ ] Only then report same-work GPU throughput, ESS per second, and continuous device telemetry as computational-value evidence.
 
 ## Author checks before upload
 

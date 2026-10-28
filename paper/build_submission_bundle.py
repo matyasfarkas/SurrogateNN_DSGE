@@ -22,6 +22,7 @@ SCHEMA_VERSION = "surrogatenn-dsge-paper-submission/v1"
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 REQUIRED_FILES = (
     "LICENSE",
+    "docs/end_to_end_pipeline_validation.md",
     "docs/submission_readiness_plan.md",
     "paper/README.md",
     "paper/SUBMISSION_CHECKLIST.md",

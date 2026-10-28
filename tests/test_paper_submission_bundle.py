@@ -21,6 +21,7 @@ def _load_module() -> ModuleType:
 def _write_minimal_paper(root: Path) -> None:
     files = {
         "LICENSE": "license\n",
+        "docs/end_to_end_pipeline_validation.md": "pipeline protocol\n",
         "docs/submission_readiness_plan.md": "plan\n",
         "paper/README.md": "readme\n",
         "paper/SUBMISSION_CHECKLIST.md": "checklist\n",

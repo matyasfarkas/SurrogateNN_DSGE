@@ -194,7 +194,11 @@ requires, among other checks, independent Julia comparisons, 200 held-out
 parameter vectors, likelihood and gradient parity, four chains with at least
 1,000 warmup and 1,000 retained draws per chain, R-hat/ESS diagnostics, exact
 posterior comparisons, repeated timings, hashes, and a clean recorded Git
-revision.
+revision. It also requires the matched known-truth estimator protocol in
+`docs/end_to_end_pipeline_validation.md`: common data, priors, transforms,
+objective terms, and chain seeds; sequential residual, inversion-grid, and HMC
+layers; interval overlap and truth coverage; posterior-mean differences within
+0.5 combined MCSE; and all numerical and identification failures retained.
 
 The recommended progression is therefore:
 
@@ -202,7 +206,8 @@ The recommended progression is therefore:
 2. default full-model CPU pilot;
 3. tiny corrected full-JAX GPU resource pilot;
 4. moderate `evidence` design with independent Julia cross-checks; and
-5. only then the preregistered `publication` run.
+5. matched known-truth direct-reference versus surrogate validation; and
+6. only then the preregistered `publication` GPU run.
 
 The first three stages are designed to fail cheaply. More GPU memory is useful
 for larger batched SEP designs and concurrent chains, but it is not a substitute

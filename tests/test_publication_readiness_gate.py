@@ -103,6 +103,7 @@ def test_publication_payload_passes_and_is_scoped_to_reduced_experiment() -> Non
         "qz_sep_accuracy",
         "surrogate_holdout",
         "likelihood_parity",
+        "pipeline_validation",
         "hmc",
         "timing",
     }
@@ -115,7 +116,7 @@ def test_smoke_pass_does_not_claim_publication_readiness() -> None:
 
     assert report["status"] == "pass"
     assert report["computational_evidence_gate_passed"] is True
-    assert report["summary"]["not_required"] == 10
+    assert report["summary"]["not_required"] == 12
     cross_checks = [
         check
         for check in report["categories"]["qz_sep_accuracy"]["checks"]
@@ -202,6 +203,27 @@ def test_numerical_solution_counts_and_shares_must_use_all_attempted_draws() -> 
     assert consistency["detail"] == (
         "runtime_success_share must equal runtime_success_count / parameter_draws"
     )
+
+
+def test_pipeline_validation_requires_matched_known_truth_estimation() -> None:
+    module = _load_module()
+    payload = _passing_payload(module, "publication")
+    payload["pipeline_validation"]["common_objective_terms"] = False
+    payload["pipeline_validation"]["max_abs_mean_diff_combined_mcse"] = 0.75
+
+    report = module.evaluate_payload(payload, mode="publication")
+
+    assert report["status"] == "fail"
+    assert report["categories"]["pipeline_validation"]["status"] == "fail"
+    failures = {
+        check["path"]
+        for check in report["categories"]["pipeline_validation"]["checks"]
+        if check["status"] == "fail"
+    }
+    assert failures == {
+        "pipeline_validation.common_objective_terms",
+        "pipeline_validation.max_abs_mean_diff_combined_mcse",
+    }
 
 
 def test_cli_writes_json_and_markdown_and_returns_two_on_failure(tmp_path: Path) -> None:
