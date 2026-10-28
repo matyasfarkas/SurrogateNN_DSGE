@@ -7,6 +7,13 @@
 \usepackage{natbib}
 \usepackage[hidelinks]{hyperref}
 
+\hypersetup{
+  pdftitle={Auditable Residual Surrogates for Nonlinear DSGE Estimation},
+  pdfauthor={Anonymous},
+  pdfsubject={Validation architecture for nonlinear DSGE surrogate estimation},
+  pdfkeywords={DSGE, nonlinear estimation, residual surrogate, stochastic extended path, HMC}
+}
+
 \newtheorem{proposition}{Proposition}
 \newcommand{\E}{\mathbb{E}}
 \newcommand{\R}{\mathbb{R}}
@@ -19,15 +26,15 @@
 \maketitle
 
 \begin{abstract}
-Nonlinear solution can dominate likelihood-based DSGE estimation, but a
-surrogate is useful only if it preserves the intended target. We develop an
+Nonlinear solution can dominate DSGE estimation, but a surrogate is useful
+only if it preserves the target. We develop an
 auditable residual-surrogate workflow: a neural network learns the gap between
 nonlinear stochastic extended-path trajectories and a parameter-specific
 first-order solution, while a Metropolis endpoint test preserves a separately
 declared density. In the complete 23-equation Gal\'i model, Python and
 MacroModelling.jl agree on the steady state, first-order solution, five-period
 nonlinear scenario tree, and one-transition likelihood contribution. The
-largest tree, expected-path, recovered-shock, Jacobian, and log-likelihood
+tree, expected-path, recovered-shock, Jacobian, and log-likelihood
 discrepancies are $6.40\times10^{-8}$, $6.50\times10^{-9}$,
 $8.30\times10^{-10}$, $9.49\times10^{-7}$, and $5.30\times10^{-5}$. All eight
 reduced-horizon paths solve, but a difficult calibration fails at horizon six

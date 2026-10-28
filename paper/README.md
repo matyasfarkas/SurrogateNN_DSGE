@@ -6,6 +6,21 @@ validation-method contribution and reduced-horizon algorithmic parity. It does
 not claim production-horizon likelihood parity, posterior fidelity, or an
 end-to-end speed advantage while the confirmatory evidence is incomplete.
 
+## Build the conference-neutral submission bundle
+
+After rebuilding and checking `main.pdf` from a clean commit, run:
+
+```bash
+.venv/bin/python paper/build_submission_bundle.py
+```
+
+The builder refuses a dirty worktree, creates
+`dist/auditable_residual_surrogates_submission.zip`, writes a companion
+SHA-256 file, and reopens the archive to verify every recorded size and hash.
+The archive contains the PDF, self-contained LaTeX inputs, generated tables,
+and machine-readable evidence. Conference-specific template, anonymity, and
+disclosure checks remain the author's responsibility.
+
 ## Rebuild the preserved pilot evidence
 
 From the repository root:
@@ -134,7 +149,8 @@ Run the focused validation tests with:
   tests/test_static_hmc.py \
   tests/test_publication_readiness_gate.py \
   tests/test_gpu_run_profile.py \
-  tests/test_surrogate_pipeline_profile.py
+  tests/test_surrogate_pipeline_profile.py \
+  tests/test_paper_submission_bundle.py
 ```
 
 ## Evidence status

@@ -3,7 +3,7 @@
 ## Completed
 
 - [x] Central claim is a validation architecture, not an unproved speedup.
-- [x] Abstract is 142 words and states the main numerical findings and claim boundary.
+- [x] Abstract is no more than 150 words and states the main numerical findings and claim boundary.
 - [x] Introduction states one central contribution and reports the main results before the literature discussion.
 - [x] Complete 23-equation model scope is stated consistently.
 - [x] Positive and negative numerical findings are both reported.
@@ -14,8 +14,9 @@
 - [x] Bibliographic metadata and title capitalization have been checked.
 - [x] LaTeX build has no warnings, undefined references, or overfull/underfull boxes.
 - [x] All 14 rendered pages have been visually checked.
-- [x] Focused evidence and profiling tests pass: 130 passed.
+- [x] Focused evidence, profiling, and submission-bundle tests pass: 126 passed.
 - [x] Data/code availability and computational-assistance statements are included.
+- [x] Conference-neutral source/PDF bundle is deterministic and hash-verified.
 
 ## Author checks before upload
 
