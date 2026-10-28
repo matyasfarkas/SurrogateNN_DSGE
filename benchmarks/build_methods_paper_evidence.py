@@ -19,10 +19,11 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
 
-SCHEMA_VERSION = "surrogatenn-dsge-methods-paper-evidence/v1"
+SCHEMA_VERSION = "surrogatenn-dsge-methods-paper-evidence/v2"
 EXPECTED_MODEL = "Gali_2015_chapter_3_nonlinear"
 
 
@@ -56,6 +57,12 @@ def _integer(value: Any, *, field: str) -> int:
     return int(value)
 
 
+def _optional_integer(value: Any, *, field: str) -> int | None:
+    if value is None:
+        return None
+    return _integer(value, field=field)
+
+
 def _find_one(root: Path, name: str) -> Path:
     paths = sorted(root.rglob(name))
     if len(paths) != 1:
@@ -81,6 +88,65 @@ def _raw_run(result_path: Path) -> Mapping[str, Any]:
             f"The run in {result_path} is not the declared full Galí equation set."
         )
     return run
+
+
+def _parse_nvidia_smi_snapshot(text: str, *, field: str) -> dict[str, Any]:
+    """Parse the archived point-in-time human-readable NVIDIA snapshot."""
+
+    header = re.search(
+        r"Driver Version:\s*([^\s]+)\s+CUDA Version:\s*([^\s]+)", text
+    )
+    gpu_line = re.search(r"\|\s*0\s+(NVIDIA.+?)\s+(?:On|Off)\s+\|", text)
+    metrics = re.search(
+        r"\|\s*\d+%\s+(\d+)C\s+\S+\s+(\d+)W\s*/\s*(\d+)W\s*\|"
+        r"\s*(\d+)MiB\s*/\s*(\d+)MiB\s*\|\s*(\d+)%",
+        text,
+    )
+    if header is None or gpu_line is None or metrics is None:
+        raise ValueError(f"Could not parse archived nvidia-smi snapshot for {field}.")
+    return {
+        "telemetry_kind": "point_in_time_start_snapshot",
+        "gpu_index": 0,
+        "gpu_name_as_reported": gpu_line.group(1).strip(),
+        "driver_version": header.group(1),
+        "cuda_version": header.group(2),
+        "temperature_c": int(metrics.group(1)),
+        "power_draw_w": int(metrics.group(2)),
+        "power_limit_w": int(metrics.group(3)),
+        "memory_used_mib": int(metrics.group(4)),
+        "memory_total_mib": int(metrics.group(5)),
+        "gpu_utilization_percent": int(metrics.group(6)),
+    }
+
+
+def _gpu_environment(result_path: Path) -> dict[str, Any]:
+    result = _read_json(result_path)
+    environment = result.get("environment")
+    if not isinstance(environment, Mapping):
+        raise ValueError(f"Missing environment object in {result_path}.")
+    if environment.get("jax_default_backend") != "gpu":
+        raise ValueError(f"Archived run did not use the JAX GPU backend: {result_path}.")
+    devices = environment.get("jax_devices")
+    if not isinstance(devices, list) or not devices or not all(
+        str(device).startswith("cuda:") for device in devices
+    ):
+        raise ValueError(f"Archived run has invalid CUDA device metadata: {result_path}.")
+    if environment.get("jax_enable_x64") is not True:
+        raise ValueError(f"Archived GPU run did not enable JAX 64-bit mode: {result_path}.")
+    snapshot_text = environment.get("nvidia_smi")
+    if not isinstance(snapshot_text, str) or not snapshot_text.strip():
+        raise ValueError(f"Archived run has no nvidia-smi snapshot: {result_path}.")
+    return {
+        "jax_version": str(environment.get("jax")),
+        "jax_default_backend": "gpu",
+        "jax_devices": [str(device) for device in devices],
+        "jax_enable_x64": True,
+        "xla_preallocate": str(environment.get("xla_preallocate")),
+        "xla_mem_fraction": str(environment.get("xla_mem_fraction")),
+        "snapshot": _parse_nvidia_smi_snapshot(
+            snapshot_text, field=str(result_path)
+        ),
+    }
 
 
 def _run_metrics(label: str, summary: Mapping[str, Any], raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -126,6 +192,15 @@ def _run_metrics(label: str, summary: Mapping[str, Any], raw: Mapping[str, Any])
         ),
         "hmc_draws_per_second": _finite(
             summary.get("hmc_draws_per_second"), field=f"{label}.hmc_draws_per_second"
+        ),
+        "hmc_elapsed_s": _finite(
+            summary.get("hmc_elapsed_s"), field=f"{label}.hmc_elapsed_s"
+        ),
+        "jax_value_elapsed_s": _finite(
+            summary.get("jax_value_elapsed_s"), field=f"{label}.jax_value_elapsed_s"
+        ),
+        "target_evaluations": _optional_integer(
+            summary.get("target_evaluations"), field=f"{label}.target_evaluations"
         ),
         "exact_endpoint_correction": bool(summary.get("exact_endpoint_correction")),
         "target_gradient_evaluated": summary.get("target_gradient_evaluated"),
@@ -190,6 +265,7 @@ def build_evidence(suite_root: Path) -> dict[str, Any]:
         if not isinstance(run_summary, Mapping):
             raise ValueError(f"Missing summary entry for {label!r}.")
         runs[label] = _run_metrics(label, run_summary, raw)
+        runs[label]["gpu_environment"] = _gpu_environment(result_path)
         sources.append(
             {
                 "path": str(result_path.resolve().relative_to(suite_root)),
@@ -205,6 +281,21 @@ def build_evidence(suite_root: Path) -> dict[str, Any]:
         raise ValueError("The corrected resource run did not use the full-JAX runtime mode.")
     if corrected["target_gradient_evaluated"] is not False:
         raise ValueError("The corrected resource run must record that target gradients were disabled.")
+
+    environment_fingerprints = {
+        (
+            run["gpu_environment"]["jax_version"],
+            tuple(run["gpu_environment"]["jax_devices"]),
+            run["gpu_environment"]["snapshot"]["gpu_name_as_reported"],
+            run["gpu_environment"]["snapshot"]["driver_version"],
+            run["gpu_environment"]["snapshot"]["cuda_version"],
+            run["gpu_environment"]["snapshot"]["memory_total_mib"],
+        )
+        for run in runs.values()
+    }
+    if len(environment_fingerprints) != 1:
+        raise ValueError("Archived pilots do not share one recorded GPU environment.")
+    common_environment = next(iter(environment_fingerprints))
 
     claims = [
         {
@@ -278,6 +369,16 @@ def build_evidence(suite_root: Path) -> dict[str, Any]:
                 "not establish an end-to-end speedup."
             ),
         },
+        {
+            "id": "gpu_execution_profile",
+            "status": "environment_and_execution_only",
+            "statement": (
+                "The archived suite records a CUDA backend, 64-bit JAX execution, "
+                "stage timings, and one nvidia-smi snapshot at run startup. The snapshot "
+                "is not a utilization time series and cannot establish peak memory, "
+                "average utilization, energy use, or a speed advantage."
+            ),
+        },
     ]
 
     return {
@@ -292,6 +393,25 @@ def build_evidence(suite_root: Path) -> dict[str, Any]:
             "experiment_scope": "two-parameter reduced experiment",
         },
         "runs": runs,
+        "gpu_profile": {
+            "evidence_level": "archived_execution_profile_with_start_snapshot",
+            "continuous_telemetry_available": False,
+            "same_work_comparison_available": False,
+            "speedup_claim_supported": False,
+            "common_environment": {
+                "jax_version": common_environment[0],
+                "jax_devices": list(common_environment[1]),
+                "gpu_name_as_reported": common_environment[2],
+                "driver_version": common_environment[3],
+                "cuda_version": common_environment[4],
+                "memory_total_mib": common_environment[5],
+            },
+            "interpretation": (
+                "Run-start snapshots document the device environment only. Continuous "
+                "nvidia-smi sampling is required for utilization, peak-memory, power, and "
+                "energy claims. The three archived workloads are not same-work comparisons."
+            ),
+        },
         "claim_ledger": claims,
         "hard_blockers": [
             "A frozen, reproducible synthetic-data generator with recorded seed, burn-in, initial condition, and data-generating parameters.",
@@ -304,6 +424,7 @@ def build_evidence(suite_root: Path) -> dict[str, Any]:
             "Four tuned chains with convergence and effective-sample-size diagnostics.",
             "Posterior comparison with an exact or independently validated reference.",
             "Multi-seed, repeated, synchronized end-to-end timing against the same-work baseline.",
+            "Continuous dedicated-device telemetry for GPU utilization, peak memory, power, and estimated energy during each timed run.",
             "Galí-specific parity validation for the GPU-native QME solver; the audited Schur path uses a sequential SciPy host callback.",
             "A clean, content-addressed software environment and revision.",
         ],
@@ -373,6 +494,58 @@ Run & Target runtime & $N_\theta \times T$ & Max. residual & Calib. RMSE & Corre
 """
 
 
+def render_gpu_profile_table(evidence: Mapping[str, Any]) -> str:
+    labels = ["quick", "corrected_full_jax_resource", "default"]
+    display = {
+        "quick": "Quick smoke",
+        "corrected_full_jax_resource": "Corrected resource",
+        "default": "Default pilot",
+    }
+    rows: list[str] = []
+    for label in labels:
+        run = evidence["runs"][label]
+        snapshot = run["gpu_environment"]["snapshot"]
+        target_evaluations = run["target_evaluations"]
+        target_text = "--" if target_evaluations is None else str(target_evaluations)
+        total_draws = int(run["hmc_chains"]) * int(run["hmc_samples"])
+        rows.append(
+            " & ".join(
+                [
+                    _latex_escape(display[label]),
+                    _latex_escape(str(run["likelihood_runtime_mode"])),
+                    target_text,
+                    f"{run['pipeline_s'] / 60.0:.2f}",
+                    str(total_draws),
+                    f"{run['hmc_elapsed_s']:.2f}",
+                    f"{run['hmc_draws_per_second']:.4g}",
+                    f"{snapshot['gpu_utilization_percent']} / {snapshot['memory_used_mib']}",
+                ]
+            )
+            + r" \\"
+        )
+    body = "\n".join(rows)
+    environment = evidence["gpu_profile"]["common_environment"]
+    return rf"""% Generated by benchmarks/build_methods_paper_evidence.py. Do not edit.
+\begin{{table}}[t]
+\centering
+\caption{{Archived Galí GPU execution profile and telemetry boundary}}
+\label{{tab:gali-gpu-profile}}
+\scriptsize
+\setlength{{\tabcolsep}}{{3pt}}
+\begin{{tabular}}{{llrrrrrr}}
+\toprule
+Run & Runtime & Endpoint evals & Pipeline min & Draws & HMC s & Draws/s & Start \% / MiB \\
+\midrule
+{body}
+\bottomrule
+\end{{tabular}}
+
+\vspace{{0.4em}}
+\parbox{{0.98\textwidth}}{{\footnotesize\textit{{Notes:}} All rows report JAX {environment['jax_version']} on {environment['jax_devices'][0]} in 64-bit mode. The archived device reports {environment['memory_total_mib']:,} MiB, NVIDIA driver {_latex_escape(str(environment['driver_version']))}, and CUDA {_latex_escape(str(environment['cuda_version']))}. ``Pipeline min'' is the recorded target-generation and training stage, not a common end-to-end workload. HMC draw counts, chains, likelihood runtimes, trajectory budgets, and endpoint evaluations differ across rows. The final column is a single \texttt{{nvidia-smi}} snapshot taken at run startup; it is not an average or peak. Consequently these data establish GPU execution and document a high corrected-run burden, but they support no utilization, memory-capacity, energy, or speedup claim. The replication code now provides continuous dedicated-device sampling for future same-work runs.}}
+\end{{table}}
+"""
+
+
 def render_markdown(evidence: Mapping[str, Any]) -> str:
     lines = [
         "# Methods-paper evidence snapshot",
@@ -408,6 +581,9 @@ def write_outputs(evidence: Mapping[str, Any], output_dir: Path) -> None:
     )
     (output_dir / "pilot_results.tex").write_text(
         render_latex_table(evidence), encoding="utf-8"
+    )
+    (output_dir / "gpu_profile_results.tex").write_text(
+        render_gpu_profile_table(evidence), encoding="utf-8"
     )
 
 

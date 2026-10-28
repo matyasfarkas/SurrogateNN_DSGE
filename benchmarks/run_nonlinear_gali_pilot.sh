@@ -127,7 +127,23 @@ if [[ "$DEVICE" == "gpu" ]]; then
   ARGS+=(--require-gpu)
 fi
 
-COMMAND=("${PYTHON:-python}" benchmarks/profile_surrogate_pipeline_gpu.py "${ARGS[@]}")
+WORKLOAD_COMMAND=("${PYTHON:-python}" benchmarks/profile_surrogate_pipeline_gpu.py "${ARGS[@]}")
+COMMAND=("${WORKLOAD_COMMAND[@]}")
+GPU_PROFILE_ENABLED=0
+GPU_PROFILE_DIR="$RESULT_ROOT/gpu_profile"
+if [[ "$DEVICE" == "gpu" && "${GPU_PROFILE:-1}" != "0" ]]; then
+  GPU_PROFILE_ENABLED=1
+  COMMAND=(
+    "${PYTHON:-python}" benchmarks/profile_gpu_run.py
+    --output-dir "$GPU_PROFILE_DIR"
+    --sample-interval-s "${GPU_PROFILE_INTERVAL_S:-0.5}"
+    --require-complete
+  )
+  if [[ -n "${NVIDIA_SMI:-}" ]]; then
+    COMMAND+=(--nvidia-smi "$NVIDIA_SMI")
+  fi
+  COMMAND+=(-- "${WORKLOAD_COMMAND[@]}")
+fi
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
   printf 'JAX_ENABLE_X64=%q ' "$JAX_ENABLE_X64"
@@ -143,6 +159,7 @@ MANIFEST_PRE_ARGS=(
   --input benchmarks/publication_run_manifest.py
   --input benchmarks/run_nonlinear_gali_pilot.sh
   --input benchmarks/profile_surrogate_pipeline_gpu.py
+  --input benchmarks/profile_gpu_run.py
   --input benchmarks/model_sources/Gali_2015_chapter_3_nonlinear.jl
   --input "$GALI_PAYLOAD"
   --seed "design=$GALI_SEED"
@@ -196,6 +213,12 @@ if [[ "$GALI_TARGET_PREFLIGHT_ONLY" != "1" ]]; then
   MANIFEST_FINAL_ARGS+=(
     --artifact "$RESULT_ROOT/posterior_draws.npz"
     --artifact "$RESULT_ROOT/surrogate_bundle.snn.npz"
+  )
+fi
+if [[ "$GPU_PROFILE_ENABLED" == "1" ]]; then
+  MANIFEST_FINAL_ARGS+=(
+    --artifact "$GPU_PROFILE_DIR/gpu_profile_samples.csv"
+    --artifact "$GPU_PROFILE_DIR/gpu_profile_summary.json"
   )
 fi
 "${PYTHON:-python}" benchmarks/publication_run_manifest.py "${MANIFEST_FINAL_ARGS[@]}"

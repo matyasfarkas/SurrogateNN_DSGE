@@ -460,7 +460,13 @@ evaluation, and ESS per second.
 Timing uses the same workload, precision, and hardware for both methods.
 Compilation, host callbacks, device transfers, and training are reported
 separately. Warm likelihood microbenchmarks use repeated synchronized calls;
-end-to-end comparisons use independent processes. The current Schur QME path
+end-to-end comparisons use independent processes. Continuous device telemetry
+records utilization, allocated memory, power, temperature, and clock rate; the
+summary reports upper-tail utilization, peak memory, and integrated energy.
+Because these are device-wide counters, confirmatory runs require a dedicated
+GPU. Sampling invokes \texttt{nvidia-smi}; both comparison arms use the same
+interval, and unprofiled sensitivity timings bound monitoring overhead. The
+current Schur QME path
 invokes a sequential SciPy host callback, so a GPU label does not imply a
 GPU-native likelihood. The available GPU-native matrix-sign alternative must
 pass Gal\'i-specific solution and likelihood parity before it enters a speed
@@ -492,6 +498,8 @@ multi-period likelihood nor a posterior has yet passed an independent gate.
 
 \input{generated/pilot_results.tex}
 
+\input{generated/gpu_profile_results.tex}
+
 \input{generated/stochastic_pilot_results.tex}
 
 \input{generated/stochastic_horizon_results.tex}
@@ -516,6 +524,21 @@ possible under a tiny budget. It retained four draws in total, achieved 100
 percent acceptance, and processed 0.0267 draws per second. Those numbers are not
 convergence evidence and are not a speed advantage. The acceptance rate instead
 suggests that the static-HMC tuning is far from an efficient production regime.
+
+Table~\ref{tab:gali-gpu-profile} separates GPU execution evidence from a GPU
+performance claim. All three archived pilots used the CUDA backend in 64-bit
+mode on the same recorded device environment. The parameter-dependent corrected
+run required 149.7 seconds for four retained draws and eight endpoint target
+evaluations, whereas the fixed-reference runs used different objectives,
+budgets, and chain configurations. The contrast motivates treating endpoint
+correction as a bottleneck candidate but is not a same-work comparison.
+Moreover, the
+archived \texttt{nvidia-smi} record is a single run-start snapshot. Its zero
+utilization and 260 MiB allocation describe initialization, not the workload.
+They cannot identify peak memory, average utilization, or energy. The supplied
+continuous profiler records those quantities for the frozen confirmatory runs;
+no acceleration claim is made until repeated same-work baseline and treatment
+runs are available.
 
 Table~\ref{tab:stochastic-pilot} records a useful negative result from the first
 provenance-captured positive-order run.
@@ -617,7 +640,9 @@ therefore validates only one inversion contribution; multi-period filtering,
 parameter-surface likelihood parity, and production-horizon likelihood parity
 remain open. The current
 evidence therefore supports neither exact nonlinear posterior sampling nor an
-end-to-end speedup claim.
+end-to-end speedup claim. The archived GPU telemetry is likewise limited to
+run-start snapshots; continuous traces will enter the evidence record only from
+future dedicated-device runs.
 
 These limitations determine the next experiments rather than merely qualifying
 the conclusion. The present methods result is the validation architecture and

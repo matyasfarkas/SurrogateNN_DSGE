@@ -26,9 +26,11 @@ def _summary_run(*, full_jax: bool, corrected: bool) -> dict[str, Any]:
         "hmc_accepted_share": 1.0,
         "hmc_chains": 2 if corrected else 1,
         "hmc_draws_per_second": 0.03 if corrected else 1.0,
+        "hmc_elapsed_s": 4.0 if corrected else 2.0,
         "hmc_samples": 2,
         "hmc_warmup": 1,
         "jax_parity_abs_diff": 0.0,
+        "jax_value_elapsed_s": 1.5 if full_jax else 0.5,
         "likelihood_runtime_mode": "full-jax" if full_jax else "fixed-reference",
         "max_sep_residual": 1.0e-9,
         "periods": 4,
@@ -36,6 +38,7 @@ def _summary_run(*, full_jax: bool, corrected: bool) -> dict[str, Any]:
         "quality_gate": "ok",
         "status": "ok",
         "target_gradient_evaluated": False if corrected else True,
+        "target_evaluations": 8 if corrected else None,
         "theta_draws": 4,
         "validation_improvement_mean": 0.5,
         "validation_rmse_mean": 1.0e-4,
@@ -82,7 +85,27 @@ def _write_suite(root: Path, *, model_name: str = "Gali_2015_chapter_3_nonlinear
             "nnodes": 1,
         }
         (run_dir / "result.json").write_text(
-            json.dumps({"results": {"hlt_fixed_ss_smoke": run}}), encoding="utf-8"
+            json.dumps(
+                {
+                    "environment": {
+                        "jax": "0.11.1",
+                        "jax_default_backend": "gpu",
+                        "jax_devices": ["cuda:0"],
+                        "jax_enable_x64": True,
+                        "xla_preallocate": "false",
+                        "xla_mem_fraction": "0.85",
+                        "nvidia_smi": (
+                            "NVIDIA-SMI 595.71.05 Driver Version: 595.71.05 "
+                            "CUDA Version: 13.2\n"
+                            "|   0  NVIDIA GeForce RTX 4080 SUPER    On  | test |\n"
+                            "| 30%   30C    P2             24W /  320W |"
+                            "     260MiB /  32760MiB |      0%      Default |\n"
+                        ),
+                    },
+                    "results": {"hlt_fixed_ss_smoke": run},
+                }
+            ),
+            encoding="utf-8",
         )
 
 
@@ -112,6 +135,12 @@ def test_builder_preserves_claim_boundary(tmp_path: Path) -> None:
     assert corrected["jax_backend"] == "gpu"
     assert corrected["qme_algorithm"] == "schur"
     assert corrected["gpu_native_qme"] is False
+    assert evidence["gpu_profile"]["continuous_telemetry_available"] is False
+    assert evidence["gpu_profile"]["speedup_claim_supported"] is False
+    assert evidence["gpu_profile"]["common_environment"]["memory_total_mib"] == 32760
+    assert claims["gpu_execution_profile"]["status"] == (
+        "environment_and_execution_only"
+    )
 
 
 def test_builder_rejects_wrong_model(tmp_path: Path) -> None:
@@ -135,7 +164,10 @@ def test_cli_writes_machine_and_manuscript_outputs(tmp_path: Path) -> None:
     assert evidence["evidence_level"] == "engineering_pilot"
     markdown = (output / "pilot_evidence.md").read_text(encoding="utf-8")
     latex = (output / "pilot_results.tex").read_text(encoding="utf-8")
+    gpu_latex = (output / "gpu_profile_results.tex").read_text(encoding="utf-8")
     assert "**Publication ready:** no" in markdown
     assert "Calib. RMSE" in latex
     assert "not an untouched test error" in latex
     assert "Correction therefore targets the declared surrogate objective" in latex
+    assert "Archived Galí GPU execution profile" in gpu_latex
+    assert "support no utilization" in gpu_latex

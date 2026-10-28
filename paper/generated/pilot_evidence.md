@@ -1,6 +1,6 @@
 # Methods-paper evidence snapshot
 
-Schema: `surrogatenn-dsge-methods-paper-evidence/v1`
+Schema: `surrogatenn-dsge-methods-paper-evidence/v2`
 
 **Evidence level:** engineering pilot
 
@@ -18,6 +18,7 @@ Schema: `surrogatenn-dsge-methods-paper-evidence/v1`
 | `exact_full_nonlinear_posterior` | `not_supported` | The pilot does not establish exact sampling from a full nonlinear SEP posterior because its endpoint target remains a surrogate profile objective. |
 | `posterior_convergence_or_fidelity` | `not_supported` | The pilot budgets are too small for R-hat, effective-sample-size, posterior moment, or coverage claims. |
 | `computational_speedup` | `not_supported` | The suite lacks repeated same-work exact-baseline timings and therefore does not establish an end-to-end speedup. |
+| `gpu_execution_profile` | `environment_and_execution_only` | The archived suite records a CUDA backend, 64-bit JAX execution, stage timings, and one nvidia-smi snapshot at run startup. The snapshot is not a utilization time series and cannot establish peak memory, average utilization, energy use, or a speed advantage. |
 
 ## Hard blockers
 
@@ -31,5 +32,6 @@ Schema: `surrogatenn-dsge-methods-paper-evidence/v1`
 - Four tuned chains with convergence and effective-sample-size diagnostics.
 - Posterior comparison with an exact or independently validated reference.
 - Multi-seed, repeated, synchronized end-to-end timing against the same-work baseline.
+- Continuous dedicated-device telemetry for GPU utilization, peak memory, power, and estimated energy during each timed run.
 - Galí-specific parity validation for the GPU-native QME solver; the audited Schur path uses a sequential SciPy host callback.
 - A clean, content-addressed software environment and revision.

@@ -20,7 +20,9 @@ The command reads the preserved raw results and writes:
 
 - `generated/pilot_evidence.json`: machine-readable evidence and source hashes;
 - `generated/pilot_evidence.md`: human-readable claim ledger; and
-- `generated/pilot_results.tex`: the manuscript table.
+- `generated/pilot_results.tex`: the pilot manuscript table; and
+- `generated/gpu_profile_results.tex`: the claim-scoped archived GPU execution
+  profile and telemetry boundary.
 
 Normalize the first provenance-captured stochastic pilot separately:
 
@@ -131,6 +133,7 @@ Run the focused validation tests with:
   tests/test_gali_synthetic_data.py \
   tests/test_static_hmc.py \
   tests/test_publication_readiness_gate.py \
+  tests/test_gpu_run_profile.py \
   tests/test_surrogate_pipeline_profile.py
 ```
 
@@ -182,6 +185,20 @@ execution, then records the exit code and output hashes in
 `run_manifest.json`. The publication launcher disables residual-shrinkage
 calibration so the held-out parameter block remains untouched. Budgets remain
 intentionally small; a successful pilot is still not confirmatory evidence.
+
+On `DEVICE=gpu`, the launcher also wraps the workload with
+`benchmarks/profile_gpu_run.py` by default. It samples device-wide NVIDIA
+utilization, memory, power, temperature, and clock counters every 0.5 seconds,
+then writes `gpu_profile/gpu_profile_samples.csv` and
+`gpu_profile/gpu_profile_summary.json`. The summary includes upper-tail
+utilization, peak memory, and trapezoidal energy estimates. These counters are
+system-wide, so publication runs require a dedicated GPU. Set
+`GPU_PROFILE_INTERVAL_S` to change the interval, or `GPU_PROFILE=0` only for a
+non-evidence diagnostic run. A single profile never establishes acceleration;
+the timing gate still requires repeated same-work baseline and treatment runs.
+Each sample launches an `nvidia-smi` query, so comparison arms must use the same
+interval and the final timing appendix should include unprofiled sensitivity
+runs to bound monitoring overhead.
 
 ## Generate the frozen confirmatory data
 

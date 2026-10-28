@@ -90,7 +90,12 @@ publication run with that flag cannot satisfy the clean-revision gate.
    evaluation, and ESS per second.
 4. Measure identical workloads and precision. Separate cold compilation, warm
    evaluation, transfers, host callbacks, training, and end-to-end runtime.
-5. Repeat warm microbenchmarks 20--30 times and full independent processes at
+5. On a dedicated device, record continuous GPU utilization, memory, power,
+   temperature, and clock telemetry. Report upper-tail utilization, peak memory,
+   and integrated energy alongside the raw trace. Use the same sampling interval
+   for every comparison arm and add unprofiled sensitivity timings to bound the
+   monitoring overhead.
+6. Repeat warm microbenchmarks 20--30 times and full independent processes at
    least three times. Use five end-to-end repetitions for the final table if
    feasible.
 
@@ -117,6 +122,8 @@ publication run with that flag cannot satisfy the clean-revision gate.
   per second.
 - Timing claims use same-work baselines and uncertainty intervals. A GPU label
   is not used for a path whose dominant operation is a sequential CPU callback.
+  Point-in-time `nvidia-smi` snapshots are environment metadata, not utilization
+  or peak-memory measurements.
 - Every table value is generated from archived raw artifacts; every failed hard
   gate remains visible.
 

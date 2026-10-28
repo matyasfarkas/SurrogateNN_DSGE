@@ -208,6 +208,38 @@ def test_gali_pilot_dry_run_uses_stochastic_sep_and_explicit_seeds(
     assert "--hlt-surrogate-hmc-seed 20261023" in completed.stdout
 
 
+def test_gali_gpu_dry_run_wraps_workload_with_continuous_profiler(
+    tmp_path: Path,
+) -> None:
+    repo = Path(__file__).parents[1]
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "DEVICE": "gpu",
+            "DRY_RUN": "1",
+            "RESULT_ROOT": str(tmp_path / "results"),
+            "PYTHON": ".venv/bin/python",
+            "GPU_PROFILE_INTERVAL_S": "0.25",
+        }
+    )
+
+    completed = subprocess.run(
+        ["bash", "benchmarks/run_nonlinear_gali_pilot.sh"],
+        cwd=repo,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "benchmarks/profile_gpu_run.py" in completed.stdout
+    assert "--sample-interval-s 0.25" in completed.stdout
+    assert "--require-complete" in completed.stdout
+    assert "gpu_profile" in completed.stdout
+    assert "benchmarks/profile_surrogate_pipeline_gpu.py" in completed.stdout
+    assert "--require-gpu" in completed.stdout
+
+
 def test_gali_target_preflight_dry_run_skips_likelihood_hmc_and_bundles(
     tmp_path: Path,
 ) -> None:

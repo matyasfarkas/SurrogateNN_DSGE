@@ -39,9 +39,31 @@
       "id": "computational_speedup",
       "statement": "The suite lacks repeated same-work exact-baseline timings and therefore does not establish an end-to-end speedup.",
       "status": "not_supported"
+    },
+    {
+      "id": "gpu_execution_profile",
+      "statement": "The archived suite records a CUDA backend, 64-bit JAX execution, stage timings, and one nvidia-smi snapshot at run startup. The snapshot is not a utilization time series and cannot establish peak memory, average utilization, energy use, or a speed advantage.",
+      "status": "environment_and_execution_only"
     }
   ],
   "evidence_level": "engineering_pilot",
+  "gpu_profile": {
+    "common_environment": {
+      "cuda_version": "13.2",
+      "driver_version": "595.71.05",
+      "gpu_name_as_reported": "NVIDIA GeForce RTX 4080 ...",
+      "jax_devices": [
+        "cuda:0"
+      ],
+      "jax_version": "0.11.1",
+      "memory_total_mib": 32760
+    },
+    "continuous_telemetry_available": false,
+    "evidence_level": "archived_execution_profile_with_start_snapshot",
+    "interpretation": "Run-start snapshots document the device environment only. Continuous nvidia-smi sampling is required for utilization, peak-memory, power, and energy claims. The three archived workloads are not same-work comparisons.",
+    "same_work_comparison_available": false,
+    "speedup_claim_supported": false
+  },
   "hard_blockers": [
     "A frozen, reproducible synthetic-data generator with recorded seed, burn-in, initial condition, and data-generating parameters.",
     "Standardized innovation variances consistent with the model equations; archived pilots duplicated equation-level shock scales in the inversion prior.",
@@ -53,6 +75,7 @@
     "Four tuned chains with convergence and effective-sample-size diagnostics.",
     "Posterior comparison with an exact or independently validated reference.",
     "Multi-seed, repeated, synchronized end-to-end timing against the same-work baseline.",
+    "Continuous dedicated-device telemetry for GPU utilization, peak memory, power, and estimated energy during each timed run.",
     "Gal\u00ed-specific parity validation for the GPU-native QME solver; the audited Schur path uses a sequential SciPy host callback.",
     "A clean, content-addressed software environment and revision."
   ],
@@ -71,10 +94,34 @@
       "full_jax_recomputes_parameter_runtime": true,
       "full_nonlinear_likelihood_in_hmc": false,
       "full_paths": 4,
+      "gpu_environment": {
+        "jax_default_backend": "gpu",
+        "jax_devices": [
+          "cuda:0"
+        ],
+        "jax_enable_x64": true,
+        "jax_version": "0.11.1",
+        "snapshot": {
+          "cuda_version": "13.2",
+          "driver_version": "595.71.05",
+          "gpu_index": 0,
+          "gpu_name_as_reported": "NVIDIA GeForce RTX 4080 ...",
+          "gpu_utilization_percent": 0,
+          "memory_total_mib": 32760,
+          "memory_used_mib": 260,
+          "power_draw_w": 21,
+          "power_limit_w": 320,
+          "telemetry_kind": "point_in_time_start_snapshot",
+          "temperature_c": 29
+        },
+        "xla_mem_fraction": "0.85",
+        "xla_preallocate": "false"
+      },
       "gpu_native_qme": false,
       "hmc_accepted_share": 1.0,
       "hmc_chains": 2,
       "hmc_draws_per_second": 0.02672678378069654,
+      "hmc_elapsed_s": 149.66260186117142,
       "hmc_kind": "exact_corrected_surrogate_trajectory_hmc_chain_batched",
       "hmc_samples": 2,
       "hmc_warmup": 1,
@@ -82,6 +129,7 @@
       "jax_density_caveat": "Evaluates the full JAX surrogate likelihood with parameter-dependent steady-state and first-order ROM solves; gradient evaluation was disabled.",
       "jax_parity_abs_diff": 0.0,
       "jax_python_comparison_scope": "same surrogate profile objective implementation",
+      "jax_value_elapsed_s": 19.363366947043687,
       "label": "corrected_full_jax_resource",
       "likelihood_kind": "surrogate_profile_inversion_objective",
       "likelihood_runtime_mode": "full-jax",
@@ -95,6 +143,7 @@
       "sep_nodes": 1,
       "status": "ok",
       "target_builder": "batched_sep",
+      "target_evaluations": 8,
       "target_gradient_evaluated": false,
       "theta_draws": 4,
       "validation_improvement_mean": 0.6655408970137616,
@@ -106,10 +155,34 @@
       "full_jax_recomputes_parameter_runtime": false,
       "full_nonlinear_likelihood_in_hmc": false,
       "full_paths": 8,
+      "gpu_environment": {
+        "jax_default_backend": "gpu",
+        "jax_devices": [
+          "cuda:0"
+        ],
+        "jax_enable_x64": true,
+        "jax_version": "0.11.1",
+        "snapshot": {
+          "cuda_version": "13.2",
+          "driver_version": "595.71.05",
+          "gpu_index": 0,
+          "gpu_name_as_reported": "NVIDIA GeForce RTX 4080 ...",
+          "gpu_utilization_percent": 0,
+          "memory_total_mib": 32760,
+          "memory_used_mib": 260,
+          "power_draw_w": 24,
+          "power_limit_w": 320,
+          "telemetry_kind": "point_in_time_start_snapshot",
+          "temperature_c": 30
+        },
+        "xla_mem_fraction": "0.85",
+        "xla_preallocate": "false"
+      },
       "gpu_native_qme": false,
       "hmc_accepted_share": 1.0,
       "hmc_chains": 1,
       "hmc_draws_per_second": 8.00093709000185,
+      "hmc_elapsed_s": 6.2492679841816425,
       "hmc_kind": "fixed_rom_surrogate_static_hmc",
       "hmc_samples": 50,
       "hmc_warmup": 25,
@@ -117,6 +190,7 @@
       "jax_density_caveat": "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; steady-state and first-order matrices are held fixed in this smoke check.",
       "jax_parity_abs_diff": 1.7053025658242404e-13,
       "jax_python_comparison_scope": "same surrogate profile objective implementation",
+      "jax_value_elapsed_s": 1.1956748007796705,
       "label": "default",
       "likelihood_kind": "surrogate_profile_inversion_objective",
       "likelihood_runtime_mode": "fixed-reference",
@@ -130,6 +204,7 @@
       "sep_nodes": 1,
       "status": "ok",
       "target_builder": "batched_sep",
+      "target_evaluations": null,
       "target_gradient_evaluated": true,
       "theta_draws": 8,
       "validation_improvement_mean": 0.5393456217476602,
@@ -141,10 +216,34 @@
       "full_jax_recomputes_parameter_runtime": false,
       "full_nonlinear_likelihood_in_hmc": false,
       "full_paths": 4,
+      "gpu_environment": {
+        "jax_default_backend": "gpu",
+        "jax_devices": [
+          "cuda:0"
+        ],
+        "jax_enable_x64": true,
+        "jax_version": "0.11.1",
+        "snapshot": {
+          "cuda_version": "13.2",
+          "driver_version": "595.71.05",
+          "gpu_index": 0,
+          "gpu_name_as_reported": "NVIDIA GeForce RTX 4080 ...",
+          "gpu_utilization_percent": 0,
+          "memory_total_mib": 32760,
+          "memory_used_mib": 260,
+          "power_draw_w": 21,
+          "power_limit_w": 320,
+          "telemetry_kind": "point_in_time_start_snapshot",
+          "temperature_c": 29
+        },
+        "xla_mem_fraction": "0.85",
+        "xla_preallocate": "false"
+      },
       "gpu_native_qme": false,
       "hmc_accepted_share": 1.0,
       "hmc_chains": 1,
       "hmc_draws_per_second": 0.3782666240727161,
+      "hmc_elapsed_s": 5.2872758861631155,
       "hmc_kind": "fixed_rom_surrogate_static_hmc",
       "hmc_samples": 2,
       "hmc_warmup": 1,
@@ -152,6 +251,7 @@
       "jax_density_caveat": "Differentiates the fixed-ROM surrogate likelihood through theta with inferred shocks treated as stop-gradient replay inputs; steady-state and first-order matrices are held fixed in this smoke check.",
       "jax_parity_abs_diff": 0.0,
       "jax_python_comparison_scope": "same surrogate profile objective implementation",
+      "jax_value_elapsed_s": 1.2464423570781946,
       "label": "quick",
       "likelihood_kind": "surrogate_profile_inversion_objective",
       "likelihood_runtime_mode": "fixed-reference",
@@ -165,13 +265,14 @@
       "sep_nodes": 1,
       "status": "ok",
       "target_builder": "batched_sep",
+      "target_evaluations": null,
       "target_gradient_evaluated": true,
       "theta_draws": 4,
       "validation_improvement_mean": 0.6655408970137616,
       "validation_rmse_mean": 9.172202659008471e-05
     }
   },
-  "schema_version": "surrogatenn-dsge-methods-paper-evidence/v1",
+  "schema_version": "surrogatenn-dsge-methods-paper-evidence/v2",
   "sources": [
     {
       "path": "gali_gpu_suite_20261021T220300Z/scientific_summary.json",
