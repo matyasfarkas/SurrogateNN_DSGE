@@ -1,8 +1,10 @@
 # Methods-paper working package
 
-This directory is a claim-scoped working paper package for the nonlinear Gal\'i
-estimation pipeline. It is deliberately not labelled submission-ready while the
-confirmatory evidence is incomplete.
+This directory is a claim-scoped conference working-paper package for the
+nonlinear Gal\'i estimation pipeline. The current draft supports an auditable
+validation-method contribution and reduced-horizon algorithmic parity. It does
+not claim production-horizon likelihood parity, posterior fidelity, or an
+end-to-end speed advantage while the confirmatory evidence is incomplete.
 
 ## Rebuild the preserved pilot evidence
 
@@ -155,13 +157,14 @@ comparison also matches the complete five-period nonlinear sparse scenario
 tree within its frozen tolerances. A direct one-transition likelihood adapter
 also passes recovered-shock, Jacobian, residual, and scalar-likelihood parity.
 This removes core local-solution, reduced-horizon nonlinear-tree, and
-one-transition likelihood uncertainties but does not change the paper's overall
-not-ready status because multi-period and production-horizon likelihood,
-posterior, and same-work GPU gates remain incomplete.
+one-transition likelihood uncertainties. Those results support the narrow
+methods-paper claim. Multi-period and production-horizon likelihood, posterior,
+and same-work GPU claims remain incomplete and are explicitly excluded.
 
 The confirmatory plan is in `../docs/submission_readiness_plan.md`. The paper
-should be promoted to a submission draft only when every hard gate is backed by
-raw artifacts and a frozen protocol.
+should be promoted from an algorithmic-parity methods result to a production
+structural-posterior and speed claim only when every corresponding hard gate is
+backed by raw artifacts and a frozen protocol.
 
 ## Run a provenance-captured stochastic pilot
 

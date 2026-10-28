@@ -11,40 +11,31 @@
 \newcommand{\E}{\mathbb{E}}
 \newcommand{\R}{\mathbb{R}}
 
-\title{Residual Surrogates for Nonlinear DSGE Estimation:\\
-An Auditable Target-Corrected Workflow}
-\author{Anonymous working draft}
+\title{Auditable Residual Surrogates for Nonlinear DSGE Estimation}
+\author{Anonymous}
 \date{October 28, 2026}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-Repeated nonlinear solution can dominate likelihood-based estimation of dynamic
-stochastic general equilibrium models. We develop an auditable workflow in
-which a neural network learns the difference between nonlinear extended-path
-trajectories and a parameter-specific first-order solution. Cheap surrogate
-gradients form Hamiltonian proposals; an endpoint Metropolis test preserves the
-density evaluated there, which need not be the structural nonlinear posterior.
-On the complete 23-equation Gal\'i model, a clean order-one, three-node
-stochastic preflight solves all eight prespecified path evaluations, spanning
-seven unique policy-rule points, at a five-period terminal horizon. The largest
-equation residual is
-$1.93\times10^{-10}$. This result establishes a reduced numerical pilot, not
-horizon convergence: the hard design fails under both solvers at horizon six,
-and first-step outcomes still move between horizons four and five. Separate
-clean-revision comparisons against MacroModelling.jl match the non-stochastic
-steady state and first-order Schur solution and, at a five-period horizon, the
-complete order-one sparse nonlinear scenario tree. Across eight evaluations,
-the worst tree and expected-path discrepancies are $6.40\times10^{-8}$ and
-$6.50\times10^{-9}$. A direct one-transition adapter also matches recovered
-shocks within $8.30\times10^{-10}$, the observation Jacobian within
-$9.49\times10^{-7}$, and log likelihood within $5.30\times10^{-5}$. These are
-core and reduced-horizon checks, not multi-period or production-horizon
-likelihood or posterior parity. We therefore pair the method
-with executable gates for stochastic-solution accuracy, independent parity,
-untouched test performance, posterior agreement, multichain sampling, and
-same-work timing.
+Nonlinear solution can dominate likelihood-based DSGE estimation, but a
+surrogate is useful only if it preserves the intended target. We develop an
+auditable residual-surrogate workflow: a neural network learns the gap between
+nonlinear stochastic extended-path trajectories and a parameter-specific
+first-order solution, while a Metropolis endpoint test preserves a separately
+declared density. In the complete 23-equation Gal\'i model, Python and
+MacroModelling.jl agree on the steady state, first-order solution, five-period
+nonlinear scenario tree, and one-transition likelihood contribution. The
+largest tree, expected-path, recovered-shock, Jacobian, and log-likelihood
+discrepancies are $6.40\times10^{-8}$, $6.50\times10^{-9}$,
+$8.30\times10^{-10}$, $9.49\times10^{-7}$, and $5.30\times10^{-5}$. All eight
+reduced-horizon paths solve, but a difficult calibration fails at horizon six
+and first-step outcomes remain horizon-sensitive. The evidence establishes
+reduced-horizon algorithmic parity, not a converged multi-period likelihood or
+posterior. The contribution is an executable validation architecture that
+separates trajectory accuracy, likelihood parity, posterior fidelity, and
+computational value.
 \end{abstract}
 
 \section{Introduction}
@@ -58,6 +49,12 @@ unmeasured approximation can change the objective, the posterior geometry, and
 even the numerical support of the model.
 
 This paper develops a residual-surrogate workflow designed around that risk.
+Its central contribution is a validation architecture for nonlinear DSGE
+surrogates. The architecture separates trajectory labels, the differentiable
+objective used for proposals, and the endpoint density that defines the
+posterior claim. This separation matters because a numerically correct HMC
+kernel can still target the wrong economic object.
+
 The method solves the complete nonlinear equations at designed parameter,
 state, and shock inputs, then learns the difference between those solutions and
 a parameter-specific first-order reduced-order model (ROM). The ROM supplies a
@@ -106,23 +103,22 @@ $5.30\times10^{-5}$. This reduced-horizon, one-transition result does not
 establish multi-period filtering or production-horizon trajectory and
 likelihood parity.
 
-The paper makes three contributions. First, it separates three objects often
-conflated in surrogate estimation: nonlinear trajectories used as labels, a
-surrogate profile objective used for cheap differentiation, and the nonlinear
-likelihood required for a structural-posterior claim. Second, it integrates
-parameter-dependent DSGE solution, residual learning, bounded-parameter HMC,
-and explicit failure handling in a content-addressed workflow. Third, it turns
-publication claims into executable gates covering stochastic expectations,
-cross-language parity, untouched test accuracy, posterior fidelity, sampler
-diagnostics, and full computational accounting.
+The validation architecture has three components. It first distinguishes the
+nonlinear trajectories used as labels from the surrogate profile objective and
+the nonlinear likelihood required for a structural-posterior claim. It then
+integrates parameter-dependent solution, residual learning, bounded-parameter
+HMC, and explicit failure handling in a content-addressed workflow. Finally,
+it turns larger accuracy and efficiency claims into executable gates covering
+stochastic expectations, cross-language parity, untouched test accuracy,
+posterior fidelity, sampler diagnostics, and full computational accounting.
 
 The paper does not claim that endpoint correction or neural solution methods
 are new by themselves. Its narrow claim is that nonlinear DSGE surrogates can
-be made auditable enough to determine when they are safe and useful for
-estimation. The rest of the paper defines the estimands, describes the numerical
-workflow, proves the target-invariance statement used by the sampler, and
-reports the preserved engineering evidence before stating the confirmatory
-design and stopping rules.
+be audited well enough to distinguish established algorithmic parity from
+unproved posterior and speed claims. Section~2 defines the economic and
+statistical objects. Sections~3 and 4 describe the surrogate and the
+target-corrected sampler. Sections~5 and 6 give the validation design and
+evidence, and Sections~7 and 8 state the decision rules and limitations.
 
 \subsection{Relation to the literature}
 
@@ -485,7 +481,14 @@ attempted-case denominators and are stratified by prior-interior,
 posterior-region, and boundary-stress designs. Machine-readable evidence is the
 source of manuscript tables; hand-entered numerical cells are not permitted.
 
-\section{Preserved engineering pilot}
+\section{Computational evidence}
+
+The strongest current result is independent algorithmic parity on the complete
+23-equation model. Python and MacroModelling.jl agree on the non-stochastic
+core, the complete five-period stochastic scenario tree, and one nonlinear
+inversion-likelihood contribution. The same evidence also identifies the
+boundary of that result: the hard path fails at horizon six, and neither a
+multi-period likelihood nor a posterior has yet passed an independent gate.
 
 \input{generated/pilot_results.tex}
 
@@ -499,7 +502,7 @@ source of manuscript tables; hand-entered numerical cells are not permitted.
 
 \input{generated/gali_sep_likelihood_results.tex}
 
-The pilot establishes three narrow facts. The parser, parameter-specific
+Table~\ref{tab:pilot-results} establishes three narrow engineering facts. The parser, parameter-specific
 preflight, nonlinear equation solver, residual network, likelihood, and sampler
 compose on the full model. The order-zero extended-path targets satisfy a strict
 residual check in this small design. Finally, the Python and JAX implementations
@@ -514,7 +517,8 @@ percent acceptance, and processed 0.0267 draws per second. Those numbers are not
 convergence evidence and are not a speed advantage. The acceptance rate instead
 suggests that the static-HMC tuning is far from an efficient production regime.
 
-The first provenance-captured positive-order run is a useful negative result.
+Table~\ref{tab:stochastic-pilot} records a useful negative result from the first
+provenance-captured positive-order run.
 With branching order one, three quadrature nodes, and a ten-period planning
 horizon, only three of eight parameter designs completed all ten periods. Five
 designs---including the reference calibration---failed the nonlinear solve at
@@ -573,10 +577,11 @@ horizon, a likelihood surface over parameters, or a posterior.
 
 \section{Claim-specific decision rules}
 
-Table~\ref{tab:submission-gates} defines the minimum evidence needed to promote
-the working draft to a submission. Counts are protocol defaults, not universal
-publication standards; learning curves, uncertainty intervals, and reference
-convergence determine whether they are sufficient.
+Table~\ref{tab:submission-gates} defines the additional evidence needed to
+promote the present parity result into a production structural-posterior and
+speed claim. Counts are protocol defaults, not universal publication standards;
+learning curves, uncertainty intervals, and reference convergence determine
+whether they are sufficient.
 
 \input{tables/submission_gates.tex}
 
@@ -588,7 +593,7 @@ a missing observation or silently omitted path.
 
 \section{Limitations and interpretation}
 
-The preserved evidence is an engineering pilot. The earlier nonlinear targets
+The preserved computational evidence remains claim-scoped. The earlier nonlinear targets
 use branching order zero and one node, so they do not validate stochastic
 expectations. The later order-one, three-node evidence establishes target
 feasibility only through a five-period terminal horizon; first-step sensitivity
@@ -614,32 +619,40 @@ remain open. The current
 evidence therefore supports neither exact nonlinear posterior sampling nor an
 end-to-end speedup claim.
 
-These limitations determine the paper's next experiments rather than merely
-qualifying its conclusion. A credible methods result requires the two-parameter
-reference experiment to pass before scaling the posterior dimension. If the
-surrogate does not preserve the grid posterior, or if its full accounting does
-not improve ESS per second, the negative result should be reported and the claim
-reduced to numerical infrastructure.
+These limitations determine the next experiments rather than merely qualifying
+the conclusion. The present methods result is the validation architecture and
+the reduced-horizon parity evidence. A structural-posterior claim requires the
+two-parameter reference experiment to pass before the posterior dimension is
+increased. If the surrogate does not preserve the grid posterior, or if full
+accounting does not improve ESS per second, that negative result remains part
+of the evidence and the production claim fails.
 
 \section{Conclusion}
 
-Residual learning may be useful for nonlinear DSGE estimation because a
-first-order model provides a disciplined baseline and the network concentrates
-on the nonlinear discrepancy. Target-corrected HMC can remove error from the
-trajectory force, but only relative to the density evaluated at the Metropolis
-endpoints. The Gal\'i evidence now establishes order-one stochastic target
-construction across eight pilot path evaluations and seven unique parameter
-points at a five-period horizon. It also shows why that result is insufficient:
-outcomes still move with the
-terminal horizon, and the hard design fails at horizon six. Publication
-readiness therefore depends on terminal-horizon validation, an untouched test
-design, an independently converged nonlinear posterior reference,
-production-horizon likelihood parity, efficient multichain sampling, and
-same-work timing. The steady-state, first-order, and reduced five-period
-nonlinear-tree portions of the cross-language gate now pass on the full source,
-as does one nonlinear inversion-likelihood contribution.
-The protocol makes the remaining requirements falsifiable and preserves
-negative results rather than redefining success after a run.
+Residual learning is a plausible way to accelerate nonlinear DSGE estimation:
+the first-order model supplies a disciplined baseline, and the network learns
+only the nonlinear discrepancy. The statistical payoff, however, depends on
+the endpoint density rather than on the quality of the proposal force alone.
+The complete Gal\'i implementation passes independent steady-state,
+first-order, five-period nonlinear-tree, and one-transition likelihood gates.
+It also produces an informative negative result. Outcomes remain sensitive to
+the terminal horizon, and a difficult design fails at horizon six.
+
+The immediate implication is methodological. Cross-language parity should be
+established in layers before an expensive posterior run: core solution,
+nonlinear tree, likelihood contribution, multi-period recursion, and only then
+posterior and same-work timing. The first three layers pass here. The latter
+three remain open. This ordering makes the next claims falsifiable and keeps a
+failed accuracy or speed gate in the scientific record instead of redefining
+success after computation.
+
+\section*{Data and code availability}
+
+The replication package accompanying this draft contains the model source,
+validation programs, tests, frozen tolerances, raw numerical artifacts, and
+machine-generated manuscript tables. Each evidence builder verifies source and
+artifact hashes before emitting a table. The package README maps the archived
+results to the commands that rebuild them.
 
 \section*{Disclosure on computational assistance}
 

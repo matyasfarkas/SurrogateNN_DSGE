@@ -2,12 +2,15 @@
 
 ## Frozen claim
 
-The proposed contribution is an auditable nonlinear-DSGE estimation workflow
-that combines a first-order reduced-order model, a learned full-minus-reduced
-residual, and target-corrected Hamiltonian proposals. The generic endpoint
-Metropolis correction is prior art. The paper's contribution must come from the
-DSGE integration, numerical validation, posterior fidelity, and measured
-speed--accuracy tradeoff.
+The current conference-paper contribution is an auditable validation
+architecture for nonlinear-DSGE surrogates. It combines a first-order
+reduced-order model, a learned full-minus-reduced residual, and target-corrected
+Hamiltonian proposals, then separates solution, trajectory, likelihood,
+posterior, and timing claims into executable gates. The generic endpoint
+Metropolis correction is prior art. The evidence supports complete-model core
+parity, a reduced-horizon nonlinear tree, and one inversion-likelihood
+contribution. It does not support a production structural posterior or an
+end-to-end speed advantage.
 
 The deterministic order-zero pilots are not publication evidence, and their
 corrected target is still a surrogate profile inversion objective. A later
@@ -119,10 +122,15 @@ publication run with that flag cannot satisfy the clean-revision gate.
 
 ## Decision rule
 
-Proceed to journal submission only if Experiment A establishes nonlinear
-posterior fidelity and Experiment B establishes a meaningful computational
-advantage after full accounting. If correctness passes but speed does not,
-submit as a validation/infrastructure contribution only if that narrower claim
-is valuable for the chosen journal. If posterior fidelity fails, report the
-failure and redesign the surrogate; do not weaken the reference or remove hard
-cases post hoc.
+The conference working paper may be submitted as a validation-method result
+because its narrow claims are backed by clean, archived, cross-language
+evidence and its negative horizon result is reported explicitly. The title,
+abstract, introduction, and conclusion must exclude a production-posterior or
+speed claim.
+
+Proceed to a journal submission that claims posterior fidelity or computational
+advantage only if Experiment A establishes the former and Experiment B
+establishes the latter after full accounting. If correctness passes but speed
+does not, retain the validation/infrastructure framing. If posterior fidelity
+fails, report the failure and redesign the surrogate; do not weaken the
+reference or remove hard cases post hoc.
