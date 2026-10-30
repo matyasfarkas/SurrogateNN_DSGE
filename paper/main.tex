@@ -20,29 +20,27 @@
 
 \title{Auditable Residual Surrogates for Nonlinear DSGE Estimation}
 \author{Anonymous}
-\date{October 28, 2026}
+\date{October 29, 2026}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
 Nonlinear solution can dominate DSGE estimation, but a surrogate is useful
-only if it preserves the target. We develop an
-auditable residual-surrogate workflow: a neural network learns the gap between
-nonlinear stochastic extended-path trajectories and a parameter-specific
-first-order solution, while a Metropolis endpoint test preserves a separately
-declared density. In the complete 23-equation Gal\'i model, Python and
-MacroModelling.jl agree on the steady state, first-order solution, five-period
-nonlinear scenario tree, and one-transition likelihood contribution. The
-tree, expected-path, recovered-shock, Jacobian, and log-likelihood
-discrepancies are $6.40\times10^{-8}$, $6.50\times10^{-9}$,
-$8.30\times10^{-10}$, $9.49\times10^{-7}$, and $5.30\times10^{-5}$. All eight
-reduced-horizon paths solve, but a difficult calibration fails at horizon six
-and first-step outcomes remain horizon-sensitive. The evidence establishes
-reduced-horizon algorithmic parity, not a converged multi-period likelihood or
-posterior. The contribution is an executable validation architecture that
-separates trajectory accuracy, likelihood parity, posterior fidelity, and
-computational value.
+only if it preserves the target. We develop an auditable residual-surrogate
+workflow in which a neural network learns the gap between nonlinear stochastic
+extended-path trajectories and a parameter-specific first-order solution. In
+the complete 23-equation Gal\'i model, Python and MacroModelling.jl agree on the
+steady state, first-order solution, five-period nonlinear scenario tree, and
+one-transition likelihood contribution. All eight reduced-horizon paths solve,
+but a difficult calibration fails at horizon six. On a paper-matched
+Smets--Wouters benchmark, CPU and GPU log likelihoods differ by
+$3.87\times10^{-12}$ and all 36 gradient components by at most
+$5.43\times10^{-10}$. In the recorded software environments, the RTX 5090
+deployment nevertheless takes 1.47 seconds per steady gradient versus 0.080
+seconds on the CPU. The evidence establishes
+reduced-horizon algorithmic parity and an executable validation architecture,
+not a converged nonlinear posterior or GPU speed advantage.
 \end{abstract}
 
 \section{Introduction}
@@ -109,6 +107,16 @@ observation Jacobians within $9.49\times10^{-7}$, and log likelihoods within
 $5.30\times10^{-5}$. This reduced-horizon, one-transition result does not
 establish multi-period filtering or production-horizon trajectory and
 likelihood parity.
+
+An external empirical check reaches a different boundary. On the declared
+1960Q1--2004Q4 Smets--Wouters sample, the exact CPU and GPU likelihoods agree
+within $3.87\times10^{-12}$ and the largest 36-parameter gradient discrepancy is
+$5.43\times10^{-10}$. The GPU also matches an independent Dynare likelihood
+within $1.80\times10^{-11}$. Single-draw timing in the recorded environments
+does not favor the GPU: the
+steady exact gradient takes 1.47 seconds on an RTX 5090 D and 0.080 seconds on
+the Apple CPU. The empirical check validates the differentiable kernel but
+does not yet establish posterior convergence or effective-sample throughput.
 
 The validation architecture has three components. It first distinguishes the
 nonlinear trajectories used as labels from the surrogate profile objective and
@@ -500,6 +508,40 @@ method improves effective samples per second after offline target generation,
 training, compilation, transfers, and failed solves are included. A method can
 therefore pass the correctness gate and fail the computational-value gate.
 
+\subsection{External empirical validation on Smets--Wouters}
+
+The synthetic known-truth experiments are complemented by a paper-matched
+empirical benchmark based on the Smets--Wouters model studied by
+\citet{farkastatar2023}. This benchmark is external to surrogate training: it
+uses the seven published observables, the declared 1960Q1--2004Q4 sample, all 36
+estimated parameters, the archived Dynare bounds and prior families, and six
+presample periods. Both implementations solve the steady state at each
+parameter draw. A fixed-reference steady state cannot support either the
+parity or posterior claim.
+
+Validation is again layered. First, float64 CPU and GPU evaluations at common
+parameter vectors must agree in log likelihood and gradient. Second, four-chain
+GPU sampling must pass divergence, tree-depth, split-$\widehat R$, and ESS
+gates. Third, the original-mode posterior is compared with the published means
+and 5--95 percent intervals using prespecified normalized errors and interval
+membership. Finally, the calculation is repeated from the archived Dynare
+initialization and the prior means. This dispersed initialization check is
+necessary because \citet{farkastatar2023} find a second mode and emphasize that
+HMC cannot traverse well-separated modes by dynamics alone.
+
+The empirical benchmark validates the differentiable linear state-space and
+sampling stack; it does not by itself validate the nonlinear SEP/ResNN
+likelihood. Conversely, the nonlinear trajectory tests do not substitute for
+the SW07 posterior replication. The replication package therefore reports the
+two evidence layers separately and promotes a claim only when the relevant
+layer's machine-readable gates pass. One archival ambiguity remains explicit:
+the paper declares a 180-quarter sample, whereas the data file contains 230
+quarters and some archived command files specify \texttt{first\_obs=1}. The
+confirmatory implementation follows the declared sample and matches Dynare's
+fixed-point likelihood within $1.80\times10^{-11}$. This check resolves the
+kernel and sample mapping, but a new sample-matched Dynare posterior is still
+required before the archived posterior table is described as replicated.
+
 The protocol is frozen before confirmatory execution. It records the repository
 revision, dirty-worktree state, environment, command, seeds, hardware, precision,
 and content hashes for every evidence artifact. Numerical failures remain in
@@ -519,6 +561,8 @@ multi-period likelihood nor a posterior has yet passed an independent gate.
 \input{generated/pilot_results.tex}
 
 \input{generated/gpu_profile_results.tex}
+
+\input{generated/sw07_profile_results.tex}
 
 \input{generated/stochastic_pilot_results.tex}
 
@@ -559,6 +603,19 @@ They cannot identify peak memory, average utilization, or energy. The supplied
 continuous profiler records those quantities for the frozen confirmatory runs;
 no acceleration claim is made until repeated same-work baseline and treatment
 runs are available.
+
+Table~\ref{tab:sw07-cpu-gpu-profile} reports the first matched cross-device
+profile on the empirical SW07 likelihood. Numerical parity is tight: CPU and GPU
+log likelihoods differ by $3.87\times10^{-12}$, and the largest discrepancy
+across 36 gradient components is $5.43\times10^{-10}$. The timing result is less
+favorable to the GPU. It shortens gradient compilation by about 12 percent, but
+steady single-draw execution is 4.47 times slower for the likelihood and 18.5
+times slower for its gradient. The CPU and GPU runs use different recorded
+JAX/NumPyro versions, so this is an observational deployment comparison rather
+than a controlled hardware-only ablation. It rules out an acceleration claim
+for the tested deployment, not for GPUs generically. Vectorized-chain ESS per
+second is a separate gate and remains unreported until the sampling run passes
+convergence diagnostics.
 
 Table~\ref{tab:stochastic-pilot} records a useful negative result from the first
 provenance-captured positive-order run.

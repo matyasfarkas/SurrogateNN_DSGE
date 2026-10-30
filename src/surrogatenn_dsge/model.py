@@ -3459,6 +3459,24 @@ class MacroModel:
                 max_iter=max_iter,
                 line_search_min_step=line_search_min_step,
             )
+            if active_parameter_equation_indices:
+                equation_index_array = jnp.asarray(
+                    active_parameter_equation_indices,
+                    dtype=jnp.int32,
+                )
+                parameter_residual = jnp.asarray(
+                    self._parameter_equation_residual_jax_fn(
+                        *base_steady_state,
+                        *resolved_parameters,
+                    ),
+                    dtype=jnp.float64,
+                ).reshape(-1)[equation_index_array]
+                parameter_residual_norm = jnp.max(jnp.abs(parameter_residual))
+                parameter_converged = jnp.all(jnp.isfinite(parameter_residual)) & (
+                    parameter_residual_norm <= tol
+                )
+                converged = converged & parameter_converged
+                residual_norm = jnp.maximum(residual_norm, parameter_residual_norm)
         full = self._expand_to_full_steady_state_jax(base_steady_state)
         converged_python = _coerce_optional_python_bool(converged)
         if converged_python:

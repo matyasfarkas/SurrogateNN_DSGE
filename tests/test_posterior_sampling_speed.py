@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -149,6 +150,157 @@ def test_parse_args_accepts_gali3_preset() -> None:
 
     assert args.preset == "gali3_nk"
     assert args.parameters == "gali3_policy_7"
+
+
+def test_parse_args_configures_paper_matched_sw07_defaults() -> None:
+    module = _load_module()
+
+    args = module._parse_args(
+        ["--preset", "sw07_paper", "--sw07-data-mat", "usmodel_data.mat"]
+    )
+
+    assert args.parameters == "sw07_paper_36"
+    assert args.sw07_sample_start_index == 50
+    assert args.sw07_sample_periods == 180
+    assert args.presample_periods == 6
+    assert args.store_posterior_draws is False
+
+
+def test_parse_args_enables_raw_posterior_draw_storage() -> None:
+    module = _load_module()
+
+    args = module._parse_args(["--store-posterior-draws"])
+
+    assert args.store_posterior_draws is True
+
+
+def test_sw07_paper_spec_has_reference_target_for_every_estimand() -> None:
+    module = _load_module()
+
+    assert len(module.SW07_PAPER_PARAMETER_NAMES) == 36
+    assert set(module.SW07_PAPER_PARAMETER_NAMES) == set(
+        module.SW07_PAPER_REFERENCE_POSTERIOR
+    )
+
+
+def test_sw07_paper_model_recomputes_dynare_parameter_dependencies() -> None:
+    module = _load_module()
+    import jax
+    import surrogatenn_dsge as sdsge
+
+    jax.config.update("jax_enable_x64", True)
+    model = sdsge.parse_macro_model(
+        module.DEFAULT_SW07_PAPER_MODEL_SOURCE_PATH.read_text()
+    )
+    parameters = np.asarray(model.parameter_values, dtype=np.float64).copy()
+    parameter_index = {name: idx for idx, name in enumerate(model.parameter_names)}
+    for name, value, *_ in module.SW07_PAPER_PRIOR_SPECS:
+        parameters[parameter_index[name]] = value
+
+    numpy_result = sdsge.solve_steady_state(model, parameter_values=parameters)
+    numpy_parameters = dict(
+        zip(model.parameter_names, np.asarray(numpy_result.parameter_values))
+    )
+    truncated_result = sdsge.solve_steady_state_jax(
+        model,
+        parameter_values=parameters,
+        initial_guess=numpy_result.steady_state,
+        max_iter=2,
+    )
+    jax_result = sdsge.solve_steady_state_jax(
+        model,
+        parameter_values=parameters,
+        initial_guess=numpy_result.steady_state,
+        max_iter=20,
+    )
+
+    assert numpy_result.converged
+    assert bool(truncated_result.converged) is False
+    assert bool(jax_result.converged) is True
+    np.testing.assert_allclose(
+        np.asarray(jax_result.parameter_values),
+        np.asarray(numpy_result.parameter_values),
+        rtol=0,
+        atol=5.0e-12,
+    )
+    np.testing.assert_allclose(
+        numpy_parameters["cZcap"],
+        numpy_parameters["czcap"] / (1.0 - numpy_parameters["czcap"]),
+        rtol=0,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        numpy_parameters["cbetabar"],
+        numpy_parameters["cbeta"]
+        * numpy_parameters["cgamma"] ** (-numpy_parameters["csigma"]),
+        rtol=0,
+        atol=1.0e-12,
+    )
+
+
+@pytest.mark.parametrize("family", ["normal", "beta", "gamma", "inverse_gamma"])
+def test_dynare_prior_moment_conversion_recovers_declared_moments(family: str) -> None:
+    module = _load_module()
+    import numpyro.distributions as dist
+
+    mean, std = (0.5, 0.1) if family == "beta" else (0.6, 0.2)
+    parameters = module._distribution_parameters_from_moments(family, mean, std)
+    if family == "normal":
+        distribution = dist.Normal(parameters["loc"], parameters["scale"])
+    elif family == "beta":
+        distribution = dist.Beta(
+            parameters["concentration1"], parameters["concentration0"]
+        )
+    elif family == "gamma":
+        distribution = dist.Gamma(parameters["concentration"], parameters["rate"])
+    else:
+        distribution = dist.InverseGamma(
+            parameters["concentration"], parameters["rate"]
+        )
+
+    np.testing.assert_allclose(float(distribution.mean), mean, rtol=1e-6)
+    np.testing.assert_allclose(float(np.sqrt(distribution.variance)), std, rtol=1e-6)
+
+
+def test_sw07_paper_data_loader_selects_and_maps_requested_sample(tmp_path: Path) -> None:
+    module = _load_module()
+    from scipy.io import savemat
+
+    data_path = tmp_path / "usmodel_data.mat"
+    raw = {
+        key: np.arange(230, dtype=np.float64) + idx
+        for idx, key in enumerate(module.SW07_PAPER_DATA_KEYS)
+    }
+    savemat(data_path, raw)
+
+    observations, provenance = module._load_sw07_paper_observations(
+        data_path,
+        sample_start_index=50,
+        sample_periods=180,
+        expected_sha256="",
+    )
+
+    assert observations.shape == (7, 180)
+    np.testing.assert_allclose(observations[:, 0], np.arange(7) + 50)
+    assert provenance["declared_sample"] == "1960Q1--2004Q4"
+    assert provenance["observable_mapping"]["dw"] == "dwobs"
+
+
+def test_sw07_reference_comparison_is_exact_for_reference_summary() -> None:
+    module = _load_module()
+    summary = {
+        "parameters": {
+            name: {"mean": mean, "q05": q05, "q95": q95}
+            for name, (mean, q05, q95) in module.SW07_PAPER_REFERENCE_POSTERIOR.items()
+        }
+    }
+
+    comparison = module._sw07_reference_comparison(summary)
+
+    assert comparison["complete"] is True
+    assert comparison["max_normalized_mean_error"] == 0.0
+    assert comparison["posterior_means_inside_reference_90pct_count"] == 36
+    assert comparison["reference_means_inside_posterior_90pct_count"] == 36
 
 
 def test_parse_args_accepts_gpu_schur_qme_algorithm() -> None:

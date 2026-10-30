@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -20,6 +21,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PAYLOAD_PATH = ROOT / "benchmarks" / "results" / "test_payloads.json"
 DEFAULT_SW07_MODEL_SOURCE_PATH = ROOT / "benchmarks" / "model_sources" / "Smets_Wouters_2007_HLT.jl"
+DEFAULT_SW07_PAPER_MODEL_SOURCE_PATH = ROOT / "benchmarks" / "model_sources" / "Smets_Wouters_2007_linear.jl"
 DEFAULT_GALI3_MODEL_SOURCE_PATH = ROOT / "benchmarks" / "model_sources" / "Gali_3eq_linear.jl"
 DEFAULT_OUTPUT_PATH = ROOT / "benchmarks" / "results" / "posterior_sampling_speed.json"
 
@@ -86,6 +88,96 @@ SW07_SAFE_27_PARAMETERS = (
     "z_eqs",
     "z_ew",
 )
+
+# Exact estimand/prior block used by the archived Dynare SW07 specification
+# associated with Farkas and Tatar (2023).  Bounds are hard support restrictions;
+# the distribution parameters are stated as means and standard deviations, as in
+# Dynare's estimated_params block.  Keeping this specification executable avoids
+# silently substituting the narrow centered uniforms used by the throughput-only
+# SW07 benchmark.
+SW07_PAPER_PRIOR_SPECS: tuple[tuple[str, float, float, float, str, float, float], ...] = (
+    ("z_ea", 0.4618, 0.01, 3.0, "inverse_gamma", 0.1, 2.0),
+    ("z_eb", 0.1818513, 0.025, 5.0, "inverse_gamma", 0.1, 2.0),
+    ("z_eg", 0.6090, 0.01, 3.0, "inverse_gamma", 0.1, 2.0),
+    ("z_eqs", 0.46017, 0.01, 3.0, "inverse_gamma", 0.1, 2.0),
+    ("z_em", 0.2397, 0.01, 3.0, "inverse_gamma", 0.1, 2.0),
+    ("z_epinf", 0.1455, 0.01, 3.0, "inverse_gamma", 0.1, 2.0),
+    ("z_ew", 0.2089, 0.01, 3.0, "inverse_gamma", 0.1, 2.0),
+    ("crhoa", 0.9676, 0.01, 0.9999, "beta", 0.5, 0.20),
+    ("crhob", 0.2703, 0.01, 0.9999, "beta", 0.5, 0.20),
+    ("crhog", 0.9930, 0.01, 0.9999, "beta", 0.5, 0.20),
+    ("crhoqs", 0.5724, 0.01, 0.9999, "beta", 0.5, 0.20),
+    ("crhoms", 0.3, 0.01, 0.9999, "beta", 0.5, 0.20),
+    ("crhopinf", 0.8692, 0.01, 0.9999, "beta", 0.5, 0.20),
+    ("crhow", 0.9546, 0.001, 0.9999, "beta", 0.5, 0.20),
+    ("cmap", 0.7652, 0.01, 0.9999, "beta", 0.5, 0.20),
+    ("cmaw", 0.8936, 0.01, 0.9999, "beta", 0.5, 0.20),
+    ("csadjcost", 6.3325, 2.0, 15.0, "normal", 4.0, 1.5),
+    ("csigma", 1.2312, 0.25, 3.0, "normal", 1.50, 0.375),
+    ("chabb", 0.7205, 0.001, 0.99, "beta", 0.7, 0.1),
+    ("cprobw", 0.7937, 0.3, 0.95, "beta", 0.5, 0.1),
+    ("csigl", 2.8401, 0.25, 10.0, "normal", 2.0, 0.75),
+    ("cprobp", 0.7813, 0.5, 0.95, "beta", 0.5, 0.10),
+    ("cindw", 0.4425, 0.01, 0.99, "beta", 0.5, 0.15),
+    ("cindp", 0.3291, 0.01, 0.99, "beta", 0.5, 0.15),
+    ("czcap", 0.2648, 0.01, 1.0, "beta", 0.5, 0.15),
+    ("cfc", 1.4672, 1.0, 3.0, "normal", 1.25, 0.125),
+    ("crpi", 1.7985, 1.0, 3.0, "normal", 1.5, 0.25),
+    ("crr", 0.8258, 0.5, 0.975, "beta", 0.75, 0.10),
+    ("cry", 0.0893, 0.001, 0.5, "normal", 0.125, 0.05),
+    ("crdy", 0.2239, 0.001, 0.5, "normal", 0.125, 0.05),
+    ("constepinf", 0.7, 0.1, 2.0, "gamma", 0.625, 0.1),
+    ("constebeta", 0.7420, 0.01, 2.0, "gamma", 0.25, 0.1),
+    ("constelab", 1.2918, -10.0, 10.0, "normal", 0.0, 2.0),
+    ("ctrend", 0.3982, 0.1, 0.8, "normal", 0.4, 0.10),
+    ("cgy", 0.05, 0.01, 2.0, "normal", 0.5, 0.25),
+    ("calfa", 0.24, 0.01, 1.0, "normal", 0.3, 0.05),
+)
+SW07_PAPER_PARAMETER_NAMES = tuple(spec[0] for spec in SW07_PAPER_PRIOR_SPECS)
+SW07_PAPER_DATA_KEYS = ("dy", "dc", "dinve", "labobs", "pinfobs", "dw", "robs")
+SW07_PAPER_OBSERVABLES = ("dy", "dc", "dinve", "labobs", "pinfobs", "dwobs", "robs")
+SW07_PAPER_DATA_SHA256 = "35e09d915973e89442e50584f790f4859393219818c03ec8f2eead2b8a3c2050"
+
+# Table 5 of Farkas and Tatar (2023): posterior mean and 5/95 percentiles for
+# the original SW07 mode.  These are validation targets, not hard-coded results.
+SW07_PAPER_REFERENCE_POSTERIOR: dict[str, tuple[float, float, float]] = {
+    "csadjcost": (5.93, 4.38, 7.68),
+    "csigma": (1.41, 1.20, 1.66),
+    "chabb": (0.73, 0.65, 0.80),
+    "cprobw": (0.75, 0.67, 0.84),
+    "csigl": (2.10, 1.21, 3.02),
+    "cprobp": (0.65, 0.56, 0.73),
+    "cindw": (0.56, 0.35, 0.77),
+    "cindp": (0.24, 0.11, 0.38),
+    "czcap": (0.46, 0.30, 0.65),
+    "cfc": (1.65, 1.53, 1.79),
+    "crpi": (2.04, 1.77, 2.33),
+    "crr": (0.82, 0.77, 0.85),
+    "cry": (0.10, 0.07, 0.14),
+    "crdy": (0.21, 0.17, 0.25),
+    "constepinf": (0.67, 0.50, 0.86),
+    "constebeta": (0.13, 0.07, 0.22),
+    "constelab": (0.88, -0.68, 2.45),
+    "ctrend": (0.47, 0.43, 0.49),
+    "calfa": (0.21, 0.18, 0.23),
+    "z_ea": (0.48, 0.43, 0.52),
+    "z_eb": (0.24, 0.19, 0.28),
+    "z_eg": (0.52, 0.47, 0.57),
+    "z_eqs": (0.46, 0.38, 0.54),
+    "z_em": (0.23, 0.21, 0.25),
+    "z_epinf": (0.13, 0.10, 0.16),
+    "z_ew": (0.25, 0.21, 0.28),
+    "crhoa": (0.98, 0.97, 0.99),
+    "crhob": (0.27, 0.12, 0.48),
+    "crhog": (0.97, 0.96, 0.99),
+    "crhoqs": (0.69, 0.59, 0.78),
+    "crhoms": (0.17, 0.07, 0.28),
+    "crhopinf": (0.96, 0.92, 0.99),
+    "crhow": (0.97, 0.94, 0.99),
+    "cmap": (0.80, 0.66, 0.90),
+    "cmaw": (0.89, 0.82, 0.94),
+    "cgy": (0.57, 0.44, 0.70),
+}
 
 GALI3_POLICY_4_PARAMETERS = (
     "phi_pi",
@@ -276,6 +368,8 @@ def _select_parameter_names(model: Any, spec: str) -> tuple[str, ...]:
         names = SW07_SAFE_15_PARAMETERS
     elif spec == "sw07_safe_27":
         names = SW07_SAFE_27_PARAMETERS
+    elif spec == "sw07_paper_36":
+        names = SW07_PAPER_PARAMETER_NAMES
     elif spec == "gali3_policy_4":
         names = GALI3_POLICY_4_PARAMETERS
     elif spec == "gali3_policy_7":
@@ -352,6 +446,190 @@ def _make_centered_uniform_priors(
         initial_values[name] = center
         intervals[name] = (lower, upper)
     return priors, initial_values, intervals
+
+
+def _distribution_parameters_from_moments(
+    family: str,
+    mean: float,
+    std: float,
+) -> dict[str, float]:
+    """Convert Dynare mean/sd prior declarations to NumPyro parameters."""
+    if std <= 0.0:
+        raise ValueError(f"Prior standard deviation must be positive, got {std}.")
+    if family == "normal":
+        return {"loc": float(mean), "scale": float(std)}
+    if family == "beta":
+        concentration = mean * (1.0 - mean) / (std * std) - 1.0
+        if not 0.0 < mean < 1.0 or concentration <= 0.0:
+            raise ValueError(f"Invalid beta moments mean={mean}, std={std}.")
+        return {
+            "concentration1": float(mean * concentration),
+            "concentration0": float((1.0 - mean) * concentration),
+        }
+    if family == "gamma":
+        if mean <= 0.0:
+            raise ValueError(f"Gamma mean must be positive, got {mean}.")
+        return {
+            "concentration": float((mean / std) ** 2),
+            "rate": float(mean / (std * std)),
+        }
+    if family == "inverse_gamma":
+        if mean <= 0.0:
+            raise ValueError(f"Inverse-gamma mean must be positive, got {mean}.")
+        concentration = 2.0 + (mean / std) ** 2
+        return {
+            "concentration": float(concentration),
+            "rate": float(mean * (concentration - 1.0)),
+        }
+    raise ValueError(f"Unsupported prior family {family!r}.")
+
+
+def _bounded_prior_distribution(
+    dist: Any,
+    base_distribution: Any,
+    lower: float,
+    upper: float,
+) -> Any:
+    """Return a hard-bounded prior with the base density inside its support.
+
+    NumPyro does not provide a single truncation wrapper for every distribution
+    family used by Dynare.  The missing truncation normalizer is constant in the
+    sampled parameter, so this distribution defines exactly the same posterior
+    target while exposing interval support to HMC's unconstraining transform.
+    """
+
+    class _BoundedPrior(dist.Distribution):
+        arg_constraints: dict[str, Any] = {}
+        reparametrized_params: list[str] = []
+
+        def __init__(self) -> None:
+            self.base_distribution = base_distribution
+            self.lower = lower
+            self.upper = upper
+            super().__init__(
+                batch_shape=base_distribution.batch_shape,
+                event_shape=base_distribution.event_shape,
+            )
+
+        @property
+        def support(self) -> Any:
+            return dist.constraints.interval(self.lower, self.upper)
+
+        def sample(self, key: Any, sample_shape: tuple[int, ...] = ()) -> Any:
+            return dist.Uniform(self.lower, self.upper).sample(key, sample_shape)
+
+        def log_prob(self, value: Any) -> Any:
+            return self.base_distribution.log_prob(value)
+
+    return _BoundedPrior()
+
+
+def _make_sw07_paper_priors(
+    dist: Any,
+    *,
+    initialization: str,
+) -> tuple[dict[str, Any], dict[str, float], dict[str, tuple[float, float]], dict[str, Any]]:
+    if initialization not in {"dynare", "prior_mean"}:
+        raise ValueError("SW07 initialization must be 'dynare' or 'prior_mean'.")
+    priors: dict[str, Any] = {}
+    initial_values: dict[str, float] = {}
+    intervals: dict[str, tuple[float, float]] = {}
+    metadata: dict[str, Any] = {}
+    for name, dynare_initial, lower, upper, family, mean, std in SW07_PAPER_PRIOR_SPECS:
+        parameters = _distribution_parameters_from_moments(family, mean, std)
+        if family == "normal":
+            base = dist.Normal(parameters["loc"], parameters["scale"])
+        elif family == "beta":
+            base = dist.Beta(parameters["concentration1"], parameters["concentration0"])
+        elif family == "gamma":
+            base = dist.Gamma(parameters["concentration"], parameters["rate"])
+        elif family == "inverse_gamma":
+            base = dist.InverseGamma(parameters["concentration"], parameters["rate"])
+        else:  # pragma: no cover - protected by the conversion helper
+            raise AssertionError(family)
+        priors[name] = _bounded_prior_distribution(dist, base, lower, upper)
+        candidate = dynare_initial if initialization == "dynare" else mean
+        if not lower < candidate < upper:
+            raise ValueError(
+                f"Initialization {candidate} for {name} is outside ({lower}, {upper})."
+            )
+        initial_values[name] = float(candidate)
+        intervals[name] = (float(lower), float(upper))
+        metadata[name] = {
+            "family": family,
+            "mean": float(mean),
+            "std": float(std),
+            "lower": float(lower),
+            "upper": float(upper),
+            "dynare_initial": float(dynare_initial),
+            "distribution_parameters": parameters,
+        }
+    return priors, initial_values, intervals, metadata
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_sw07_paper_observations(
+    path: Path,
+    *,
+    sample_start_index: int,
+    sample_periods: int,
+    expected_sha256: str = SW07_PAPER_DATA_SHA256,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"SW07 data file not found: {path}. Pass the archived usmodel_data.mat "
+            "with --sw07-data-mat; the data are intentionally not bundled."
+        )
+    actual_sha256 = _sha256(path)
+    if expected_sha256 and actual_sha256 != expected_sha256:
+        raise ValueError(
+            "SW07 data fingerprint mismatch: "
+            f"expected {expected_sha256}, found {actual_sha256}."
+        )
+    if sample_start_index < 0 or sample_periods <= 0:
+        raise ValueError("SW07 sample_start_index must be nonnegative and sample_periods positive.")
+    from scipy.io import loadmat
+
+    raw = loadmat(path, squeeze_me=True)
+    series: list[np.ndarray] = []
+    full_lengths: dict[str, int] = {}
+    stop = sample_start_index + sample_periods
+    for key in SW07_PAPER_DATA_KEYS:
+        if key not in raw:
+            raise ValueError(f"SW07 data file is missing required series {key!r}.")
+        values = np.asarray(raw[key], dtype=np.float64).reshape(-1)
+        full_lengths[key] = int(values.size)
+        if values.size < stop:
+            raise ValueError(
+                f"SW07 series {key!r} has {values.size} rows; need at least {stop}."
+            )
+        selected = values[sample_start_index:stop]
+        if not np.all(np.isfinite(selected)):
+            raise ValueError(f"SW07 series {key!r} contains non-finite selected observations.")
+        series.append(selected)
+    if len(set(full_lengths.values())) != 1:
+        raise ValueError(f"SW07 series lengths disagree: {full_lengths}.")
+    observations = np.stack(series, axis=0)
+    provenance = {
+        "path": str(path.resolve()),
+        "sha256": actual_sha256,
+        "data_keys": list(SW07_PAPER_DATA_KEYS),
+        "observable_mapping": dict(zip(SW07_PAPER_DATA_KEYS, SW07_PAPER_OBSERVABLES)),
+        "full_lengths": full_lengths,
+        "sample_start_index_zero_based": int(sample_start_index),
+        "sample_periods": int(sample_periods),
+        "declared_sample": "1960Q1--2004Q4"
+        if sample_start_index == 50 and sample_periods == 180
+        else "custom",
+    }
+    return observations, provenance
 
 
 def _toy_payload(sdsge: Any, jax: Any, periods: int, seed: int) -> dict[str, Any]:
@@ -490,6 +768,56 @@ def _sw07_payload(args: argparse.Namespace, sdsge: Any) -> dict[str, Any]:
     }
 
 
+def _sw07_paper_payload(args: argparse.Namespace, sdsge: Any) -> dict[str, Any]:
+    model_source_path = (
+        DEFAULT_SW07_PAPER_MODEL_SOURCE_PATH
+        if Path(args.model_source) == DEFAULT_SW07_MODEL_SOURCE_PATH
+        else Path(args.model_source)
+    )
+    model = sdsge.parse_macro_model(model_source_path.read_text())
+    unknown = tuple(name for name in SW07_PAPER_PARAMETER_NAMES if name not in model.parameter_names)
+    if unknown:
+        raise ValueError("SW07 paper model is missing estimands: " + ", ".join(unknown))
+    base_parameter_overrides = {
+        name: float(initial)
+        for name, initial, _lower, _upper, _family, _mean, _std in SW07_PAPER_PRIOR_SPECS
+    }
+    theta = np.asarray(model.parameter_values, dtype=np.float64).copy()
+    parameter_index = {name: idx for idx, name in enumerate(model.parameter_names)}
+    for name, value in base_parameter_overrides.items():
+        theta[parameter_index[name]] = value
+    steady_state_result = sdsge.solve_steady_state(model, parameter_values=theta)
+    if not steady_state_result.converged:
+        raise RuntimeError(
+            "The paper-matched linear SW07 model did not solve at the archived initialization."
+        )
+    steady_state = np.asarray(steady_state_result.steady_state, dtype=np.float64)
+    if args.sw07_data_mat is None:
+        raise ValueError("--preset sw07_paper requires --sw07-data-mat.")
+    observations, provenance = _load_sw07_paper_observations(
+        Path(args.sw07_data_mat),
+        sample_start_index=int(args.sw07_sample_start_index),
+        sample_periods=int(args.sw07_sample_periods),
+    )
+    provenance["model_source_path"] = str(model_source_path.resolve())
+    provenance["model_source_sha256"] = _sha256(model_source_path)
+    return {
+        "model": model,
+        "steady_state": steady_state,
+        "observations": observations,
+        "observables": SW07_PAPER_OBSERVABLES,
+        "parameter_names": SW07_PAPER_PARAMETER_NAMES,
+        "base_parameter_overrides": base_parameter_overrides,
+        # The archived Dynare specification has neither measurement error nor
+        # an innovation-covariance ridge.  Keep both at exactly zero so the
+        # same-point likelihood is a genuine cross-implementation parity test.
+        "measurement_error_scale": 0.0,
+        "jitter": 0.0,
+        "data_provenance": provenance,
+        "prior_specification": "Farkas-Tatar-2023 archived Dynare estimated_params",
+    }
+
+
 def _build_dataset(args: argparse.Namespace, sdsge: Any, jax: Any) -> dict[str, Any]:
     if args.preset == "toy_ar2":
         return _toy_payload(sdsge, jax, int(args.periods), int(args.synthetic_seed))
@@ -497,6 +825,8 @@ def _build_dataset(args: argparse.Namespace, sdsge: Any, jax: Any) -> dict[str, 
         return _gali3_payload(args, sdsge, jax)
     if args.preset == "sw07_hlt":
         return _sw07_payload(args, sdsge)
+    if args.preset == "sw07_paper":
+        return _sw07_paper_payload(args, sdsge)
     raise ValueError(f"Unsupported preset {args.preset!r}.")
 
 
@@ -532,6 +862,9 @@ def _sample_summary(
         parameter_metrics[name] = {
             "mean": float(np.mean(flat)),
             "std": float(np.std(flat)),
+            "q05": float(np.quantile(flat, 0.05)),
+            "median": float(np.quantile(flat, 0.50)),
+            "q95": float(np.quantile(flat, 0.95)),
             "n_eff": ess,
             "r_hat": rhat,
             "shape": list(values.shape),
@@ -545,6 +878,60 @@ def _sample_summary(
         "min_ess": float(min(ess_values)) if ess_values else None,
         "mean_ess": float(statistics.mean(ess_values)) if ess_values else None,
         "max_r_hat": float(max(rhat_values)) if rhat_values else None,
+    }
+
+
+def _sw07_reference_comparison(sample_summary: Mapping[str, Any]) -> dict[str, Any]:
+    metrics = sample_summary.get("parameters", {})
+    missing = tuple(name for name in SW07_PAPER_PARAMETER_NAMES if name not in metrics)
+    if missing:
+        return {
+            "complete": False,
+            "missing_parameters": list(missing),
+            "parameters": {},
+        }
+    parameter_comparison: dict[str, Any] = {}
+    normalized_mean_errors: list[float] = []
+    posterior_means_inside: list[bool] = []
+    reference_means_inside: list[bool] = []
+    overlap_shares: list[float] = []
+    for name in SW07_PAPER_PARAMETER_NAMES:
+        reference_mean, reference_q05, reference_q95 = SW07_PAPER_REFERENCE_POSTERIOR[name]
+        posterior_mean = float(metrics[name]["mean"])
+        posterior_q05 = float(metrics[name]["q05"])
+        posterior_q95 = float(metrics[name]["q95"])
+        reference_width = reference_q95 - reference_q05
+        normalized_error = abs(posterior_mean - reference_mean) / reference_width
+        overlap = max(0.0, min(reference_q95, posterior_q95) - max(reference_q05, posterior_q05))
+        overlap_share = overlap / reference_width
+        posterior_mean_inside = reference_q05 <= posterior_mean <= reference_q95
+        reference_mean_inside = posterior_q05 <= reference_mean <= posterior_q95
+        normalized_mean_errors.append(normalized_error)
+        overlap_shares.append(overlap_share)
+        posterior_means_inside.append(posterior_mean_inside)
+        reference_means_inside.append(reference_mean_inside)
+        parameter_comparison[name] = {
+            "posterior_mean": posterior_mean,
+            "posterior_q05": posterior_q05,
+            "posterior_q95": posterior_q95,
+            "reference_mean": reference_mean,
+            "reference_q05": reference_q05,
+            "reference_q95": reference_q95,
+            "normalized_mean_error": float(normalized_error),
+            "reference_interval_overlap_share": float(overlap_share),
+            "posterior_mean_inside_reference_90pct": posterior_mean_inside,
+            "reference_mean_inside_posterior_90pct": reference_mean_inside,
+        }
+    return {
+        "complete": True,
+        "missing_parameters": [],
+        "parameters": parameter_comparison,
+        "median_normalized_mean_error": float(np.median(normalized_mean_errors)),
+        "max_normalized_mean_error": float(np.max(normalized_mean_errors)),
+        "mean_reference_interval_overlap_share": float(np.mean(overlap_shares)),
+        "posterior_means_inside_reference_90pct_count": int(sum(posterior_means_inside)),
+        "reference_means_inside_posterior_90pct_count": int(sum(reference_means_inside)),
+        "parameter_count": len(SW07_PAPER_PARAMETER_NAMES),
     }
 
 
@@ -713,7 +1100,7 @@ def _preflight_metrics(
     model: Any,
     observations: np.ndarray,
     observables: Sequence[str],
-    steady_state: np.ndarray,
+    steady_state: np.ndarray | None,
     parameter_values: np.ndarray,
     parameter_names: Sequence[str],
     measurement_error_scale: float,
@@ -724,11 +1111,19 @@ def _preflight_metrics(
     failure_value: float,
     parameters_are_resolved: bool,
     check_parameter_bounds: bool,
+    steady_state_initial_guess: np.ndarray | None = None,
+    presample_periods: int = 0,
+    initial_covariance_strategy: str = "theoretical",
+    steady_state_tol: float = 1.0e-12,
+    steady_state_max_iter: int = 200,
     log_fn: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     theta = jnp.asarray(parameter_values)
     obs = jnp.asarray(observations)
-    steady = jnp.asarray(steady_state)
+    steady = None if steady_state is None else jnp.asarray(steady_state)
+    steady_guess = (
+        None if steady_state_initial_guess is None else jnp.asarray(steady_state_initial_guess)
+    )
     value_fn = jax.jit(
         lambda current_theta: sdsge.kalman_loglikelihood_from_model_jax(
             model,
@@ -736,6 +1131,11 @@ def _preflight_metrics(
             observables=observables,
             parameter_values=current_theta,
             steady_state=steady,
+            steady_state_initial_guess=steady_guess,
+            steady_state_tol=steady_state_tol,
+            steady_state_max_iter=steady_state_max_iter,
+            initial_covariance_strategy=initial_covariance_strategy,
+            presample_periods=presample_periods,
             measurement_error_scale=measurement_error_scale,
             jitter=jitter,
             qme_algorithm=qme_algorithm,
@@ -813,24 +1213,33 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     with _logged_stage(args, "build benchmark dataset"):
         data = _build_dataset(args, sdsge, jax)
     model = data["model"]
-    steady_state = np.asarray(data["steady_state"], dtype=np_dtype)
+    reference_steady_state = np.asarray(data["steady_state"], dtype=np_dtype)
     observations = np.asarray(data["observations"], dtype=np_dtype)
     observables = tuple(data["observables"])
     parameter_names = tuple(data["parameter_names"])
-    raw_parameter_values = np.asarray(model.parameter_values, dtype=np.float64)
+    raw_parameter_values = np.asarray(model.parameter_values, dtype=np.float64).copy()
+    parameter_index = {name: idx for idx, name in enumerate(model.parameter_names)}
+    for name, value in data.get("base_parameter_overrides", {}).items():
+        raw_parameter_values[parameter_index[name]] = float(value)
     resolved_parameter_values = np.asarray(
         model.resolve_parameter_values(
             parameter_values=raw_parameter_values,
-            steady_state=np.asarray(data["steady_state"], dtype=np.float64),
+            steady_state=np.asarray(reference_steady_state, dtype=np.float64),
         ),
         dtype=np.float64,
     )
     parameter_values = (
         resolved_parameter_values if args.parameters_are_resolved else raw_parameter_values
     ).astype(np_dtype, copy=False)
+    likelihood_steady_state = (
+        reference_steady_state if args.steady_state_mode == "fixed" else None
+    )
+    steady_state_initial_guess = (
+        None if args.steady_state_mode == "fixed" else reference_steady_state
+    )
     static_equation_rows = (
         model._first_order_static_equation_rows_for_values(
-            steady_state=steady_state,
+            steady_state=reference_steady_state,
             parameter_values=parameter_values,
         )
         if not model.has_obc
@@ -843,14 +1252,21 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         f"observations={observations.shape}, parameters={parameter_names}",
     )
     with _logged_stage(args, "build priors"):
-        priors, initial_values, prior_intervals = _make_centered_uniform_priors(
-            dist,
-            model,
-            parameter_names,
-            parameter_values=parameter_values,
-            width_scale=float(args.prior_width_scale),
-            width_floor=float(args.prior_width_floor),
-        )
+        prior_metadata = None
+        if args.preset == "sw07_paper":
+            priors, initial_values, prior_intervals, prior_metadata = _make_sw07_paper_priors(
+                dist,
+                initialization=args.sw07_initialization,
+            )
+        else:
+            priors, initial_values, prior_intervals = _make_centered_uniform_priors(
+                dist,
+                model,
+                parameter_names,
+                parameter_values=parameter_values,
+                width_scale=float(args.prior_width_scale),
+                width_floor=float(args.prior_width_floor),
+            )
     from numpyro.infer import HMC, MCMC, NUTS, init_to_value
 
     with _logged_stage(args, "build NumPyro model and MCMC kernel"):
@@ -860,7 +1276,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             priors,
             observables=observables,
             base_parameter_values=parameter_values,
-            steady_state=steady_state,
+            steady_state=likelihood_steady_state,
+            steady_state_initial_guess=steady_state_initial_guess,
+            steady_state_tol=float(args.steady_state_tol),
+            steady_state_max_iter=int(args.steady_state_max_iter),
+            initial_covariance_strategy=args.initial_covariance_strategy,
+            presample_periods=int(args.presample_periods),
             measurement_error_scale=float(data["measurement_error_scale"]),
             jitter=float(data["jitter"]),
             on_failure_loglikelihood=float(args.failure_value),
@@ -901,7 +1322,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
 
     benchmark_info = {
         "preset": args.preset,
-        "case": args.case if args.preset == "sw07_hlt" else None,
+        "case": args.case if args.preset in {"sw07_hlt", "sw07_paper"} else None,
         "model_name": getattr(model, "name", None),
         "periods": int(observations.shape[1]),
         "n_observables": int(observations.shape[0]),
@@ -910,6 +1331,13 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "parameter_count": len(parameter_names),
         "parameter_names": list(parameter_names),
         "qme_algorithm": args.qme_algorithm,
+        "steady_state_mode": args.steady_state_mode,
+        "steady_state_tol": float(args.steady_state_tol),
+        "steady_state_max_iter": int(args.steady_state_max_iter),
+        "initial_covariance_strategy": args.initial_covariance_strategy,
+        "presample_periods": int(args.presample_periods),
+        "measurement_error_scale": float(data["measurement_error_scale"]),
+        "jitter": float(data["jitter"]),
         "dtype": args.dtype,
         "parameters_are_resolved": bool(args.parameters_are_resolved),
         "check_parameter_bounds": not bool(args.skip_parameter_bounds),
@@ -934,6 +1362,11 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "target_accept_prob": float(args.target_accept_prob),
         "max_tree_depth": int(args.max_tree_depth),
         "prior_intervals": prior_intervals,
+        "prior_metadata": prior_metadata,
+        "sw07_initialization": args.sw07_initialization if args.preset == "sw07_paper" else None,
+        "data_provenance": data.get("data_provenance"),
+        "prior_specification": data.get("prior_specification", "centered uniform stress prior"),
+        "store_posterior_draws": bool(args.store_posterior_draws),
     }
 
     preflight = None
@@ -946,7 +1379,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 model=model,
                 observations=observations,
                 observables=observables,
-                steady_state=steady_state,
+                steady_state=likelihood_steady_state,
+                steady_state_initial_guess=steady_state_initial_guess,
                 parameter_values=parameter_values,
                 parameter_names=parameter_names,
                 measurement_error_scale=float(data["measurement_error_scale"]),
@@ -957,6 +1391,10 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 failure_value=float(args.failure_value),
                 parameters_are_resolved=bool(args.parameters_are_resolved),
                 check_parameter_bounds=not bool(args.skip_parameter_bounds),
+                presample_periods=int(args.presample_periods),
+                initial_covariance_strategy=args.initial_covariance_strategy,
+                steady_state_tol=float(args.steady_state_tol),
+                steady_state_max_iter=int(args.steady_state_max_iter),
                 log_fn=lambda message: _log(args, message),
             )
             _log(
@@ -977,6 +1415,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             "posterior_diagnostics": None,
             "extra_fields": None,
             "schur_support_audit": None,
+            "sw07_reference_comparison": None,
+            "posterior_draws": None,
         }
 
     _log(
@@ -999,6 +1439,14 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     sampling_wall_s = time.perf_counter() - start
     with _logged_stage(args, "posterior diagnostics"):
         sample_summary = _sample_summary(samples_by_chain, parameter_names)
+    posterior_draws = (
+        {
+            name: np.asarray(samples_by_chain[name], dtype=np.float64).tolist()
+            for name in parameter_names
+        }
+        if args.store_posterior_draws
+        else None
+    )
     post_warmup_draws = int(args.samples) * int(args.chains)
     min_ess = sample_summary["min_ess"]
     mean_ess = sample_summary["mean_ess"]
@@ -1030,7 +1478,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 model=model,
                 observations=np.asarray(observations, dtype=np.float64),
                 observables=observables,
-                steady_state=np.asarray(steady_state, dtype=np.float64),
+                steady_state=np.asarray(reference_steady_state, dtype=np.float64),
                 samples_by_chain=samples_by_chain,
                 parameter_names=parameter_names,
                 base_parameter_values=np.asarray(parameter_values, dtype=np.float64),
@@ -1049,6 +1497,12 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 f"{support_audit['doubling_accepts_non_unique_count']}",
             )
 
+    reference_comparison = (
+        _sw07_reference_comparison(sample_summary)
+        if args.preset == "sw07_paper"
+        else None
+    )
+
     _log(args, f"throughput summary: {json.dumps(throughput, sort_keys=True, default=_json_default)}")
 
     return {
@@ -1059,6 +1513,8 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         "posterior_diagnostics": sample_summary,
         "extra_fields": _extra_field_summary(extra_fields),
         "schur_support_audit": support_audit,
+        "sw07_reference_comparison": reference_comparison,
+        "posterior_draws": posterior_draws,
     }
 
 
@@ -1071,7 +1527,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--preset",
-        choices=("toy_ar2", "gali3_nk", "sw07_hlt"),
+        choices=("toy_ar2", "gali3_nk", "sw07_hlt", "sw07_paper"),
         default="sw07_hlt",
     )
     parser.add_argument("--payload-path", type=Path, default=DEFAULT_PAYLOAD_PATH)
@@ -1082,7 +1538,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default="sw07_safe_15",
         help=(
             "Parameter subset. Supports comma-separated names, all, sw07_safe_15, "
-            "sw07_safe_27, gali3_policy_4, gali3_policy_7, gali3_all_stable, "
+            "sw07_safe_27, sw07_paper_36, gali3_policy_4, gali3_policy_7, gali3_all_stable, "
             "and named package parameter sets such as phase1_18params_narrow. "
             "For --preset gali3_nk, the default sw07_safe_15 is interpreted as "
             "gali3_policy_4 for convenience."
@@ -1092,6 +1548,44 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--synthetic-seed", type=int, default=20260712)
     parser.add_argument("--prior-width-scale", type=float, default=0.0025)
     parser.add_argument("--prior-width-floor", type=float, default=1.0e-4)
+    parser.add_argument(
+        "--sw07-data-mat",
+        type=Path,
+        default=None,
+        help="Archived Dynare usmodel_data.mat required by --preset sw07_paper.",
+    )
+    parser.add_argument(
+        "--sw07-sample-start-index",
+        type=int,
+        default=50,
+        help="Zero-based first row; 50 selects 1960Q1 from the 1947Q3 archive.",
+    )
+    parser.add_argument("--sw07-sample-periods", type=int, default=180)
+    parser.add_argument(
+        "--sw07-initialization",
+        choices=("dynare", "prior_mean"),
+        default="dynare",
+        help="Initialization basin for the empirical SW07 run.",
+    )
+    parser.add_argument(
+        "--steady-state-mode",
+        choices=("fixed", "solve"),
+        default="fixed",
+        help="Use the reference steady state or solve it at every parameter draw.",
+    )
+    parser.add_argument("--steady-state-tol", type=float, default=1.0e-12)
+    parser.add_argument("--steady-state-max-iter", type=int, default=200)
+    parser.add_argument(
+        "--initial-covariance-strategy",
+        choices=("theoretical", "diagonal"),
+        default="theoretical",
+    )
+    parser.add_argument(
+        "--presample-periods",
+        type=int,
+        default=None,
+        help="Likelihood presample periods; defaults to 6 for sw07_paper and 0 otherwise.",
+    )
     parser.add_argument("--warmup", type=int, default=16)
     parser.add_argument("--samples", type=int, default=16)
     parser.add_argument("--chains", type=int, default=1)
@@ -1137,6 +1631,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-tree-depth", type=int, default=8)
     parser.add_argument("--dense-mass", action="store_true")
     parser.add_argument("--progress-bar", action="store_true")
+    parser.add_argument(
+        "--store-posterior-draws",
+        action="store_true",
+        help=(
+            "Store chain-by-draw parameter arrays in the JSON artifact so diagnostics "
+            "and posterior summaries can be independently recomputed."
+        ),
+    )
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument(
         "--preflight-only",
@@ -1183,6 +1685,18 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.set_defaults(suppress_dtype_warnings=True)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
     args = parser.parse_args(argv)
+    if args.presample_periods is None:
+        args.presample_periods = 6 if args.preset == "sw07_paper" else 0
+    if args.preset == "sw07_paper" and args.parameters not in {
+        "sw07_safe_15",
+        "sw07_paper_36",
+    }:
+        raise ValueError(
+            "--preset sw07_paper always estimates the published 36-parameter block; "
+            "do not combine it with a custom --parameters selection."
+        )
+    if args.preset == "sw07_paper":
+        args.parameters = "sw07_paper_36"
     if args.preflight_only:
         args.preflight = True
     return args
